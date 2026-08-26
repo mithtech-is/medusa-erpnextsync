@@ -1,5 +1,8 @@
 import { Module, MedusaService } from "@medusajs/framework/utils"
-import { createInventoryItemsWorkflow } from "@medusajs/medusa/core-flows"
+import {
+    createInventoryItemsWorkflow,
+    updateProductVariantsWorkflow,
+} from "@medusajs/medusa/core-flows"
 import crypto from "crypto"
 import { ErpnextSyncEvent } from "./models/sync-event"
 import { ErpnextSetting } from "./models/setting"
@@ -561,6 +564,30 @@ class ErpnextModuleService extends MedusaService({
                     currency: data?.currency ?? null,
                     status: data?.status ?? null,
                 })
+            case "order.returned":
+                return this._mergeOrderMeta(scope, data?.medusa_order_id, "return", {
+                    status: data?.status ?? null,
+                    items: data?.items ?? [],
+                    return_against: data?.return_against ?? null,
+                    received_at: data?.received_at ?? null,
+                })
+            case "order.refunded":
+                return this._mergeOrderMeta(scope, data?.medusa_order_id, "refund", {
+                    credit_note: data?.credit_note ?? null,
+                    amount: data?.amount ?? null,
+                    date: data?.date ?? null,
+                    currency: data?.currency ?? null,
+                    status: data?.status ?? null,
+                    reason: data?.reason ?? null,
+                })
+
+            // ── Pricing + B2B (ERPNext → Medusa) ────────────────────
+            case "variant.price.set":
+                return this._handleVariantPrice(scope, data)
+            case "variant.meta.set":
+                return this._handleVariantMeta(scope, data)
+            case "customer.group.set":
+                return this._handleCustomerGroup(scope, data)
 
             // ── Customer events ─────────────────────────────────────
             case "customer.created":
@@ -852,6 +879,111 @@ class ErpnextModuleService extends MedusaService({
         const metadata = { ...(order.metadata || {}), [key]: value }
         await orderSvc.updateOrders([{ id, metadata }])
         return { ok: true, order_id: id, key }
+    }
+
+    /**
+     * Pricing (ERPNext → Medusa, ERPNext wins): set/overwrite a variant's
+     * price for one currency. Amounts arrive in rupees (major) and are stored
+     * in minor units (paise), matching this store's price convention. A
+     * deleted price / expired validity clears it so no stale rate shows.
+     */
+    private async _handleVariantPrice(scope: any, data: any): Promise<any> {
+        if (!scope) return { skipped: true, reason: "no_scope" }
+        const sku = String(data?.sku ?? "").trim()
+        if (!sku) return { skipped: true, reason: "missing sku" }
+        const productSvc: any = scope.resolve("product")
+        const [variant] = await productSvc.listProductVariants({ sku }, { take: 1 })
+        if (!variant) return { skipped: true, reason: `no variant for sku ${sku}` }
+        const currency = String(data?.currency ?? "inr").toLowerCase()
+        // Expired / soft-deleted price → clear it (no stale rate on the store).
+        const nowMs = new Date().getTime()
+        const validTo = data?.valid_upto ? new Date(data.valid_upto).getTime() : null
+        const expired = validTo != null && !Number.isNaN(validTo) && validTo < nowMs
+        const clear = !!data?.deleted || expired || data?.amount == null
+        const amountMinor = clear
+            ? null
+            : Math.round((Number(data.amount) || 0) * 100)
+        // A variant created via the service call (not the product workflow) has
+        // no price set, and the update workflow can't update prices that don't
+        // exist. So create + link a price set the first time (same pattern as
+        // the inventory item), then use the workflow for subsequent updates.
+        const query: any = scope.resolve("query")
+        const { data: vrows } = await query.graph({
+            entity: "variant",
+            fields: ["id", "price_set.id"],
+            filters: { id: variant.id },
+        } as any)
+        const priceSetId = vrows?.[0]?.price_set?.id
+        if (!priceSetId) {
+            if (clear) return { ok: true, skipped: true, reason: "no price to clear" }
+            const pricingSvc: any = scope.resolve("pricing")
+            const [ps] = await pricingSvc.createPriceSets([
+                { prices: [{ amount: amountMinor, currency_code: currency }] },
+            ])
+            const link: any = scope.resolve("link")
+            await link.create({
+                product: { variant_id: variant.id },
+                pricing: { price_set_id: ps.id },
+            })
+            return { ok: true, sku, amount_minor: amountMinor, currency, created: true }
+        }
+        await updateProductVariantsWorkflow(scope).run({
+            input: {
+                product_variants: [
+                    { id: variant.id, prices: clear ? [] : [{ amount: amountMinor, currency_code: currency }] },
+                ] as any,
+            },
+        })
+        return { ok: true, sku, amount_minor: amountMinor, currency, cleared: clear }
+    }
+
+    /** MOQ / other commerce metadata → merge into variant.metadata. */
+    private async _handleVariantMeta(scope: any, data: any): Promise<any> {
+        if (!scope) return { skipped: true, reason: "no_scope" }
+        const sku = String(data?.sku ?? "").trim()
+        if (!sku) return { skipped: true, reason: "missing sku" }
+        const productSvc: any = scope.resolve("product")
+        const [variant] = await productSvc.listProductVariants(
+            { sku },
+            { take: 1, select: ["id", "metadata"] },
+        )
+        if (!variant) return { skipped: true, reason: `no variant for sku ${sku}` }
+        const patch: Record<string, any> = {}
+        if (data?.moq != null) patch.moq = Number(data.moq)
+        if (data?.pack_size != null) patch.pack_size = Number(data.pack_size)
+        await productSvc.updateProductVariants(variant.id, {
+            metadata: { ...(variant.metadata || {}), ...patch },
+        })
+        return { ok: true, sku, metadata: patch }
+    }
+
+    /** B2B: ensure a Medusa customer group by name and add the customer to it. */
+    private async _handleCustomerGroup(scope: any, data: any): Promise<any> {
+        if (!scope) return { skipped: true, reason: "no_scope" }
+        const groupName = String(data?.group ?? "").trim()
+        if (!groupName) return { skipped: true, reason: "no group" }
+        const custSvc: any = scope.resolve("customer")
+        let customer: any = null
+        const id = String(data?.medusa_customer_id ?? "").trim()
+        if (id) [customer] = await custSvc.listCustomers({ id }, { take: 1 })
+        const email = String(data?.email ?? "").toLowerCase()
+        if (!customer && email)
+            [customer] = await custSvc.listCustomers({ email }, { take: 1 })
+        if (!customer) return { skipped: true, reason: "no customer" }
+        let [group] = await custSvc.listCustomerGroups({ name: groupName }, { take: 1 })
+        if (!group) {
+            const [g] = await custSvc.createCustomerGroups([{ name: groupName }])
+            group = g
+        }
+        try {
+            await custSvc.addCustomerToGroup({
+                customer_id: customer.id,
+                customer_group_id: group.id,
+            })
+        } catch {
+            /* already a member — idempotent */
+        }
+        return { ok: true, customer: customer.id, group: group.id, name: groupName }
     }
 
     private async _handleInventoryLevelSet(
@@ -1630,7 +1762,7 @@ class ErpnextModuleService extends MedusaService({
      * Re-attempt a previously failed (or skipped) event. Replays the
      * stored payload — see route doc for why we don't re-fetch.
      */
-    async retryEvent(eventId: string): Promise<ForwardResult> {
+    async retryEvent(eventId: string, scope?: any): Promise<ForwardResult> {
         const [row] = await this.listErpnextSyncEvents(
             { event_id: eventId },
             { take: 1 },
@@ -1640,6 +1772,52 @@ class ErpnextModuleService extends MedusaService({
                 ok: false,
                 status: "failed",
                 error: `no row for event_id=${eventId}`,
+            }
+        }
+        // Defect B: an inbound row must be RE-APPLIED via the inbound
+        // dispatcher — never pushed back outbound (which is what forwardEvent
+        // does). Needs a request/cron scope to resolve the target modules.
+        if (row.direction === "inbound") {
+            if (!scope) {
+                return {
+                    ok: false,
+                    status: "failed",
+                    error: "inbound event retry needs a request scope",
+                }
+            }
+            try {
+                const result = await this.dispatchInbound(
+                    row.event,
+                    row.payload,
+                    row.event_id,
+                    scope,
+                )
+                void result
+                return { ok: true, status: "success" }
+            } catch (err: any) {
+                return {
+                    ok: false,
+                    status: "failed",
+                    error: describeError(err),
+                }
+            }
+        }
+        // Defect A: an outbound row created by a MAPPING must replay through
+        // that same mapping (field transform + Sales-Order augmentation), not
+        // the legacy full-payload forwardEvent path (wrong Frappe method, no
+        // transform) — which would silently write the wrong shape.
+        if (row.mapping_id) {
+            const [mapping] = await this.listErpnextMappings(
+                { id: row.mapping_id },
+                { take: 1 },
+            )
+            if (mapping) {
+                return this.pushViaMapping({
+                    mapping,
+                    event: row.event,
+                    event_id: row.event_id,
+                    record: row.payload,
+                })
             }
         }
         return this.forwardEvent({

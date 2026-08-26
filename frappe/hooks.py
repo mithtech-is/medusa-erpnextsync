@@ -43,6 +43,18 @@ doc_events = {
 		"on_submit": "medusync.handlers.risitex.reverse.on_sales_invoice",
 		"on_cancel": "medusync.handlers.risitex.reverse.on_sales_invoice",
 	},
+	"Item Price": {
+		"after_insert": "medusync.handlers.risitex.pricing.on_item_price",
+		"on_update": "medusync.handlers.risitex.pricing.on_item_price",
+		"on_trash": "medusync.handlers.risitex.pricing.on_item_price",
+	},
+	"Item": {
+		"on_update": "medusync.handlers.risitex.pricing.on_item",
+	},
+	"Customer": {
+		"after_insert": "medusync.handlers.risitex.pricing.on_customer_group_link",
+		"on_update": "medusync.handlers.risitex.pricing.on_customer_group_link",
+	},
 	"Medusync Mapping": {
 		"on_update": "medusync.config.clear_mapping_cache",
 		"on_trash": "medusync.config.clear_mapping_cache",

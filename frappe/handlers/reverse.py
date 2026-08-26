@@ -1,6 +1,6 @@
 # Post-order reverse path: ERPNext -> Medusa order metadata.
-# Delivery Note -> fulfilment, Shipment -> tracking, Sales Invoice -> invoice.
-# All delivered via the existing signed outbound pipe.
+# Delivery Note -> fulfilment (or RETURN receipt if is_return),
+# Shipment -> tracking, Sales Invoice -> invoice (or REFUND/credit note if is_return).
 import hashlib
 import json
 
@@ -32,19 +32,40 @@ def _guard():
     return not frappe.flags.get("medusync_inbound") and config.is_enabled()
 
 
+def _so_from_dn(doc):
+    for it in (doc.items or []):
+        if it.get("against_sales_order"):
+            return it.against_sales_order
+    if doc.get("return_against"):
+        rows = frappe.get_all(
+            "Delivery Note Item",
+            filters={"parent": doc.return_against, "against_sales_order": ["!=", ""]},
+            fields=["against_sales_order"], limit=1,
+        )
+        if rows:
+            return rows[0].against_sales_order
+    return None
+
+
 def on_delivery_note(doc, method=None):
     try:
         if not _guard():
             return
-        so = None
-        for it in (doc.items or []):
-            if it.get("against_sales_order"):
-                so = it.against_sales_order
-                break
-        oid = _order_id_from_so(so)
+        oid = _order_id_from_so(_so_from_dn(doc))
         if not oid:
             return
         cancelled = method == "on_cancel" or getattr(doc, "docstatus", 0) == 2
+        if doc.get("is_return"):
+            # Return RECEIPT. Stock restore flows automatically via the inventory
+            # SLE hook (the return DN increments Bin.actual_qty on submit).
+            payload = {
+                "status": "cancelled" if cancelled else "received",
+                "items": [{"sku": it.item_code, "qty": abs(float(it.qty or 0))} for it in (doc.items or [])],
+                "return_against": doc.get("return_against"),
+                "received_at": str(doc.get("posting_date") or ""),
+            }
+            _deliver("order.returned", oid, payload, "%s-%s" % (doc.name, method), "Delivery Note", doc.name)
+            return
         payload = {
             "status": "cancelled" if cancelled else "dispatched",
             "items": [{"sku": it.item_code, "qty": it.qty} for it in (doc.items or [])],
@@ -107,10 +128,19 @@ def on_sales_invoice(doc, method=None):
         if not oid:
             return
         cancelled = method == "on_cancel" or getattr(doc, "docstatus", 0) == 2
-        if cancelled:
-            status = "Cancelled"
-        else:
-            status = "Paid" if float(doc.get("outstanding_amount") or 0) <= 0 else "Unpaid"
+        if doc.get("is_return"):
+            # Credit Note -> refund record (no money moved).
+            payload = {
+                "credit_note": doc.name,
+                "amount": abs(float(doc.get("grand_total") or 0)),
+                "date": str(doc.get("posting_date") or ""),
+                "currency": doc.get("currency"),
+                "status": "Cancelled" if cancelled else "Credited",
+                "reason": doc.get("remarks") or None,
+            }
+            _deliver("order.refunded", oid, payload, "%s-%s" % (doc.name, method), "Sales Invoice", doc.name)
+            return
+        status = "Cancelled" if cancelled else ("Paid" if float(doc.get("outstanding_amount") or 0) <= 0 else "Unpaid")
         payload = {
             "invoice_number": doc.name,
             "invoice_date": str(doc.get("posting_date") or ""),
@@ -121,3 +151,41 @@ def on_sales_invoice(doc, method=None):
         _deliver("order.invoiced", oid, payload, "%s-%s" % (doc.name, method), "Sales Invoice", doc.name)
     except Exception:
         frappe.log_error(title="medusync reverse SI hook failed", message=frappe.get_traceback())
+
+
+def create_pending_return(medusa_order_id, items):
+    """Medusa customer return request -> a DRAFT return Delivery Note in ERPNext.
+    Draft => zero stock impact; ops submits on physical receipt (which fires
+    on_delivery_note -> order.returned + restores stock). The receipt gate.
+    `items` = [{sku, qty, reason}]. Idempotent by medusa_order_id (skip if a
+    draft return already pending)."""
+    from erpnext.stock.doctype.delivery_note.delivery_note import make_sales_return as dn_return
+    so = frappe.db.get_value("Sales Order", {"medusa_order_id": medusa_order_id}, "name")
+    if not so:
+        return {"skipped": True, "reason": "no Sales Order for %s" % medusa_order_id}
+    dn = frappe.db.get_value(
+        "Delivery Note Item", {"against_sales_order": so, "docstatus": 1}, "parent"
+    )
+    if not dn:
+        return {"skipped": True, "reason": "no submitted Delivery Note for SO %s" % so}
+    existing = frappe.db.get_value(
+        "Delivery Note", {"return_against": dn, "is_return": 1, "docstatus": 0}, "name"
+    )
+    if existing:
+        return {"ok": True, "return_dn": existing, "status": "already pending"}
+    want = {str(i.get("sku")): float(i.get("qty") or 0) for i in (items or [])}
+    rdn = dn_return(dn)
+    # Force every return line negative (qty AND stock_qty), then narrow to the
+    # requested skus/qtys. ERPNext validates that return docs are negative.
+    for row in rdn.items:
+        cf = row.get("conversion_factor") or 1
+        req = want.get(row.item_code)
+        row.qty = -abs(req) if req else -abs(row.qty or 0)
+        row.stock_qty = row.qty * cf
+    if want:
+        kept = [r for r in rdn.items if r.item_code in want]
+        if kept:
+            rdn.items = kept
+    rdn.insert(ignore_permissions=True)  # DRAFT (not submitted) -> no stock impact
+    frappe.db.commit()
+    return {"ok": True, "return_dn": rdn.name, "status": "draft (pending receipt)"}
