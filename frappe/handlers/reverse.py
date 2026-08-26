@@ -189,3 +189,55 @@ def create_pending_return(medusa_order_id, items):
     rdn.insert(ignore_permissions=True)  # DRAFT (not submitted) -> no stock impact
     frappe.db.commit()
     return {"ok": True, "return_dn": rdn.name, "status": "draft (pending receipt)"}
+
+
+# ── Inbound: Medusa customer return REQUEST -> DRAFT return DN ──────────
+# Registered into the handler registry (see handlers/risitex/__init__.py)
+# so it arrives through medusync.api.receive with the full transport
+# hardening (HMAC + replay window + idempotency + Medusync Log row).
+# This is the last-mile trigger: the Medusa admin "request return" route
+# POSTs event ; here we turn it into a DRAFT
+# return Delivery Note (zero stock impact) awaiting warehouse receipt.
+def handle_return_requested(payload, *, event_id=""):
+	"""Envelope: {"medusa_order_id": "...", "items": [{"sku","qty","reason"}]}.
+	Returns a dict the api._result_* closers understand (name -> the return
+	DN so the audit row links it; status -> Success/Skipped)."""
+	oid = payload.get("medusa_order_id") or payload.get("order_id")
+	items = payload.get("items") or []
+	if not oid:
+		return {"status": "skipped", "reason": "no_medusa_order_id"}
+	# The handler-driven receive() path dispatches as Guest (the endpoint is
+	# allow_guest, authed by HMAC), and receive() -- unlike receive_mapped --
+	# does not elevate. Reading Delivery Note and running make_sales_return
+	# need real permissions, so elevate here (restored in finally).
+	_prev_user = frappe.session.user
+	frappe.set_user("Administrator")
+	try:
+		res = create_pending_return(oid, items)
+	except frappe.ValidationError as exc:
+		# Permanent business rejection (e.g. StockOverReturnError -- nothing
+		# left to return, or over-qty). Retrying will never succeed, so do
+		# NOT let it become a 5xx (which tells Medusa to retry). Roll back and
+		# report a clean skip carrying the ERPNext reason for the admin.
+		frappe.db.rollback()
+		return {"status": "skipped", "reason": str(exc), "order_id": oid}
+	finally:
+		frappe.set_user(_prev_user)
+	# create_pending_return skips (200, not an error) when nothing has
+	# shipped yet or no SO exists — surface that verbatim so the admin sees
+	# WHY, rather than a silent success.
+	# NB: deliberately avoid the keys api._result_name treats as a docname
+	# (name / customer / sale / medusa_id / ...). The handler-driven receive()
+	# path inserts the Medusync Log row with document_type=None, so setting
+	# document_name (a Dynamic Link) would fail validation ("Document Type
+	# must be set first"). We keep the return DN in  (non-magic),
+	# which still travels back to Medusa in the response .
+	if res.get("skipped"):
+		return {"status": "skipped", "reason": res.get("reason"), "order_id": oid}
+	return {
+		"status": "created",
+		"action": "created",
+		"return_dn": res.get("return_dn"),
+		"detail": res.get("status"),
+		"order_id": oid,
+	}

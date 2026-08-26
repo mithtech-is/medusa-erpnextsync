@@ -77,6 +77,25 @@ Item `min_order_qty` → `variant.meta.set`; Customer group link →
 `customer.group.set`. Setup: `frappe/pricing_setup.sh`,
 `frappe/pricing_patch_hooks.py`. (See `PRICING_B2B_DESIGN.md`.)
 
+**Return-request last-mile (Medusa-initiated → ERPNext draft return DN)** —
+closes the one gap the V2 audit named. Medusa admin route
+`POST /admin/erpnext/orders/:id/request-return` → plugin module method
+`requestReturn(orderId, items)` signs + POSTs event `order.return_requested`
+to `medusync.api.receive` (full HMAC + replay + idempotency + Medusync Log).
+On the Frappe side a registry handler `reverse.handle_return_requested`
+(registered at import time via `medusync/__init__.py` → `handlers.risitex.register`)
+elevates to Administrator and calls `create_pending_return` → a **DRAFT**
+return Delivery Note (docstatus 0, zero stock impact) awaiting warehouse
+receipt; submitting it later fires the reverse path (`order.returned` +
+receipt-gated stock restore). Verified live end-to-end: a Medusa
+`requestReturn` created draft return DN `MAT-DN-2026-00007` (is_return=1,
+qty −1, 0 Stock Ledger Entries), and an over-return returns a clean 200-skip
+(not a 5xx) so Medusa never retries a permanent business rejection. Repo
+files: `plugin/api/.../orders/[id]/request-return/route.ts`, `requestReturn`
+in `plugin/modules/erpnext/index.ts`, `frappe/handlers/reverse.py`,
+`frappe/handlers/risitex__init__.py` (= `medusync/handlers/risitex/__init__.py`),
+`frappe/medusync_pkg__init__.py` (= `medusync/__init__.py`).
+
 **Housekeeping** — plugin `retryEvent(eventId, scope?)` fixed both replay
 defects: outbound mapped rows replay via `pushViaMapping` (re-runs the mapping
 transform, not a stale full-payload `forwardEvent`); inbound rows re-apply via
@@ -100,8 +119,8 @@ login fixed via `cookieOptions` (see `medusa-config.ts` note above).
 ## Status
 All features verified live (see each `*_RESULTS.md` and
 `INTEGRATION_AUDIT_REPORT_V2.md`). **Not committed to the real repos, not
-pushed.** Returns/Refunds, Pricing/B2B core, and the retry/mapping housekeeping
-are now included. Remaining (non-CRITICAL, per V2 audit): advanced/B2B pricing
-depth (MRP / wholesale / dealer / tiers / per-group price lists), rich product
-attributes, customer address + GSTIN outbound, reconciliation breadth, and the
-Medusa-initiated return-request last-mile trigger.
+pushed.** Returns/Refunds, Pricing/B2B core, and the retry/mapping housekeeping,
+and the Medusa-initiated return-request last-mile are now included. Remaining
+(non-CRITICAL, per V2 audit): advanced/B2B pricing depth (MRP / wholesale /
+dealer / tiers / per-group price lists), rich product attributes, customer
+address + GSTIN outbound, and reconciliation breadth.

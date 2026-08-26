@@ -322,6 +322,97 @@ class ErpnextModuleService extends MedusaService({
     }
 
     // ─────────────────────────────────────────────────────────────────
+    // Return-request last-mile (Medusa → Frappe method call)
+    //
+    // A customer/admin return request is NOT a doctype upsert, so it
+    // doesn't go through a mapping. It maps to the whitelisted method
+    // `create_pending_return`, which is registered in the Frappe handler
+    // registry under event `order.return_requested`. We POST the same
+    // signed envelope `forwardEvent` uses, to the same `medusync.api.receive`
+    // endpoint (which dispatches registered handlers), so the request rides
+    // the full transport hardening: HMAC, replay window, idempotency, and a
+    // Medusync Log row on the Frappe side.
+    //
+    // Unlike `forwardEvent`, we read and return the response BODY: the Frappe
+    // handler legitimately returns `{status:"skipped", reason:"no submitted
+    // Delivery Note..."}` (200, not an error) when nothing has shipped yet,
+    // and the admin must see that reason rather than a silent success. So the
+    // caller (the admin route) gets `{ok, httpStatus, result}` where `result`
+    // is the Frappe envelope's own result object.
+    async requestReturn(
+        medusaOrderId: string,
+        items: Array<{ sku: string; qty: number; reason?: string }>,
+    ): Promise<{
+        ok: boolean
+        httpStatus?: number
+        status: string
+        result?: any
+        error?: string
+    }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync) {
+            return { ok: true, status: "skipped", result: { reason: "sync-disabled" } }
+        }
+        if (!cfg.erpnext_url || !cfg.webhook_secret) {
+            return {
+                ok: false,
+                status: "not-configured",
+                error: "ERPNext URL / webhook secret not configured",
+            }
+        }
+
+        const event_id = `medusa:order.return_requested:${medusaOrderId}:${nowTs()}`
+        const body = JSON.stringify({
+            event: "order.return_requested",
+            id: event_id,
+            data: { medusa_order_id: medusaOrderId, items },
+            ts: nowTs(),
+        })
+        const signature = crypto
+            .createHmac("sha256", cfg.webhook_secret)
+            .update(body)
+            .digest("hex")
+        const targetUrl = receiveUrl(cfg)
+
+        try {
+            const res = await fetch(targetUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-medusa-signature": signature,
+                    "x-medusa-event-id": event_id,
+                },
+                body,
+                signal: AbortSignal.timeout(cfg.request_timeout_ms),
+            })
+            const parsed = await res.json().catch(() => ({}) as any)
+            // The Frappe envelope nests the handler's own return under `result`.
+            const inner = (parsed as any)?.result ?? parsed
+            if (!res.ok) {
+                return {
+                    ok: false,
+                    httpStatus: res.status,
+                    status: "failed",
+                    result: inner,
+                    error: `${res.status}: ${JSON.stringify(inner).slice(0, ERROR_TRUNCATE)}`,
+                }
+            }
+            return {
+                ok: true,
+                httpStatus: res.status,
+                status: String((inner as any)?.status ?? "success"),
+                result: inner,
+            }
+        } catch (err: any) {
+            return {
+                ok: false,
+                status: "failed",
+                error: describeError(err).slice(0, ERROR_TRUNCATE),
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     // F1 — inbound receiver (Frappe→Medusa)
     //
     // Counterpart of `forwardEvent` (Medusa→Frappe). Frappe-side
