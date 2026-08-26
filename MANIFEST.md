@@ -96,6 +96,28 @@ in `plugin/modules/erpnext/index.ts`, `frappe/handlers/reverse.py`,
 `frappe/handlers/risitex__init__.py` (= `medusync/handlers/risitex/__init__.py`),
 `frappe/medusync_pkg__init__.py` (= `medusync/__init__.py`).
 
+**Customer address + GSTIN (Medusa → ERPNext)** — closes audit gap #6/#7.
+On `customer.created`/`customer.updated` + the bulk Push Customers route: GSTIN
+→ `Customer.gstin` (rides `_set_fields`, no special-case) and `customer.addresses[]`
+→ linked ERPNext `Address` docs. GSTIN lives on the B2B **Company**, resolved via
+`customer.metadata.company_id` (11/11 linked customers have it; `applicant_email`
+is unreliable). Plugin: `registry.ts` wraps `customerEntity.fetchById` to attach
+`gstin`/`company_trade_name`/`company_billing_address` (guarded — no company
+module → plain customer); `index.ts` `augmentCustomerPayload` reshapes addresses
+into stable-id'd `medusa_addresses[]` (+ the company billing address as a
+synthetic `company:<id>` entry). Frappe: new `address_sync.sync_customer_addresses`
+(create/update Address via Dynamic Link, idempotent by the `medusa_address_id`
+Custom Field, country ISO-2→ERPNext via `Country.code`, stale→**disabled** not
+destroyed); `mapped.py` Customer branch pops `medusa_addresses` and calls it after
+save. Setup: `frappe/addr_setup.py` (the `medusa_address_id` Custom Field). Verified
+live: `cus_01KW9P…` → Customer gstin `27AAACE1234A1Z5` + 2 linked Addresses (own +
+company billing), pushed 3× stayed 2 (idempotent), country `in`→`India`, drop→disabled.
+Repo files: `plugin/modules/erpnext/{index,registry}.ts`,
+`frappe/handlers/{address_sync,mapped}.py`, `frappe/addr_setup.py`,
+`docs/CUSTOMER_ADDRESS_GSTIN_DESIGN.md`. Known limitation: standalone address-only
+edits sync on the next customer update / bulk push, not instantly (`customer_address.*`
+live events not yet wired — event name unconfirmed).
+
 **Housekeeping** — plugin `retryEvent(eventId, scope?)` fixed both replay
 defects: outbound mapped rows replay via `pushViaMapping` (re-runs the mapping
 transform, not a stale full-payload `forwardEvent`); inbound rows re-apply via
@@ -122,5 +144,5 @@ All features verified live (see each `*_RESULTS.md` and
 pushed.** Returns/Refunds, Pricing/B2B core, and the retry/mapping housekeeping,
 and the Medusa-initiated return-request last-mile are now included. Remaining
 (non-CRITICAL, per V2 audit): advanced/B2B pricing depth (MRP / wholesale /
-dealer / tiers / per-group price lists), rich product attributes, customer
-address + GSTIN outbound, and reconciliation breadth.
+dealer / tiers / per-group price lists), rich product attributes, and
+reconciliation breadth.

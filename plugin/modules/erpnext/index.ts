@@ -47,6 +47,73 @@ function receiveUrl(cfg: ActiveConfig, mapped = false): string {
 const SALES_DOCTYPES = new Set(["Sales Order", "Sales Invoice"])
 
 /**
+ * Enrich a mapped Customer payload with GSTIN + the address list a flat field
+ * mapping cannot express (ERPNext Address is a separate doctype linked to the
+ * Customer). `record` is the enriched customer from the registry customerEntity
+ * fetchById (addresses[] + resolved gstin/company). Emits:
+ *   - `gstin` — rides through `_set_fields` onto ERPNext `Customer.gstin`.
+ *   - `medusa_addresses[]` — normalized + stable-id'd; the Frappe `address_sync`
+ *     handler turns each into a linked Address doc (idempotent by id). The
+ *     company's GST-registered billing address is added as a synthetic entry.
+ * No-op for any other doctype (keeps the plugin generic).
+ */
+function augmentCustomerPayload(
+    doctype: string,
+    payload: Record<string, any>,
+    record: any,
+): Record<string, any> {
+    if (doctype !== "Customer" || !record) return payload
+    const out: Record<string, any> = { ...payload }
+    if (out.gstin == null && record.gstin) out.gstin = record.gstin
+
+    const addresses: any[] = Array.isArray(record.addresses) ? record.addresses : []
+    const mapped: any[] = addresses
+        .filter((a) => a && a.id)
+        .map((a) => ({
+            medusa_address_id: a.id,
+            address_title:
+                a.company ||
+                [a.first_name, a.last_name].filter(Boolean).join(" ") ||
+                record.company_trade_name ||
+                null,
+            address_type: a.is_default_billing
+                ? "Billing"
+                : a.is_default_shipping
+                  ? "Shipping"
+                  : "Billing",
+            address_line1: a.address_1 ?? null,
+            address_line2: a.address_2 ?? null,
+            city: a.city ?? null,
+            state: a.province ?? null,
+            pincode: a.postal_code ?? null,
+            country_code: a.country_code ?? null,
+            phone: a.phone ?? null,
+        }))
+
+    // The company's GST-registered billing address is the invoice address in
+    // this B2B model — emit it as a synthetic entry keyed on the company id so
+    // it dedupes like any other address on re-push.
+    const cba = record.company_billing_address
+    if (cba && (cba.line1 || cba.address_1)) {
+        mapped.push({
+            medusa_address_id: `company:${record.company_id_resolved ?? "billing"}`,
+            address_title: record.company_trade_name || "Company Billing",
+            address_type: "Billing",
+            address_line1: cba.line1 ?? cba.address_1 ?? null,
+            address_line2: cba.line2 ?? cba.address_2 ?? null,
+            city: cba.city ?? null,
+            state: cba.state ?? cba.province ?? null,
+            pincode: cba.postal_code ?? null,
+            country_code: cba.country_code ?? null,
+            phone: cba.phone ?? null,
+        })
+    }
+
+    if (mapped.length) out.medusa_addresses = mapped
+    return out
+}
+
+/**
  * Enrich a mapped payload for Sales Order / Sales Invoice pushes with the
  * child line items and customer link a flat mapping cannot express. No-op
  * for any other doctype (keeps the plugin generic). Monetary values are
@@ -3759,9 +3826,13 @@ class ErpnextModuleService extends MedusaService({
         // `medusa_customer_id` and `contact_email` derived from the order record
         // (minor units → rupees). Every other doctype is untouched, so the plugin
         // stays generic.
-        const outPayload = augmentSalesDocPayload(
+        const outPayload = augmentCustomerPayload(
             args.mapping.doctype,
-            transform.payload,
+            augmentSalesDocPayload(
+                args.mapping.doctype,
+                transform.payload,
+                args.record,
+            ),
             args.record,
         )
         const body = JSON.stringify({

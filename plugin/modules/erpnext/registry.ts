@@ -253,6 +253,43 @@ const customerEntity = genericEntity({
     },
 })
 
+// Enrich the customer record with its B2B company's GSTIN before it is pushed.
+// The base fetchById returns the customer + addresses; the linked company (and
+// therefore the GSTIN) is not part of the Medusa customer model, so we resolve
+// it here — the only place on the push path with a container. The link is read
+// from `metadata.company_id` (the mirror the storefront writes; present for
+// every company-linked customer on this build) with a fallback to a raw
+// `company_id` column if a future model exposes it. Fully guarded: no company
+// module, no link, or a failed lookup just ships the customer without a GSTIN.
+{
+    const baseCustomerFetch = customerEntity.fetchById
+    customerEntity.fetchById = async (container: any, id: string) => {
+        const rec: any = await baseCustomerFetch(container, id)
+        if (!rec) return rec
+        try {
+            const companyId = rec.company_id ?? rec.metadata?.company_id
+            if (companyId) {
+                const companySvc: any = container.resolve("company")
+                const list = (await companySvc?.listCompanies?.({ id: companyId }, { take: 1 })) || []
+                const co = list[0]
+                if (co) {
+                    rec.gstin = co.gstin ?? null
+                    rec.company_trade_name = co.trade_name ?? null
+                    // The company's GST-registered billing address (a JSON blob
+                    // {line1,line2,city,state,postal_code,country_code}) — carried
+                    // through so the augment step can emit it as an Address too.
+                    rec.company_billing_address = co.billing_address ?? null
+                    rec.company_id_resolved = companyId
+                }
+            }
+        } catch {
+            // No company module (generic deployment) or lookup failed — the
+            // customer still syncs, just without GSTIN/company data.
+        }
+        return rec
+    }
+}
+
 const customerGroupEntity = genericEntity({
     key: "customer_group",
     label: "Customer group",
