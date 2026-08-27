@@ -173,8 +173,13 @@ Never sets `price_list_id` or touches DynamicRule (leaves Phase-4.5
 downstream). Rupees→paise ×100. Echo-safe (`_guard()` honors medusync_inbound).
 Verified via the engine's OWN getPriceTiers: local_mbo→64000, regional_
 distributor→59000; re-fire = 1 row/tier (idempotent); delete Item Price →
-getPriceTiers(local_mbo)=[]. Scope: flat per-tier only (qty ladders deferred —
-Item Price has no min-qty field here). Repo files:
+getPriceTiers(local_mbo)=[]. **Quantity ladders (extension, done):** ERPNext
+Item Price `packing_unit` (native, part of the duplicate-check key → multiple
+prices per item+list allowed) maps to PriceTier `min_quantity`; handler keys
+idempotency on (variant,tier,min_quantity) so brackets coexist + delete
+independently. Verified: Wholesale packing_unit 1/50/100 (₹640/600/560) →
+getPriceTiers ladder [{1,64000},{50,60000},{100,56000}]; delete pack50 → only
+the min_q=50 bracket goes. Repo files:
 `plugin/modules/erpnext/index.ts`, `frappe/handlers/pricing.py`,
 `frappe/tier_setup.py`, `docs/B2B_TIER_PRICING_DESIGN.md`.
 

@@ -1159,33 +1159,43 @@ class ErpnextModuleService extends MedusaService({
         const [tier] = await tierSvc.listCustomerTiers({ code: tierCode }, { take: 1 })
         if (!tier) return { skipped: true, reason: `no customer_tier for code ${tierCode}` }
 
+        // Quantity bracket: ERPNext `packing_unit` (units-per-pack) becomes the
+        // ladder's `min_quantity` — multiple Item Prices per (item, list) at
+        // different packing_units form a volume ladder. Default 1 (single).
+        const minQty = Math.max(1, Math.trunc(Number(data?.min_quantity) || 1))
+        const maxQty =
+            data?.max_quantity != null && Number(data.max_quantity) > 0
+                ? Math.trunc(Number(data.max_quantity))
+                : null
+
         const b2b: any = scope.resolve("b2b_pricing")
-        // Idempotency: one flat row per (variant, tier, min_quantity=1).
+        // Idempotency: one row per (variant, tier, min_quantity) — so a ladder
+        // of brackets coexists, and each bracket updates/deletes independently.
         const [existing] = await b2b.listPriceTiers(
-            { variant_id: variant.id, customer_tier_id: tier.id, min_quantity: 1 },
+            { variant_id: variant.id, customer_tier_id: tier.id, min_quantity: minQty },
             { take: 1 },
         )
 
         if (data?.deleted || data?.amount == null) {
             if (existing) {
                 await b2b.deletePriceTiers(existing.id)
-                return { ok: true, sku, tier: tierCode, deleted: true }
+                return { ok: true, sku, tier: tierCode, min_quantity: minQty, deleted: true }
             }
             return { ok: true, skipped: true, reason: "no tier price to clear" }
         }
 
         const valueMinor = Math.round((Number(data.amount) || 0) * 100)
         if (existing) {
-            await b2b.updatePriceTiers(existing.id, { value: valueMinor })
-            return { ok: true, sku, tier: tierCode, value_minor: valueMinor, updated: true }
+            await b2b.updatePriceTiers(existing.id, { value: valueMinor, max_quantity: maxQty })
+            return { ok: true, sku, tier: tierCode, min_quantity: minQty, value_minor: valueMinor, updated: true }
         }
         await b2b.createPriceTiers([
             {
                 product_id: productId,
                 variant_id: variant.id,
                 customer_tier_id: tier.id,
-                min_quantity: 1,
-                max_quantity: null,
+                min_quantity: minQty,
+                max_quantity: maxQty,
                 value: valueMinor,
                 is_percentage: false,
                 region_id: null,
@@ -1193,7 +1203,7 @@ class ErpnextModuleService extends MedusaService({
                 // price_list_id intentionally null — see method doc.
             },
         ])
-        return { ok: true, sku, tier: tierCode, value_minor: valueMinor, created: true }
+        return { ok: true, sku, tier: tierCode, min_quantity: minQty, value_minor: valueMinor, created: true }
     }
 
     /** B2B: ensure a Medusa customer group by name and add the customer to it. */

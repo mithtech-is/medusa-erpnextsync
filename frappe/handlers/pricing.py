@@ -58,6 +58,10 @@ def on_item_price(doc, method=None):
                 "tier_code": tier_code,
                 "amount": float(doc.price_list_rate or 0),
                 "currency": doc.currency,
+                # packing_unit (units per pack) is the volume bracket: several
+                # Item Prices per (item, list) at different packing_units form a
+                # quantity ladder. 0/blank -> the single (min_quantity 1) price.
+                "min_quantity": int(doc.get("packing_unit") or 1),
                 "deleted": bool(deleted),
             }
             _deliver("variant.tier_price.set", payload, "%s-%s" % (doc.name, method), "Item Price", doc.name)

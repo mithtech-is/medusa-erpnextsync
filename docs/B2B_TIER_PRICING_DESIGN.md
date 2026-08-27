@@ -72,13 +72,30 @@ the engine's own `getPriceTiers`**:
 - Deleted the Wholesale Item Price → `getPriceTiers(local_mbo)` → **[]** (row
   hard-deleted), regional_distributor unaffected.
 
+## Quantity ladders (extension — done)
+
+Volume brackets ride the **same** handler. ERPNext Item Price has a native
+`packing_unit` (units-per-pack) that is part of its duplicate-check key, so
+multiple Item Prices per (item, price list) at different `packing_unit`s are
+allowed — a natural quantity ladder. `packing_unit` maps to the PriceTier
+`min_quantity`:
+
+- Frappe: the tier payload carries `min_quantity = packing_unit or 1`.
+- Plugin: `_handleVariantTierPrice` keys idempotency on
+  `(variant, tier, min_quantity)`, so brackets coexist and each
+  updates/deletes independently.
+
+Verified live: Item Prices on Wholesale at `packing_unit` 1/50/100 (₹640/600/560)
+→ `getPriceTiers(local_mbo)` returns the ladder `[{1,64000},{50,60000},
+{100,56000}]`; deleting the `packing_unit=50` Item Price removes only the
+`min_quantity=50` bracket, leaving 1 and 100.
+
 ## Scope / known limitations
 
-- **Flat per-tier price only** (`min_quantity: 1`). Quantity ladders are
-  deferred: this bench's Item Price has no min-qty field, so ERPNext quantity
-  breaks live in Pricing Rules — translating those is a batch of its own. The
-  PriceTier shape already supports `min_quantity`/`max_quantity`, so ladders
-  ride the same handler once a qty source exists.
+- **Rate-based tiers** (fixed price per bracket). Percentage/discount-style
+  Pricing Rules are not translated — that remains a separate batch.
+- **`max_quantity`** is left open-ended (null) — `packing_unit` gives a lower
+  bound, not an upper one.
 - **Delete via Frappe UI** is currently blocked by ERPNext referential
   integrity: the outbound Medusync Log stamps `document_name` (a Dynamic Link)
   onto the Item Price, so deleting it raises `LinkExistsError` until the log is
