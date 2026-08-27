@@ -60,6 +60,22 @@ def _apply_defaults(doc, doctype):
 			doc.set(field, value)
 
 
+def _ensure_item_group(name):
+	# Item Group is a Link AND a tree doctype: a payload item_group that
+	# does not exist fails the Item save. Auto-create as a leaf under the
+	# root so category values from Medusa metadata just work.
+	if not name:
+		return
+	if frappe.db.exists("Item Group", name):
+		return
+	frappe.get_doc({
+		"doctype": "Item Group",
+		"item_group_name": name,
+		"parent_item_group": "All Item Groups",
+		"is_group": 0,
+	}).insert(ignore_permissions=True)
+
+
 def _ensure_item(item_code, item_name=None):
 	"""Guarantee an Item exists so a Sales Order/Invoice line can link."""
 	if not item_code:
@@ -162,6 +178,8 @@ def upsert_via_mapping(
 
 	is_delete = bool(event) and event.endswith(".deleted")
 	addresses = payload.pop("medusa_addresses", None) if doctype == "Customer" else None
+	if doctype == "Item" and payload.get("item_group"):
+		_ensure_item_group(str(payload.get("item_group")))
 
 	if doctype in _SALES_DOCS and not is_delete:
 		return _upsert_sales_doc(doctype, key_field, key_value, payload, event, event_id)

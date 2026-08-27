@@ -139,6 +139,22 @@ it an orphan); product 40/44 matched=39 missing=1. Repo files:
 `plugin/admin/routes/erpnext/page.tsx`, `plugin/api/.../reconcile/route.ts`,
 `docs/RECONCILIATION_BREADTH_DESIGN.md`.
 
+**Rich product attributes (Medusa metadata → ERPNext Item)** — partially closes
+audit gap #1. Four flat `metadata.*` attributes now push to the Item:
+`category → item_group` (auto-created), `hsn_code`, `fabric`, `gsm` (custom
+fields). **Lightest batch — no plugin code, no Medusa rebuild:** a pure
+mapping-row change (`plugin/add-product-attribute-mappings.sql`, idempotent — 4
+`push` pairs on the Product↔Item mapping, visible in the admin Mappings tab) +
+Frappe custom fields (`frappe/item_attr_setup.py`, HSN as plain `hsn_code` not
+regional `gst_hsn_code`) + `mapped._ensure_item_group` (Item Group is a
+Link+tree doctype → auto-create the leaf before save; `_apply_defaults` already
+fill-if-missing). Deliberately **excludes** `moq`/`case_pack`/`mrp` (moq flows
+ERPNext→Medusa; mrp = pricing batch). Echo-safe: `pricing.on_item` honors
+`frappe.flags.medusync_inbound`. Verified live: `pix-boxer-shorts` →
+item_group `loungewear` (auto-created, count stays 1 on re-push), hsn_code
+61071900, gsm 145, fabric unset (none in metadata). Still unsynced (no source
+data): variant barcode, colour/size options (ERPNext variant templates), brand.
+
 **Housekeeping** — plugin `retryEvent(eventId, scope?)` fixed both replay
 defects: outbound mapped rows replay via `pushViaMapping` (re-runs the mapping
 transform, not a stale full-payload `forwardEvent`); inbound rows re-apply via
@@ -165,7 +181,7 @@ All features verified live (see each `*_RESULTS.md` and
 pushed.** Returns/Refunds, Pricing/B2B core, and the retry/mapping housekeeping,
 and the Medusa-initiated return-request last-mile are now included. Remaining
 (non-CRITICAL, per V2 audit): advanced/B2B pricing depth (MRP / wholesale /
-dealer / tiers / per-group price lists) and rich product attributes — both
-currently have **no source data on either side** of the demo (variant
-barcode/hs/material all 0, options placeholder; ERPNext 0 branded Items, no HSN
-field), so they need data seeding before they can be built and verified.
+dealer / tiers / per-group price lists) — needs ERPNext price lists + Pricing
+Rules seeded first. Rich product attributes are now **partially done** (the
+metadata textile fields — see the batch above); the remainder (variant barcode,
+colour/size option templates, brand) has no Medusa-side source data yet.
