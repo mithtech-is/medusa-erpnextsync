@@ -1,8 +1,9 @@
 # medusync ↔ Medusa — remediation change set
 
 Self-contained, PR-ready capture of all connector remediation work
-(2026-08-25 → 08-26). Verified live on the demo stack. **Demo sandbox +
-medusync only; the real RISITEX repo is untouched. Not pushed anywhere.**
+(2026-08-25 → 08-27). Verified live on the demo stack. **Demo sandbox +
+medusync only; the real `risitex-mainb2b` app repo is untouched.** Published
+here at `mithtech-is/erpnextsync` as the change-set of record.
 
 This is captured as its own folder+git repo because the pieces live in three
 places that can't be committed together cleanly: the generic plugin folder is
@@ -205,13 +206,13 @@ login fixed via `cookieOptions` (see `medusa-config.ts` note above).
 
 ## Status
 All features verified live (see each `*_RESULTS.md` and
-`INTEGRATION_AUDIT_REPORT_V2.md`). **Not committed to the real repos, not
-pushed.** Returns/Refunds, Pricing/B2B core, and the retry/mapping housekeeping,
-and the Medusa-initiated return-request last-mile are now included. Remaining
-(non-CRITICAL, per V2 audit): **advanced/B2B pricing depth is now partially done**
-— flat per-tier prices sync (see the B2B tier pricing batch above); still open:
-**quantity ladders** (need a qty source — this bench's Item Price has no min-qty
-field, so ERPNext quantity breaks live in Pricing Rules) and **MRP**. Rich
-product attributes are also **partially done** (metadata textile fields); the
-remainder (variant barcode, colour/size option templates, brand) has no
-Medusa-side source data yet.
+`INTEGRATION_AUDIT_REPORT_V2.md`). **Published at `mithtech-is/erpnextsync`; the
+real `risitex-mainb2b` app repo remains untouched.** Returns/Refunds, Pricing/B2B
+(tiers + quantity ladders), the retry/mapping housekeeping, and the
+Medusa-initiated return-request last-mile are all included. Remaining
+(non-CRITICAL, per V2 audit): **advanced/B2B pricing depth is now largely done**
+— per-tier prices and quantity ladders sync (see the B2B tier pricing batch
+above); still open: percentage/discount Pricing Rules (rate-based tiers done)
+and **MRP**. Rich product attributes are also **partially done** (metadata
+textile fields); the remainder (variant barcode, colour/size option templates,
+brand) has no Medusa-side source data yet.
