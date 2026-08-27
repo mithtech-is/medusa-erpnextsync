@@ -744,6 +744,8 @@ class ErpnextModuleService extends MedusaService({
                 return this._handleVariantPrice(scope, data)
             case "variant.meta.set":
                 return this._handleVariantMeta(scope, data)
+            case "variant.tier_price.set":
+                return this._handleVariantTierPrice(scope, data)
             case "customer.group.set":
                 return this._handleCustomerGroup(scope, data)
 
@@ -1113,6 +1115,85 @@ class ErpnextModuleService extends MedusaService({
             metadata: { ...(variant.metadata || {}), ...patch },
         })
         return { ok: true, sku, metadata: patch }
+    }
+
+    /**
+     * B2B tier price (ERPNext → Medusa, ERPNext wins). An Item Price on a
+     * tier-mapped price list becomes a standalone `b2b_pricing` PriceTier row
+     * — `min_quantity: 1`, product+variant scoped, keyed on the customer tier.
+     * Values arrive in rupees and are stored in MINOR units (paise), matching
+     * the engine's convention (see b2b_pricing service: "values are in paise").
+     * `deleted` (or a null amount) removes the row so no stale tier price
+     * lingers. We NEVER set `price_list_id` (that mirror belongs to the
+     * engine's own tier→price-list projection) and never touch DynamicRule.
+     * The engine resolves via `getPriceTiers(product_id, {tier_ids})`, which is
+     * why `product_id` must be set — a variant-only row would never resolve.
+     */
+    private async _handleVariantTierPrice(scope: any, data: any): Promise<any> {
+        if (!scope) return { skipped: true, reason: "no_scope" }
+        const sku = String(data?.sku ?? "").trim()
+        const tierCode = String(data?.tier_code ?? "").trim()
+        if (!sku) return { skipped: true, reason: "missing sku" }
+        if (!tierCode) return { skipped: true, reason: "missing tier_code" }
+
+        const productSvc: any = scope.resolve("product")
+        const [variant] = await productSvc.listProductVariants(
+            { sku },
+            { take: 1, select: ["id"] },
+        )
+        if (!variant) return { skipped: true, reason: `no variant for sku ${sku}` }
+
+        // The engine queries PriceTier by product_id, so resolve it.
+        const query: any = scope.resolve("query")
+        const { data: vrows } = await query.graph({
+            entity: "variant",
+            fields: ["id", "product.id"],
+            filters: { id: variant.id },
+        } as any)
+        const productId = vrows?.[0]?.product?.id
+        if (!productId) return { skipped: true, reason: `no product for variant ${variant.id}` }
+
+        // Resolve the tier by its stable code (the Price List custom field
+        // holds the code; ERPNext is the mapping's editor).
+        const tierSvc: any = scope.resolve("customer_tier")
+        const [tier] = await tierSvc.listCustomerTiers({ code: tierCode }, { take: 1 })
+        if (!tier) return { skipped: true, reason: `no customer_tier for code ${tierCode}` }
+
+        const b2b: any = scope.resolve("b2b_pricing")
+        // Idempotency: one flat row per (variant, tier, min_quantity=1).
+        const [existing] = await b2b.listPriceTiers(
+            { variant_id: variant.id, customer_tier_id: tier.id, min_quantity: 1 },
+            { take: 1 },
+        )
+
+        if (data?.deleted || data?.amount == null) {
+            if (existing) {
+                await b2b.deletePriceTiers(existing.id)
+                return { ok: true, sku, tier: tierCode, deleted: true }
+            }
+            return { ok: true, skipped: true, reason: "no tier price to clear" }
+        }
+
+        const valueMinor = Math.round((Number(data.amount) || 0) * 100)
+        if (existing) {
+            await b2b.updatePriceTiers(existing.id, { value: valueMinor })
+            return { ok: true, sku, tier: tierCode, value_minor: valueMinor, updated: true }
+        }
+        await b2b.createPriceTiers([
+            {
+                product_id: productId,
+                variant_id: variant.id,
+                customer_tier_id: tier.id,
+                min_quantity: 1,
+                max_quantity: null,
+                value: valueMinor,
+                is_percentage: false,
+                region_id: null,
+                rule_id: null,
+                // price_list_id intentionally null — see method doc.
+            },
+        ])
+        return { ok: true, sku, tier: tierCode, value_minor: valueMinor, created: true }
     }
 
     /** B2B: ensure a Medusa customer group by name and add the customer to it. */

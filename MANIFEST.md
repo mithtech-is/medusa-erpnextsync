@@ -155,6 +155,29 @@ item_group `loungewear` (auto-created, count stays 1 on re-push), hsn_code
 61071900, gsm 145, fabric unset (none in metadata). Still unsynced (no source
 data): variant barcode, colour/size options (ERPNext variant templates), brand.
 
+**B2B tier pricing (ERPNext price lists → Medusa `b2b_pricing`)** — closes audit
+gap #2/#7 (per-tier price depth). An Item Price on a **tier-mapped** price list
+now becomes a standalone `b2b_price_tier` (PriceTier) row the storefront engine
+resolves via `getPriceTiers(product_id,{tier_ids})`. Mapping is operator config:
+a `medusa_customer_tier` Custom Field on ERPNext Price List holds a
+`customer_tier.code` (seed: Wholesale→local_mbo, Distributor→regional_distributor
+— demo data, ops remaps). Frappe: `pricing.on_item_price`'s non-selling
+early-return becomes a tier branch → `variant.tier_price.set {sku,tier_code,
+amount,deleted}`. Plugin: `dispatchInbound` `variant.tier_price.set` →
+`_handleVariantTierPrice` resolves variant→**product_id** (engine queries by
+product_id) + tier by code, upserts PriceTier `{product_id,variant_id,
+customer_tier_id,min_quantity:1,value(paise),is_percentage:false,rule_id:null,
+price_list_id:null}` idempotent on (variant,tier,min_q); deleted→hard-delete.
+Never sets `price_list_id` or touches DynamicRule (leaves Phase-4.5
+`projectTierToPriceList` alone — this populates upstream, that projects
+downstream). Rupees→paise ×100. Echo-safe (`_guard()` honors medusync_inbound).
+Verified via the engine's OWN getPriceTiers: local_mbo→64000, regional_
+distributor→59000; re-fire = 1 row/tier (idempotent); delete Item Price →
+getPriceTiers(local_mbo)=[]. Scope: flat per-tier only (qty ladders deferred —
+Item Price has no min-qty field here). Repo files:
+`plugin/modules/erpnext/index.ts`, `frappe/handlers/pricing.py`,
+`frappe/tier_setup.py`, `docs/B2B_TIER_PRICING_DESIGN.md`.
+
 **Housekeeping** — plugin `retryEvent(eventId, scope?)` fixed both replay
 defects: outbound mapped rows replay via `pushViaMapping` (re-runs the mapping
 transform, not a stale full-payload `forwardEvent`); inbound rows re-apply via
@@ -180,8 +203,10 @@ All features verified live (see each `*_RESULTS.md` and
 `INTEGRATION_AUDIT_REPORT_V2.md`). **Not committed to the real repos, not
 pushed.** Returns/Refunds, Pricing/B2B core, and the retry/mapping housekeeping,
 and the Medusa-initiated return-request last-mile are now included. Remaining
-(non-CRITICAL, per V2 audit): advanced/B2B pricing depth (MRP / wholesale /
-dealer / tiers / per-group price lists) — needs ERPNext price lists + Pricing
-Rules seeded first. Rich product attributes are now **partially done** (the
-metadata textile fields — see the batch above); the remainder (variant barcode,
-colour/size option templates, brand) has no Medusa-side source data yet.
+(non-CRITICAL, per V2 audit): **advanced/B2B pricing depth is now partially done**
+— flat per-tier prices sync (see the B2B tier pricing batch above); still open:
+**quantity ladders** (need a qty source — this bench's Item Price has no min-qty
+field, so ERPNext quantity breaks live in Pricing Rules) and **MRP**. Rich
+product attributes are also **partially done** (metadata textile fields); the
+remainder (variant barcode, colour/size option templates, brand) has no
+Medusa-side source data yet.

@@ -35,18 +35,32 @@ def on_item_price(doc, method=None):
     try:
         if not _guard():
             return
-        if doc.price_list != _selling_pl():
-            return
         deleted = method == "on_trash"
-        payload = {
-            "sku": doc.item_code,
-            "amount": float(doc.price_list_rate or 0),
-            "currency": doc.currency,
-            "valid_from": str(doc.get("valid_from") or ""),
-            "valid_upto": str(doc.get("valid_upto") or ""),
-            "deleted": bool(deleted),
-        }
-        _deliver("variant.price.set", payload, "%s-%s" % (doc.name, method), "Item Price", doc.name)
+        # Selling price list -> the variant base price (unchanged).
+        if doc.price_list == _selling_pl():
+            payload = {
+                "sku": doc.item_code,
+                "amount": float(doc.price_list_rate or 0),
+                "currency": doc.currency,
+                "valid_from": str(doc.get("valid_from") or ""),
+                "valid_upto": str(doc.get("valid_upto") or ""),
+                "deleted": bool(deleted),
+            }
+            _deliver("variant.price.set", payload, "%s-%s" % (doc.name, method), "Item Price", doc.name)
+            return
+        # Any OTHER price list mapped to a Medusa customer tier (via the
+        #  Custom Field holding the tier code) -> a B2B
+        # tier price. Price lists without the mapping are ignored, as before.
+        tier_code = frappe.db.get_value("Price List", doc.price_list, "medusa_customer_tier")
+        if tier_code:
+            payload = {
+                "sku": doc.item_code,
+                "tier_code": tier_code,
+                "amount": float(doc.price_list_rate or 0),
+                "currency": doc.currency,
+                "deleted": bool(deleted),
+            }
+            _deliver("variant.tier_price.set", payload, "%s-%s" % (doc.name, method), "Item Price", doc.name)
     except Exception:
         frappe.log_error(title="medusync pricing on_item_price failed", message=frappe.get_traceback())
 
