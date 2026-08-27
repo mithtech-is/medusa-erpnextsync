@@ -3031,6 +3031,150 @@ class ErpnextModuleService extends MedusaService({
         return { frappe_count, medusa_count }
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // Detailed reconciliation (breadth): which ids diverge, not just a
+    // count delta, for customer / product / order. Compares the stable
+    // Medusa id (against the ERPNext `medusa_*_id` the mapping stamps)
+    // with a NATURAL-KEY fallback (product handle ↔ item_code, customer
+    // email ↔ email_id) — without the fallback, catalog products pulled
+    // ERPNext→Medusa (which never stamp their id back onto the Item) all
+    // read as "missing_on_frappe". Report-only; bounded + `truncated`.
+    // ─────────────────────────────────────────────────────────────────
+    private static RECONCILABLE: Record<
+        string,
+        { list: string; naturalMedusa?: string; naturalErp?: string }
+    > = {
+        customer: { list: "listCustomers", naturalMedusa: "email", naturalErp: "email_id" },
+        product: { list: "listProducts", naturalMedusa: "handle", naturalErp: "item_code" },
+        order: { list: "listOrders" }, // id-only: medusa_order_id is the one true key
+    }
+
+    async reconcileMapping(
+        mapping: any,
+        container: any,
+        opts?: { limit?: number; sample?: number },
+    ): Promise<any> {
+        const entity = mapping?.medusa_entity
+        const doctype = mapping?.doctype
+        const spec = ErpnextModuleService.RECONCILABLE[entity]
+        if (!spec || !container) {
+            return { entity, doctype, skipped: "not-reconcilable" }
+        }
+        const limit = opts?.limit ?? 2000
+        const sampleCap = opts?.sample ?? 100
+
+        const cfg = await this.getActiveConfig()
+        const apiCreds = await this.frappeApiCreds()
+        if (!cfg.erpnext_url || !apiCreds) {
+            return { entity, doctype, skipped: "not-configured" }
+        }
+
+        // Which ERPNext field carries the Medusa id (from the id pair).
+        const idPair = (mapping.field_mappings as MappingFieldPair[] | undefined)?.find(
+            (p) => p.medusa_path === "id",
+        )
+        const idField = idPair?.erpnext_field
+        if (!idField) return { entity, doctype, skipped: "no-id-pair" }
+
+        // ── Medusa side: {id, natural} bounded ───────────────────────
+        const mod: any = container.resolve(spec.list === "listOrders" ? "order" : entity)
+        const rows: any[] = (await mod[spec.list]({}, { take: limit })) || []
+        const medusaTruncated = rows.length >= limit
+        const medusaIds = new Set<string>()
+        const medusaNatural = new Set<string>()
+        const medusaByKey = rows.map((r: any) => {
+            const id = String(r?.id ?? "")
+            const nat = spec.naturalMedusa
+                ? String(getByPath(r, spec.naturalMedusa) ?? "").toLowerCase()
+                : ""
+            if (id) medusaIds.add(id)
+            if (nat) medusaNatural.add(nat)
+            return { id, nat }
+        })
+
+        // ── Frappe side: fetch idField (+ natural field) bounded ─────
+        const fields = [idField, "name"]
+        if (spec.naturalErp && spec.naturalErp !== idField) fields.push(spec.naturalErp)
+        const fieldsJson = encodeURIComponent(JSON.stringify(fields))
+        const url =
+            `${cfg.erpnext_url}/api/resource/${encodeURIComponent(doctype)}` +
+            `?fields=${fieldsJson}&limit_page_length=${limit}`
+        const res = await fetch(url, {
+            method: "GET",
+            headers: { Authorization: `token ${apiCreds}` },
+            signal: AbortSignal.timeout(cfg.request_timeout_ms),
+        })
+        if (!res.ok) {
+            return { entity, doctype, skipped: `frappe-list-${res.status}` }
+        }
+        const body: any = await res.json().catch(() => ({}))
+        const frappeRows: any[] = Array.isArray(body?.data) ? body.data : []
+        const frappeTruncated = frappeRows.length >= limit
+        const frappeIds = new Set<string>()
+        const frappeNatural = new Set<string>()
+        for (const fr of frappeRows) {
+            const fid = String(fr?.[idField] ?? "")
+            if (fid) frappeIds.add(fid)
+            if (spec.naturalErp) {
+                const fn = String(fr?.[spec.naturalErp] ?? "").toLowerCase()
+                if (fn) frappeNatural.add(fn)
+            }
+        }
+
+        // ── Diff ─────────────────────────────────────────────────────
+        const presentOnFrappe = (m: { id: string; nat: string }) =>
+            (m.id && frappeIds.has(m.id)) || (m.nat && frappeNatural.has(m.nat))
+        const missing = medusaByKey.filter((m) => !presentOnFrappe(m))
+        const matched = medusaByKey.length - missing.length
+
+        // Frappe rows whose stamped medusa id is not a live Medusa id AND
+        // whose natural key doesn't match either → orphaned / deleted-in-Medusa.
+        const orphans = frappeRows.filter((fr) => {
+            const fid = String(fr?.[idField] ?? "")
+            if (!fid) return false // Frappe-native row (no medusa id) — not an orphan
+            if (medusaIds.has(fid)) return false
+            const fn = spec.naturalErp
+                ? String(fr?.[spec.naturalErp] ?? "").toLowerCase()
+                : ""
+            if (fn && medusaNatural.has(fn)) return false
+            return true
+        })
+
+        return {
+            entity,
+            doctype,
+            medusa_count: medusaByKey.length,
+            frappe_count: frappeRows.length,
+            matched,
+            missing_on_frappe_count: missing.length,
+            missing_on_frappe: missing.slice(0, sampleCap).map((m) => m.nat || m.id),
+            frappe_orphans_count: orphans.length,
+            frappe_orphans: orphans.slice(0, sampleCap).map((fr) => fr.name),
+            truncated: medusaTruncated || frappeTruncated,
+        }
+    }
+
+    /** Run reconcileMapping across every enabled, reconcilable mapping. */
+    async reconcileAll(container: any, opts?: { limit?: number; sample?: number }): Promise<any> {
+        // All ENABLED mappings regardless of direction — the reconcilable
+        // entities (customer/product/order) are push mappings, so a
+        // pull-only listing would miss them.
+        const mappings: any[] = await this.listMappings({ enabled: true }).catch(() => [])
+        const reports: any[] = []
+        const seen = new Set<string>()
+        for (const m of mappings) {
+            if (!ErpnextModuleService.RECONCILABLE[m.medusa_entity]) continue
+            if (seen.has(m.medusa_entity)) continue // one report per entity
+            seen.add(m.medusa_entity)
+            try {
+                reports.push(await this.reconcileMapping(m, container, opts))
+            } catch (err: any) {
+                reports.push({ entity: m.medusa_entity, doctype: m.doctype, error: describeError(err) })
+            }
+        }
+        return { ok: true, generated_at: new Date().toISOString(), reports }
+    }
+
     async saveMapping(input: {
         id?: string
         name: string

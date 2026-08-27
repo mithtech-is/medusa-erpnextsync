@@ -68,7 +68,7 @@ type EventRow = {
   target_url: string | null
 }
 
-type Tab = "settings" | "mappings" | "pull" | "events"
+type Tab = "settings" | "mappings" | "pull" | "events" | "reconcile"
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "settings", label: "Settings" },
@@ -80,6 +80,7 @@ const TABS: Array<{ key: Tab; label: string }> = [
   { key: "mappings", label: "Mappings" },
   { key: "pull", label: "Pull" },
   { key: "events", label: "Events" },
+  { key: "reconcile", label: "Reconcile" },
 ]
 
 const ErpnextPage = () => {
@@ -152,6 +153,7 @@ const ErpnextPage = () => {
       {view && tab === "mappings" && <MappingsTab onJumpToTab={setTab} />}
       {view && tab === "pull" && <PullTab />}
       {view && tab === "events" && <EventsTab />}
+      {view && tab === "reconcile" && <ReconcileTab />}
     </Container>
   )
 }
@@ -2805,6 +2807,183 @@ function formatDate(iso: string): string {
   } catch {
     return iso
   }
+}
+
+// On-demand reconciliation: shows, per entity, how Medusa and ERPNext
+// diverge — rows present in Medusa but missing in ERPNext, and ERPNext
+// rows orphaned from a deleted Medusa row. Read-only; runs GET
+// /admin/erpnext/reconcile. Built for a non-technical admin: one button,
+// a plain table, and click-to-see the specific ids.
+const ReconcileTab: React.FC = () => {
+  const [running, setRunning] = useState(false)
+  const [reports, setReports] = useState<any[] | null>(null)
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  const run = async () => {
+    setRunning(true)
+    setErr(null)
+    try {
+      const res = await fetch("/admin/erpnext/reconcile", { credentials: "include" })
+      const body = await res.json()
+      if (!res.ok || body?.ok === false) {
+        setErr(friendlyErpError(body?.error || `HTTP ${res.status}`))
+        return
+      }
+      setReports(body.reports ?? [])
+      setGeneratedAt(body.generated_at ?? null)
+    } catch (e: any) {
+      setErr(friendlyErpError(e?.message))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <section className="rounded border border-ui-border-base p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <Heading level="h2">Reconcile</Heading>
+          <Text className="text-ui-fg-subtle" size="small">
+            Compare what Medusa has against ERPNext, per entity. Read-only — nothing is changed.
+          </Text>
+        </div>
+        <Button onClick={run} disabled={running} variant="primary">
+          {running ? "Checking…" : "Reconcile now"}
+        </Button>
+      </div>
+
+      {err && (
+        <Text className="text-ui-fg-error" size="small">
+          {err}
+        </Text>
+      )}
+
+      {generatedAt && (
+        <Text className="text-ui-fg-muted mb-2" size="xsmall">
+          Last run: {new Date(generatedAt).toLocaleString()}
+        </Text>
+      )}
+
+      {reports && reports.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-ui-fg-subtle border-b border-ui-border-base">
+              <tr>
+                <th className="py-2 pr-4">Entity</th>
+                <th className="py-2 pr-4">Medusa</th>
+                <th className="py-2 pr-4">ERPNext</th>
+                <th className="py-2 pr-4">Matched</th>
+                <th className="py-2 pr-4">Missing in ERPNext</th>
+                <th className="py-2 pr-4">ERPNext orphans</th>
+                <th className="py-2 pr-4">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reports.map((r: any) => {
+                const key = `${r.entity}:${r.doctype}`
+                const clean =
+                  !r.skipped &&
+                  !r.error &&
+                  (r.missing_on_frappe_count ?? 0) === 0 &&
+                  (r.frappe_orphans_count ?? 0) === 0
+                return (
+                  <React.Fragment key={key}>
+                    <tr className="border-b border-ui-border-base">
+                      <td className="py-2 pr-4 font-medium">
+                        {r.entity}
+                        <span className="text-ui-fg-muted"> → {r.doctype}</span>
+                      </td>
+                      {r.skipped || r.error ? (
+                        <td className="text-ui-fg-muted py-2" colSpan={6}>
+                          {r.skipped ? `skipped: ${r.skipped}` : `error: ${r.error}`}
+                        </td>
+                      ) : (
+                        <>
+                          <td className="py-2 pr-4">{r.medusa_count}</td>
+                          <td className="py-2 pr-4">{r.frappe_count}</td>
+                          <td className="py-2 pr-4">{r.matched}</td>
+                          <td className="py-2 pr-4">
+                            {(r.missing_on_frappe_count ?? 0) > 0 ? (
+                              <button
+                                className="text-ui-fg-interactive underline"
+                                onClick={() => setExpanded(expanded === key ? null : key)}
+                              >
+                                {r.missing_on_frappe_count}
+                              </button>
+                            ) : (
+                              0
+                            )}
+                          </td>
+                          <td className="py-2 pr-4">
+                            {(r.frappe_orphans_count ?? 0) > 0 ? (
+                              <button
+                                className="text-ui-fg-interactive underline"
+                                onClick={() => setExpanded(expanded === key ? null : key)}
+                              >
+                                {r.frappe_orphans_count}
+                              </button>
+                            ) : (
+                              0
+                            )}
+                          </td>
+                          <td className="py-2 pr-4">
+                            {clean ? (
+                              <StatusBadge color="green">In sync</StatusBadge>
+                            ) : (
+                              <StatusBadge color="orange">Drift</StatusBadge>
+                            )}
+                            {r.truncated && (
+                              <Badge size="2xsmall" className="ml-1">
+                                truncated
+                              </Badge>
+                            )}
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                    {expanded === key && !r.skipped && !r.error && (
+                      <tr className="bg-ui-bg-subtle">
+                        <td colSpan={7} className="p-3">
+                          {(r.missing_on_frappe ?? []).length > 0 && (
+                            <div className="mb-2">
+                              <Text size="xsmall" className="text-ui-fg-subtle mb-1">
+                                Missing in ERPNext (in Medusa, not pushed):
+                              </Text>
+                              <Text size="xsmall" className="break-all font-mono">
+                                {(r.missing_on_frappe ?? []).join(", ")}
+                              </Text>
+                            </div>
+                          )}
+                          {(r.frappe_orphans ?? []).length > 0 && (
+                            <div>
+                              <Text size="xsmall" className="text-ui-fg-subtle mb-1">
+                                ERPNext orphans (stamped with a Medusa id Medusa no longer has):
+                              </Text>
+                              <Text size="xsmall" className="break-all font-mono">
+                                {(r.frappe_orphans ?? []).join(", ")}
+                              </Text>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {reports && reports.length === 0 && (
+        <Text className="text-ui-fg-muted" size="small">
+          No reconcilable mappings enabled (customer / product / order).
+        </Text>
+      )}
+    </section>
+  )
 }
 
 export const config = defineRouteConfig({

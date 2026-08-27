@@ -118,6 +118,27 @@ Repo files: `plugin/modules/erpnext/{index,registry}.ts`,
 edits sync on the next customer update / bulk push, not instantly (`customer_address.*`
 live events not yet wired — event name unconfirmed).
 
+**Reconciliation breadth (Medusa ↔ ERPNext)** — closes audit gap #18
+(reconcile was customer-only, count-based, and gated on the empty
+`kyc_fully_approved_at` — 0/90 on this site, so it checked nothing). Now a
+detail-level reconcile for customer/product/order: matches Medusa `id` ↔ ERPNext
+`medusa_*_id` **with a natural-key fallback** (product `handle↔item_code`,
+customer `email↔email_id`; order id-only) — without the fallback every
+catalogue-pulled product false-reports as missing (dropped ~18→1). Returns
+per-entity `matched` / `missing_on_frappe` / `frappe_orphans` (capped id lists +
+`truncated`). Plugin: `reconcileMapping` + `reconcileAll` (allowlist
+customer/product/order; append-only Stock Ledger Entry → `skipped`); admin route
+`GET /admin/erpnext/reconcile`; a **Reconcile** tab (one button + per-entity
+table + click-to-expand ids) for non-technical admins; the hourly cron now runs
+the detailed reconcile across all entities and writes `reconciliation.drift`
+events with capped payloads. Verified live (run twice = identical): customer
+52/83 matched=46 missing=6 orphans=15; order 15/19 matched=14 missing=1
+orphans=3 (incl. SAL-ORD-2026-00021 whose non-live `PENDING-RET-TEST-1` id makes
+it an orphan); product 40/44 matched=39 missing=1. Repo files:
+`plugin/modules/erpnext/index.ts`, `plugin/jobs/reconciliation.ts`,
+`plugin/admin/routes/erpnext/page.tsx`, `plugin/api/.../reconcile/route.ts`,
+`docs/RECONCILIATION_BREADTH_DESIGN.md`.
+
 **Housekeeping** — plugin `retryEvent(eventId, scope?)` fixed both replay
 defects: outbound mapped rows replay via `pushViaMapping` (re-runs the mapping
 transform, not a stale full-payload `forwardEvent`); inbound rows re-apply via
@@ -144,5 +165,7 @@ All features verified live (see each `*_RESULTS.md` and
 pushed.** Returns/Refunds, Pricing/B2B core, and the retry/mapping housekeeping,
 and the Medusa-initiated return-request last-mile are now included. Remaining
 (non-CRITICAL, per V2 audit): advanced/B2B pricing depth (MRP / wholesale /
-dealer / tiers / per-group price lists), rich product attributes, and
-reconciliation breadth.
+dealer / tiers / per-group price lists) and rich product attributes — both
+currently have **no source data on either side** of the demo (variant
+barcode/hs/material all 0, options placeholder; ERPNext 0 branded Items, no HSN
+field), so they need data seeding before they can be built and verified.
