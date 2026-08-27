@@ -21,17 +21,20 @@ not a git repo, the medusync Frappe app in the WSL bench has no git, and the
   - Reverse path: `REVERSE_PATH_DESIGN.md`
   - Returns/Refunds: `RETURNS_REFUNDS_DESIGN.md`
   - Pricing/B2B: `PRICING_B2B_DESIGN.md`
-- `plugin/` — the changed generic-plugin files (whole copies): `registry.ts`,
-  `index.ts`, `admin/routes/erpnext/page.tsx`, and the retry API route
-  `api/admin/erpnext/events/[event_id]/retry/route.ts`.
-- `sandbox/` — new `wallet_settlement` module, admin API routes, admin page,
-  `lib/emit-ws-event.ts`, seed. (Modified in place, described below:
-  `medusa-config.ts` — register `wallet_settlement` module + `cookieOptions:
+- `src/` — the **full installable Medusa plugin** (`medusa-plugin-erpnext`):
+  module service (`modules/erpnext/`), admin API routes (`api/admin/erpnext/`),
+  admin UI (`admin/routes/erpnext/`), and cron jobs (`jobs/`). All plugin-side
+  changes described below live here in place.
+- `backend/` — a Medusa **backend** module used alongside the plugin: the new
+  `wallet_settlement` module + its admin API routes, admin page,
+  `lib/emit-ws-event.ts`, and seed. (Also modified in place in the backend:
+  `medusa-config.ts` — register `wallet_settlement` + `cookieOptions:
   {secure:false, sameSite:"lax"}`; `src/scripts/seed-erpnext-demo.ts` — `const
   cur: any` type fix.)
-- `frappe/` — medusync handlers (`inventory.py`, `sales_financials.py`,
-  `reverse.py`, `pricing.py`, patched `mapped.py`), patched `hooks.py`, and the
-  setup/seed/patcher scripts (Custom Fields, Property Setter, mappings, pricing).
+- **ERPNext side** — the Frappe `medusync` app changes (`inventory.py`,
+  `sales_financials.py`, `reverse.py`, `pricing.py`, `address_sync.py`, patched
+  `mapped.py`, `hooks.py`, `__init__.py`, and the setup/seed scripts) are
+  published separately at **`suparikoli/medusync`**.
 
 ## What's included (by feature)
 
