@@ -104,17 +104,27 @@ The sandbox consumes the plugin through Medusa's yalc flow
 
 ```bash
 # in the plugin
-npm run typecheck
+npm run typecheck                # tsc, app + specs
+npm test                         # vitest unit tests
 npx medusa plugin:build
-npx medusa plugin:publish        # -> local yalc store
-# in risitex-mainb2b
-pnpm install                     # copies the published build into node_modules
+npx medusa plugin:publish        # -> the local yalc STORE
+
+# in risitex-mainb2b/apps/backend
+npx yalc update medusa-plugin-erpnext   # store -> apps/backend/.yalc  (REQUIRED)
+cd .. && pnpm install                   # .yalc -> node_modules
 pnpm --filter @risitex/backend exec medusa db:migrate   # when the plugin adds migrations
 ```
 
+**`plugin:publish` alone is not enough.** It writes to the yalc store; the
+consumer's `apps/backend/.yalc` copy only moves when you run `yalc update`
+there. Skipping it installs the previous build, and a new module the code
+imports is simply missing at boot. Run migrations AFTER the update, or the
+plugin's newest migration is not on disk yet and `db:migrate` reports
+"Database already up-to-date".
+
 `npx medusa plugin:develop` in the plugin watches and republishes on save;
 `medusa develop` in the sandbox picks it up. If the running app seems to serve
-stale plugin code, stop it, `pnpm install` again and restart.
+stale plugin code, stop it, re-run the update + install, and restart.
 
 `medusa develop` runs with `DISABLE_MEDUSA_ADMIN=true`; after changing the
 plugin's admin UI rebuild the static bundle:
@@ -136,6 +146,12 @@ Site-specific behaviour is chosen per site in `sites/site1.local/site_config.jso
 ```json
 "medusync_handler_packs": ["risitex"]
 ```
+
+Each connected Medusa store is a **Medusync Site** record in the Desk, holding
+that store's URL and its own pair of shared secrets. The plugin's matching
+`site_id` is on the ERPNext Sync settings page; the two must be equal, because
+every envelope names its site and each side uses that to recognise its own
+change coming home.
 
 Writing into the WSL app from Windows tools over `\\wsl.localhost\…` fails on
 permissions (files belong to `divya`); write to a Windows folder and copy in

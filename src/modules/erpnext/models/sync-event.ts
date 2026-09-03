@@ -32,6 +32,32 @@ import { model } from "@medusajs/framework/utils"
 export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
     id: model.id().primaryKey(),
 
+    /**
+     * Who caused this row: `<system>:<site_id>`, e.g. "erpnext:default".
+     * On an inbound row it is the sender; on an outbound row it is empty
+     * unless the push was itself caused by an inbound write.
+     */
+    origin: model.text().nullable(),
+
+    /** Carried unchanged through a causal chain, so one customer edit can
+     *  be followed across both systems in the logs. */
+    correlation_id: model.text().nullable(),
+
+    /**
+     * `<entity>:<id>` of the Medusa record an INBOUND write touched.
+     *
+     * This is the breadcrumb that stops a sync loop. An inbound write
+     * lands as an ordinary module write; the event it triggers reaches the
+     * forward subscriber moments later, in another request, where no
+     * in-memory flag survives. Finding a recent inbound row for the same
+     * entity tells the push it is an echo, and it is stamped so the far
+     * side drops it.
+     */
+    entity_ref: model.text().nullable(),
+
+    /** Which site this row belongs to. */
+    site_id: model.text().nullable(),
+
     /** Medusa event name, e.g. "customer.created", "order.placed". */
     event: model.text().index(),
 

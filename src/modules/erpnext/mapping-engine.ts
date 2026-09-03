@@ -47,7 +47,17 @@
  *   the source fields.
  */
 
+/** Which way a whole mapping is allowed to move. */
 export type MappingDirection = "push" | "pull" | "both"
+
+/**
+ * Which way ONE field is allowed to move. "none" is Don't Sync: the pair
+ * stays documented in the mapping but moves in neither direction - how
+ * "product images flow ERPNext to Medusa but never back" and "internal
+ * cost never leaves" are expressed without deleting the pair and losing
+ * the record of the decision.
+ */
+export type FieldDirection = MappingDirection | "none"
 
 export type MappingFieldPair = {
     /**
@@ -62,7 +72,7 @@ export type MappingFieldPair = {
     erpnext_field: string
     /** Per-field direction override. Defaults to the parent mapping's
      *  `direction` when absent. */
-    direction?: MappingDirection
+    direction?: FieldDirection
     /** Optional transform code (see file-doc). Applied AFTER reading
      *  from the source and BEFORE writing to the target. */
     transform?: string | null
@@ -81,7 +91,7 @@ export type ApplyMappingArgs = {
     fields: MappingFieldPair[]
     /** Per-mapping direction (`push` | `pull` | `both`) from the row.
      *  Used as the default when a pair has no explicit direction. */
-    mappingDirection: MappingDirection
+    mappingDirection: FieldDirection
     /** Source object. On push: the enriched Medusa entity (dot-paths).
      *  On pull: the Frappe doc (top-level field names). */
     source: Record<string, any>
@@ -169,12 +179,14 @@ export function applyMapping(args: ApplyMappingArgs): ApplyMappingResult {
 /**
  * Resolve whether a per-field (or per-mapping) direction allows the
  * current sync direction to flow. "both" is permissive in either
- * direction; "push" and "pull" are exclusive.
+ * direction; "push" and "pull" are exclusive; "none" (Don't Sync) blocks
+ * both.
  */
 function fieldFlowsInDirection(
-    fieldDir: MappingDirection,
+    fieldDir: FieldDirection,
     runDir: "push" | "pull",
 ): boolean {
+    if (fieldDir === "none") return false
     if (fieldDir === "both") return true
     return fieldDir === runDir
 }

@@ -39,6 +39,62 @@ event-id idempotency + direction-aware retry):
 - **B2B pricing** — tier-mapped price lists → `b2b_price_tier` rows with **quantity ladders**.
 - **Reconciliation** — detail-level drift report (customer/product/order) with an on-demand admin tab.
 
+## Wire contract (v2)
+
+Both sides speak one envelope, defined in `src/modules/erpnext/envelope.ts`
+and mirrored by `medusync/envelope.py`. Change them together.
+
+```jsonc
+{
+  "v": 2,
+  "kind": "event" | "mapped" | "mapping",   // what the body holds
+  "event": "customer.updated",
+  "event_id": "...",                        // idempotency key
+  "id": "...",                              // v1 alias, still sent
+  "ts": 1788474641,                         // inside the signature
+  "origin": {
+    "system": "medusa" | "erpnext",
+    "site_id": "default",
+    "correlation_id": "...",                // survives a causal chain
+    "echo_of": "erpnext:default"            // set only on a return trip
+  },
+  "data": { }                               // kind=event
+}
+```
+
+A body with no `v` is read as v1 and still applies, so the two apps can be
+upgraded one at a time.
+
+**Sites.** One ERPNext can serve several Medusa stores. Each store is a
+Medusync Site record on the ERPNext side with its own URL and its own pair of
+shared secrets; this plugin's `site_id` setting must equal that record's Site
+ID. Inbound requests are attributed to a site by their signature, not by
+anything the caller claims.
+
+**Loop prevention.** An inbound write records which Medusa record it touched.
+The event that write emits reaches the forward subscriber in a later request,
+where no in-memory flag survives, so the push looks that record up, finds it
+was caused by ERPNext, and stamps `echo_of`. The far side drops what it
+recognises as its own. Both directions are symmetric.
+
+**Mapping configuration is synchronised.** A mapping is one configuration
+living in two systems, paired by `mapping_uid` and ordered by `version`. A
+save on either side sends `mapping.upserted`; the higher version wins, and
+ERPNext wins a tie because ERPNext owns which documents may sync at all. A
+delete disables the far copy rather than destroying it.
+
+**Per-field direction** is `push`, `pull`, `both` or `none`. `none` is
+Don't Sync: the pair stays documented in the mapping but moves in neither
+direction, which is how "images flow ERPNext to Medusa but never back" and
+"internal cost never leaves" are expressed.
+
+## Develop
+
+```bash
+npm run typecheck   # tsc over the plugin and its specs
+npm test            # vitest: envelope, mapping engine, conflict rule
+```
+
 ## Layout
 
 | Path | What |

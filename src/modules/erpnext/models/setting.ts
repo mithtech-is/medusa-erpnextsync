@@ -42,6 +42,17 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      *  index on this column lives in the migration. */
     singleton_key: model.text().default("default"),
 
+    /**
+     * This Medusa instance's identity on the wire.
+     *
+     * One ERPNext can serve several Medusa stores; every envelope names
+     * its site so the far side can tell them apart, keep their logs
+     * separate, and recognise its own change coming home. Must equal the
+     * Site ID of the matching Medusync Site record. Empty falls back to
+     * "default", which is what a single-store install gets.
+     */
+    site_id: model.text().nullable(),
+
     // ── Master toggle ────────────────────────────────────────────────
     /** Kill switch. When false, `forwardEvent` short-circuits and
      *  doesn't write a row. Mirror of Frappe's `Medusa Settings.
