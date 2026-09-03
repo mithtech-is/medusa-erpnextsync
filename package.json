@@ -53,7 +53,8 @@
     "@types/react-dom": "^18.3.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "yalc": "^1.0.0-pre.53"
   },
   "peerDependencies": {
     "@medusajs/admin-sdk": "^2.19.0",
