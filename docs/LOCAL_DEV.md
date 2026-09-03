@@ -91,7 +91,8 @@ node serve-admin.js            # static admin on http://127.0.0.1:7001/app
 # Windows: Medusa processes of the sandbox
 Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'risitex-mainb2b|medusa-plugin-erpnext' -and $_.Name -eq 'node.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 # WSL: the bench
-wsl -d Ubuntu -u divya -- bash -lc 'pkill -f "bench start"; pkill -f honcho; pkill -f "frappe serve"; pkill -f "bench worker"; pkill -f "redis-server config/redis_"'
+wsl -d Ubuntu -u divya -- bash -lc 'pkill -f "bench start"; pkill -f honcho; pkill -f "frappe serve"; pkill -f "frappe worker"; pkill -f "frappe schedule"; pkill -f "redis-server config/redis_"; pkill -f "redis-server 127.0.0.1:13000"; pkill -f "redis-server 127.0.0.1:11000"'
+# (a daemonized redis rewrites its argv to "redis-server 127.0.0.1:PORT"; honcho cannot start while those ports are taken)
 # Docker
 docker stop risitex-postgres risitex-redis
 ```
