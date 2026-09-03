@@ -38,9 +38,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Invoke-Wsl([string[]]$Args) {
+function Invoke-Wsl([string[]]$WslArgs) {
   # Note: `$` inside arguments gets mangled on the way into WSL; keep commands variable-free.
-  & wsl.exe -d $Distro @Args 2>$null
+  & wsl.exe -d $Distro @WslArgs 2>$null
 }
 
 # ── 1. discover ────────────────────────────────────────────────────────────────

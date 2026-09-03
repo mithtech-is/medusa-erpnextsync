@@ -53,6 +53,12 @@ It writes `ERPNEXT_URL` into the sandbox backend `.env` and
 `MEDUSA_ADMIN_PASSWORD`) while Medusa is up to also update the plugin's
 setting row through the admin API.
 
+Verified 2026-09-04: from Windows both `http://127.0.0.1:8000` (localhost
+forwarding) and `http://<wsl-ip>:8000` reach Frappe; the resolver prefers
+`127.0.0.1` because it survives WSL restarts. From WSL, Medusa answers at
+`http://172.26.48.1:9000` (the gateway). Windows Firewall already allows
+node.exe inbound.
+
 Windows `netstat` can show `:8000`/`:9000` as LISTENING through `wslrelay`
 even when the bench is down; `ss -ltnp` inside WSL is the truth.
 
