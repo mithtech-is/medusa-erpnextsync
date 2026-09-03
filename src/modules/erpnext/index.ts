@@ -1186,7 +1186,13 @@ class ErpnextModuleService extends MedusaService({
 
         const valueMinor = Math.round((Number(data.amount) || 0) * 100)
         if (existing) {
-            await b2b.updatePriceTiers(existing.id, { value: valueMinor, max_quantity: maxQty })
+            // MedusaService update* takes a single { id, ...fields } object (or
+            // an array of them) — NOT a positional (id, data) pair. Passing the
+            // id positionally made it the data payload, leaving id undefined and
+            // throwing `B2bPriceTier with id "" not found` on every update.
+            await b2b.updatePriceTiers([
+                { id: existing.id, value: valueMinor, max_quantity: maxQty },
+            ])
             return { ok: true, sku, tier: tierCode, min_quantity: minQty, value_minor: valueMinor, updated: true }
         }
         await b2b.createPriceTiers([
