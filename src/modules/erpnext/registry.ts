@@ -354,6 +354,12 @@ const orderEntity: EntityDescriptor = {
                 "fulfillment_status",
                 "summary.*",
                 "items.title",
+                // In Medusa v2 the order line QUANTITY lives on the item
+                // DETAIL (order_item), not the line item — `items.quantity`
+                // resolves to null. Fetch `items.detail.quantity` and flatten
+                // it below so the augment reads the real qty (a null qty was
+                // silently defaulting to 1 and corrupting Sales Order lines).
+                "items.detail.quantity",
                 "items.quantity",
                 "items.unit_price",
                 "items.total",
@@ -370,6 +376,13 @@ const orderEntity: EntityDescriptor = {
         })
         const order: any = data?.[0]
         if (!order) return null
+        // Flatten the real line quantity (from the item detail) onto each item
+        // so downstream (augmentSalesDocPayload) reads the correct qty. Without
+        // this, `items.quantity` is null and the SO line silently became qty 1.
+        for (const it of order.items || []) {
+            const q = it?.detail?.quantity
+            if (q != null) it.quantity = q
+        }
         // Flatten the stored grand total onto the record for the augment.
         order.total =
             order.summary?.current_order_total ??
