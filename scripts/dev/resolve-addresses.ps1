@@ -88,15 +88,29 @@ if (Test-Path -LiteralPath $BackendEnv) {
   Write-Warning "backend .env not found at $BackendEnv (skipped)"
 }
 
-# ── 3. Medusync Settings.medusa_url (Frappe side) ─────────────────────────────
+# ── 3. Medusync Site.medusa_url (Frappe side) ─────────────────────────────────
+# Every connected store is a Medusync Site record and delivery reads the URL
+# from there; the Single's connection fields are legacy and no longer used to
+# send anything. Update every enabled site, since on this stack they all point
+# at the same local Medusa.
 $script = @"
 #!/usr/bin/env bash
 set -e
 export PATH="/home/$BenchUser/.local/bin:`$PATH"
-cd $BenchPath
-bench --site $Site execute frappe.db.set_single_value --args '["Medusync Settings","medusa_url","$medusaUrl"]' >/dev/null
-bench --site $Site execute frappe.clear_cache >/dev/null 2>&1 || true
-echo "Medusync Settings.medusa_url = $medusaUrl"
+cd $BenchPath/sites
+../env/bin/python - <<'PYEOF'
+import frappe
+frappe.init(site="$Site", sites_path=".")
+frappe.connect()
+rows = frappe.get_all("Medusync Site", filters={"enabled": 1}, fields=["name"])
+if not rows:
+    print("no enabled Medusync Site - create one in the Desk first")
+for row in rows:
+    frappe.db.set_value("Medusync Site", row.name, "medusa_url", "$medusaUrl", update_modified=False)
+    print("Medusync Site", row.name, "medusa_url =", "$medusaUrl")
+frappe.db.commit()
+frappe.clear_cache()
+PYEOF
 "@
 $tmp = Join-Path $env:TEMP "medusync-set-url.sh"
 [System.IO.File]::WriteAllText($tmp, ($script -replace "`r`n", "`n"))

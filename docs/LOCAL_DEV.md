@@ -47,8 +47,10 @@ every WSL restart, so run:
 pwsh scripts/dev/resolve-addresses.ps1
 ```
 
-It writes `ERPNEXT_URL` into the sandbox backend `.env` and
-`Medusync Settings.medusa_url` on the site, and prints what it chose. Pass
+It writes `ERPNEXT_URL` into the sandbox backend `.env` and the
+`medusa_url` of every enabled **Medusync Site**, and prints what it chose.
+(The Single's connection fields are legacy since sites arrived; delivery reads
+the Site record.) Pass
 `-MedusaAdminEmail`/`-MedusaAdminPassword` (or set `MEDUSA_ADMIN_EMAIL` /
 `MEDUSA_ADMIN_PASSWORD`) while Medusa is up to also update the plugin's
 setting row through the admin API.

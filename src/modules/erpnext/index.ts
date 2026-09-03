@@ -23,6 +23,7 @@ import {
 import { evaluateTrigger, presetCondition, validateTrigger } from "./trigger"
 import * as envelope from "./envelope"
 import { decideConflict, fromCanonical, toCanonical, type CanonicalMapping } from "./mapping-sync"
+import { entityRefOf, isWithinEchoWindow } from "./echo"
 
 export const ERPNEXT_MODULE = "erpnext"
 
@@ -39,11 +40,7 @@ const DEFAULT_RECEIVE_METHOD = "medusync.api.receive"
  *  install gets, and what the ERPNext side's own default site is called. */
 const DEFAULT_SITE_ID = "default"
 
-/** How far back an inbound write still counts as the cause of an outbound
- *  push. Long enough for a worker to pick the event up, short enough that
- *  a person editing the same record a minute later is not mistaken for an
- *  echo and silently dropped. */
-const ECHO_WINDOW_MS = 180_000
+
 
 /** Build the full receive URL from the effective config. The mapped
  *  push appends `_mapped` to the method name. */
@@ -198,29 +195,6 @@ function augmentSalesDocPayload(
     out.medusa_payment_method = record.payment_status ?? null
     out.medusa_payment_reference = pc?.id ?? null
     return out
-}
-
-/**
- * Which Medusa record an inbound apply actually wrote, as
- * "<entity>:<id>" — or null when it wrote none.
- *
- * This is the breadcrumb that stops a sync loop. The write emits a Medusa
- * event; the forward subscriber picks it up in a LATER request, where no
- * in-memory guard survives, and would push the same values straight back
- * to ERPNext. Recording what was touched lets that push recognise itself
- * as an echo and say so in its envelope, so the far side drops it.
- *
- * Only the mapping-driven path reports this today; the domain handlers
- * write order metadata, which nothing forwards back.
- */
-function entityRefOf(result: any): string | null {
-    const rows = Array.isArray(result?.results) ? result.results : []
-    for (const row of rows) {
-        if (row?.ok !== false && row?.entity && row?.id) {
-            return String(row.entity) + ":" + String(row.id)
-        }
-    }
-    return null
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -2518,8 +2492,11 @@ class ErpnextModuleService extends MedusaService({
                 { take: 1, order: { created_at: "DESC" } as any },
             )
             if (!row?.origin) return null
-            const created = row.created_at ? new Date(row.created_at as any).getTime() : 0
-            if (!created || Date.now() - created > ECHO_WINDOW_MS) return null
+            // last_attempt_at is when this row was last applied; an inbound
+            // row is REUSED across retries, so created_at can be hours old
+            // on a write that landed seconds ago.
+            const at = (row.last_attempt_at ?? row.created_at) as any
+            if (!isWithinEchoWindow(at)) return null
             return { origin: row.origin, correlation_id: row.correlation_id ?? null }
         } catch {
             // A lookup failure must never block a legitimate push; the
@@ -2567,14 +2544,21 @@ class ErpnextModuleService extends MedusaService({
         const [created] = await this.createErpnextMappings([
             {
                 ...patch,
+                // A mapping we have never seen arrives switched OFF, whatever
+                // the sender says. First contact between two systems that each
+                // already had mappings would otherwise turn on a rule nobody
+                // reviewed here — and a half-translated one at that, since
+                // events and any Medusa-only options have no counterpart on
+                // the other side. An operator enables it once they have
+                // looked. Updates to a uid we already hold apply as sent.
+                enabled: false,
                 // Which Medusa events fire a push is a Medusa-side concern
-                // ERPNext has no opinion on. A new mapping starts with none,
-                // so it cannot push until an operator says when.
+                // ERPNext has no opinion on. Empty until an operator says when.
                 events: [],
                 last_synced_at: new Date(),
             } as any,
         ])
-        return { action: "created", id: created?.id }
+        return { action: "created", id: created?.id, reason: "created_disabled" }
     }
 
     /** A mapping deleted on the other side is disabled here, not removed:
