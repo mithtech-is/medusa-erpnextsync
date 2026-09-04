@@ -71,6 +71,23 @@ function placeholderFor(p: { path: string; type?: string; label?: string }): any
     }
 }
 
+/**
+ * Resolve a module that this deployment may simply not have.
+ *
+ * Custom modules are per project: `cashfree_wallet` exists on the sandbox
+ * this plugin grew up on and on nobody else's Medusa. A bare
+ * `scope.resolve` there is an exception thrown from inside an inbound
+ * webhook, which the sender then retries forever. Answering "not
+ * installed" is both true and actionable.
+ */
+function resolveOptional(scope: any, key: string): any | null {
+    try {
+        return scope?.resolve?.(key) ?? null
+    } catch {
+        return null
+    }
+}
+
 export const ERPNEXT_MODULE = "erpnext"
 
 // Whitelisted Frappe method that receives Medusa→Frappe pushes. The
@@ -1829,7 +1846,10 @@ class ErpnextModuleService extends MedusaService({
         if (!Array.isArray(rows) || rows.length === 0) {
             return { updated: 0, unmatched: 0, no_op: 0, skipped: 0 }
         }
-        const wallet = scope.resolve("cashfree_wallet")
+        const wallet = resolveOptional(scope, "cashfree_wallet")
+        if (!wallet) {
+            return { updated: 0, unmatched: 0, no_op: 0, skipped: rows.length, reason: "no cashfree_wallet module" }
+        }
         const existing = ((await wallet.listBankAccounts(
             { customer_id } as any,
             { take: 100 } as any,
@@ -1901,7 +1921,10 @@ class ErpnextModuleService extends MedusaService({
         if (!Array.isArray(rows) || rows.length === 0) {
             return { updated: 0, created: 0, no_op: 0, skipped: 0 }
         }
-        const wallet = scope.resolve("cashfree_wallet")
+        const wallet = resolveOptional(scope, "cashfree_wallet")
+        if (!wallet) {
+            return { updated: 0, unmatched: 0, no_op: 0, skipped: rows.length, reason: "no cashfree_wallet module" }
+        }
         const existing = ((await wallet.listDematAccounts(
             { customer_id } as any,
             { take: 100 } as any,
@@ -2016,7 +2039,8 @@ class ErpnextModuleService extends MedusaService({
         // service.ts). Convert here so we don't end up with ₹0.30
         // wallet credits when Frappe books a ₹30 deposit.
         const amountPaise = Math.round(amountRupees * 100)
-        const walletModule = scope.resolve("cashfree_wallet")
+        const walletModule = resolveOptional(scope, "cashfree_wallet")
+        if (!walletModule) return { skipped: true, reason: "this Medusa has no cashfree_wallet module" }
         const tx = await walletModule.credit({
             customer_id: customer.id,
             amount_inr: amountPaise,
@@ -2057,7 +2081,8 @@ class ErpnextModuleService extends MedusaService({
         }
         // Rupees→paise (see _handleWalletCredit comment).
         const amountPaise = Math.round(Math.abs(amountRupees) * 100)
-        const walletModule = scope.resolve("cashfree_wallet")
+        const walletModule = resolveOptional(scope, "cashfree_wallet")
+        if (!walletModule) return { skipped: true, reason: "this Medusa has no cashfree_wallet module" }
         // Use the dedicated debit() method (positive amount; kind=
         // manual_adjust). The earlier attempt to pass a negative
         // amount to credit() failed because credit() rejects
@@ -2086,7 +2111,8 @@ class ErpnextModuleService extends MedusaService({
         opts: { event: string },
     ): Promise<any> {
         if (!scope) return { skipped: true, reason: "no_scope" }
-        const walletModule = scope.resolve("cashfree_wallet")
+        const walletModule = resolveOptional(scope, "cashfree_wallet")
+        if (!walletModule) return { skipped: true, reason: "this Medusa has no cashfree_wallet module" }
         // The original tx was created with idempotency_key=frappe:
         // <original-event-id>. The cancel event_id is the original
         // event_id + ":cancel" (see frappe-webhooks.ts blueprints).

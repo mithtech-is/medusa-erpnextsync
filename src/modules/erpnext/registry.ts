@@ -814,7 +814,13 @@ const REGISTRY: Record<string, EntityDescriptor> = {
     api_key: apiKeyEntity,
     payment_collection: paymentCollectionEntity,
     fulfillment: fulfillmentEntity,
-    wallet_settlement: walletSettlementEntity,
+    // wallet_settlement was removed in the Phase 0 generic cleanup and
+    // finally taken out of the picker here. The module it named was a
+    // sandbox demo that no longer exists on either side: the Medusa module
+    // folder is gone and the ERPNext doctype went with the risitex_erp
+    // uninstall. Offering it in the entity picker meant an operator could
+    // build a mapping that could only ever fail. The wallet contract this
+    // connector actually wants is in pending_work.
 }
 
 /**

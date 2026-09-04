@@ -33,3 +33,28 @@ real would only produce untested code.
 
 **Dependencies.** Phase 1 (envelope v2, mapping model v2, handler packs as
 opt-in plugins). A sandbox wallet implementation to test against.
+
+## What was cleared away on 2026-09-05
+
+Auditing this before Phase 6 turned up three pieces of debris, because the
+removal in Phase 0 took the module and left everything pointing at it:
+
+- **The registry no longer offers `wallet_settlement`.** The entity was
+  still in the picker, so an operator could build a mapping that could
+  only ever fail — the Medusa module folder is gone and the ERPNext
+  doctype went with the `risitex_erp` uninstall.
+- **The dead mapping is switched off.** "Wallet Settlement ↔ RISITEX
+  Wallet Settlement" was enabled on the sandbox and pointed at nothing in
+  either direction.
+- **The `cashfree_wallet` handlers no longer assume the module exists.**
+  Six call sites did a bare `scope.resolve`, which on any Medusa without
+  that custom module is an exception thrown inside an inbound webhook, and
+  therefore a sender retrying forever. They now answer "this Medusa has no
+  cashfree_wallet module" and skip.
+
+What is left, and is deliberately left: the sandbox's `cashfree_wallet`
+module is real and holds data (22 wallets, 11 transactions), and
+`Customer.wallet_balance_paise` still exists on the ERPNext side with
+nothing writing to it. Neither is debris exactly — they are the shape of
+the wallet this connector would sync if the contract below existed. The
+ERPNext field is the obvious landing place for a balance.
