@@ -9,6 +9,7 @@ import { ErpnextSetting } from "./models/setting"
 import { ErpnextMapping } from "./models/mapping"
 import { applyMapping, getByPath, isTemplatePath, type MappingDirection, type MappingFieldPair } from "./mapping-engine"
 import { listMedusaEntities, getMedusaEntity } from "./registry"
+import { TOTAL_KEY, mergeReceipt, receiptFrom } from "./order-payments"
 import {
     buildAutofill,
     type AutofillResult,
@@ -855,6 +856,12 @@ class ErpnextModuleService extends MedusaService({
                     return_against: data?.return_against ?? null,
                     received_at: data?.received_at ?? null,
                 })
+            // ── Order provenance and money ERPNext received ────────
+            case "order.source.set":
+                return this._handleOrderSource(scope, data)
+            case "order.payment.set":
+                return this._handleOrderPayment(scope, data)
+
             case "order.refunded":
                 return this._mergeOrderMeta(scope, data?.medusa_order_id, "refund", {
                     credit_note: data?.credit_note ?? null,
@@ -1170,6 +1177,55 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /**
+     * Where an order came from, and how its money stands right now.
+     *
+     * A web order and one a salesperson typed in are indistinguishable
+     * once both are Sales Orders, so ERPNext reports the channel back and
+     * the storefront can stop guessing. The whole object is replaced each
+     * time because it describes the order's current state, not an event
+     * that happened to it.
+     */
+    private async _handleOrderSource(scope: any, data: any): Promise<any> {
+        return this._mergeOrderMeta(scope, data?.medusa_order_id, "erp_order", {
+            source: data?.source ?? null,
+            sales_order: data?.sales_order ?? null,
+            status: data?.status ?? null,
+            payment: data?.payment ?? null,
+        })
+    }
+
+    /**
+     * Money ERPNext received against an order — a transfer, a cheque, a UPI
+     * collection. None of it passed through Medusa, so this is the only way
+     * the storefront hears about it.
+     *
+     * Receipts accumulate under the Payment Entry that produced each one:
+     * an order settled by three transfers has three, and re-sending one
+     * overwrites its own entry rather than the others. See order-payments.ts.
+     */
+    private async _handleOrderPayment(scope: any, data: any): Promise<any> {
+        if (!scope) return { skipped: true, reason: "no_scope" }
+        const id = String(data?.medusa_order_id ?? "").trim()
+        if (!id) return { skipped: true, reason: "missing medusa_order_id" }
+        const receipt = receiptFrom(data)
+        if (!receipt) return { skipped: true, reason: "missing payment_entry" }
+        const orderSvc: any = scope.resolve("order")
+        const [order] = await orderSvc.listOrders(
+            { id },
+            { take: 1, select: ["id", "metadata"] },
+        )
+        if (!order) return { skipped: true, reason: `no order ${id}` }
+        const metadata = mergeReceipt(order.metadata, receipt)
+        await orderSvc.updateOrders([{ id, metadata }])
+        return {
+            ok: true,
+            order_id: id,
+            payment_entry: receipt.payment_entry,
+            received: metadata[TOTAL_KEY],
+        }
+    }
+
+    /**
      * Pricing (ERPNext → Medusa, ERPNext wins): set/overwrite a variant's
      * price for one currency. Amounts arrive in rupees (major) and are stored
      * in minor units (paise), matching this store's price convention. A
@@ -1413,7 +1469,27 @@ class ErpnextModuleService extends MedusaService({
             })
         }
         const locSvc: any = scope.resolve("stock_location")
+        // ERPNext holds the warehouse-to-location map now, so it names the
+        // location this level belongs to. A store that never filled the map
+        // in sends nothing and keeps the old single-location behaviour.
+        const requested = String(data?.location_id ?? "").trim()
+        if (requested) {
+            const [known] = await locSvc.listStockLocations(
+                { id: requested },
+                { take: 1 },
+            )
+            // Writing a level against a location this store does not have
+            // would create stock nothing can sell and nobody would notice.
+            // Say so instead, so the map gets fixed.
+            if (!known) {
+                return {
+                    skipped: true,
+                    reason: `no stock location ${requested} (check the warehouse map on the ERPNext site)`,
+                }
+            }
+        }
         const locId =
+            requested ||
             process.env.INVENTORY_LOCATION_ID ||
             (await locSvc.listStockLocations({}, { take: 1 }))?.[0]?.id
         if (!locId) {
@@ -1432,7 +1508,14 @@ class ErpnextModuleService extends MedusaService({
                 { inventory_item_id: item.id, location_id: locId, stocked_quantity: quantity },
             ])
         }
-        return { ok: true, sku, quantity, location_id: locId, inventory_item_id: item.id }
+        return {
+            ok: true,
+            sku,
+            quantity,
+            location_id: locId,
+            warehouse: data?.warehouse ?? null,
+            inventory_item_id: item.id,
+        }
     }
 
     private async _handleCustomerUpserted(

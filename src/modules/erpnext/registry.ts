@@ -329,6 +329,11 @@ const orderEntity: EntityDescriptor = {
         { path: "shipping_address.country_code", label: "Shipping country (ISO)", type: "string", suggested_transform: "uppercase" },
         { path: "items", label: "Line items (array)", type: "array", suggested_transform: "json" },
         { path: "created_at", label: "Created at", type: "datetime", suggested_transform: "date_iso" },
+        // Which channel the order arrived through. ERPNext keeps this on
+        // Sales Order so the storefront can say "placed online" or "placed
+        // by our sales team" instead of guessing from the order alone.
+        { path: "source", label: "Order source (sales channel)", type: "string" },
+        { path: "sales_channel_id", label: "Sales channel id", type: "id" },
     ],
     async fetchById(container, id) {
         // Use query.graph (RemoteQuery), NOT orderModule.listOrders with deep
@@ -371,6 +376,8 @@ const orderEntity: EntityDescriptor = {
                 "billing_address.*",
                 "payment_collections.id",
                 "payment_collections.status",
+                "sales_channel_id",
+                "sales_channel.name",
             ],
             filters: { id },
         })
@@ -388,6 +395,10 @@ const orderEntity: EntityDescriptor = {
             order.summary?.current_order_total ??
             order.summary?.original_order_total ??
             0
+        // Flatten the channel to a name a mapping can carry straight into
+        // Sales Order.medusa_order_source. A store with no channels at all
+        // still came from the web, which is truer than an empty string.
+        order.source = order.sales_channel?.name || "web"
         return order
     },
     async upsertByKey() {

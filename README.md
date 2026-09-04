@@ -120,6 +120,46 @@ Both sides record it — Medusa keeps the item code in
 Item — so later pushes land on that record and reconciliation stops
 reporting the pair as two orphans.
 
+## Stock, prices and orders
+
+Everything here is driven from the ERPNext side, which is where the
+warehouses, price lists and money actually live.
+
+**Stock.** `inventory.level.set` now carries `location_id` and
+`warehouse`. ERPNext keeps the warehouse-to-location map per store, so
+each store is told the location *it* knows; the quantity is sellable
+stock, already net of what ERPNext has reserved. A location id this store
+does not have is refused with a readable reason rather than written to a
+level nothing can sell. Without a `location_id` the old behaviour stands:
+`INVENTORY_LOCATION_ID`, or the first stock location.
+
+**Prices.** `variant.price.set` and `variant.tier_price.set` are
+unchanged on the wire. What changed is upstream: ERPNext decides per store
+which price list is a base price and which is a customer tier, so one
+store can receive a list as a shelf price while another receives the same
+list as a tier.
+
+**Orders.** Two events land in the order's metadata:
+
+| Event | Metadata key | Shape |
+|---|---|---|
+| `order.source.set` | `erp_order` | replaced: `{ source, sales_order, status, payment }` |
+| `order.payment.set` | `erp_payments` | accumulated, keyed by Payment Entry |
+
+`erp_payments` is a map rather than a single object because an order can
+be settled by several transfers. Each receipt is filed under the Payment
+Entry that produced it, so a re-send overwrites only its own entry, and
+`erp_payments_total` holds what has actually been received — a cancelled
+receipt stays visible but stops counting. See `order-payments.ts`.
+
+Money is never turned into a Medusa payment record. ERPNext is the
+accounting authority in this setup, and a payment nothing captured would
+put a figure in the storefront ledger that no statement backs.
+
+For the order's own provenance, the `order` entity now exposes
+`source` (its sales channel name, or `web`), so a mapping can carry it
+into `Sales Order.medusa_order_source` and ERPNext can report it back.
+
 ## Develop
 
 ```bash
