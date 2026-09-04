@@ -101,11 +101,10 @@ export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
     mapping_id: model.text().nullable(),
 
     /**
-     * Sync direction. "outbound" = Medusa→Frappe (the only kind that
-     * existed pre-F1); "inbound" = Frappe→Medusa POSTed by a standard
-     * Frappe Webhook row (created via the seeder). The retry +
-     * reconciliation crons scan by (status, direction) so this column
-     * is indexed in the migration.
+     * Sync direction. "outbound" = Medusa→Frappe; "inbound" =
+     * Frappe→Medusa, POSTed by medusync (or by any signed sender). The
+     * retry and reconciliation crons scan by (status, direction), so
+     * this column is indexed in the migration.
      */
     direction: model.text().default("outbound"),
 

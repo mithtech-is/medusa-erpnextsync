@@ -385,9 +385,8 @@ const SettingsTab: React.FC<{
               />
               <Text size="small" className="text-ui-fg-subtle">
                 Verifies pushes coming IN from Frappe. Generate here, then
-                copy it into <strong>Medusync Settings → Outbound
-                Secret</strong> (or onto each Frappe Webhook row, if you
-                use those instead).
+                copy it into the Medusync Site's <strong>Outbound
+                Secret</strong> on the ERPNext side.
               </Text>
             </div>
             <div>
@@ -1151,7 +1150,7 @@ type Direction = "push" | "pull" | "both"
  */
 const DIRECTION_HELP: Record<Direction, string> = {
   push: "Medusa events write into ERPNext over the REST API. Needs only the API key in Settings — nothing installed on ERPNext.",
-  pull: "A cron polls ERPNext every 5 min for rows changed since the last run. Needs only the API key. For instant updates instead of 5-minute ones, seed the Frappe webhooks from the Settings tab.",
+  pull: "A cron polls ERPNext every 5 min for rows changed since the last run. Needs only the API key. For instant updates instead of 5-minute ones, enable the mapping on the ERPNext side so medusync pushes as documents change.",
   both: "Both of the above on the same record. Per-field overrides below decide which side owns each field — set a field to one-way to stop the other side overwriting it.",
 }
 

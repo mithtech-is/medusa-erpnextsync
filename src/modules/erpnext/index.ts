@@ -315,7 +315,7 @@ type SaveSettingsInput = {
     frappe_receive_method?: string | null
     /** Medusa→Frappe HMAC secret (legacy column name `webhook_secret`). */
     webhook_secret?: string | null
-    /** Frappe→Medusa HMAC secret (F0 — used by the Frappe Webhook
+    /** Frappe→Medusa HMAC secret (used by the Frappe side's
      *  rows seeded by F2; verified by the F1 inbound receiver). */
     frappe_to_medusa_secret?: string | null
     erpnext_api_key?: string | null
@@ -615,7 +615,7 @@ class ErpnextModuleService extends MedusaService({
     //      the route handler can pick a sensible HTTP status code.
     //
     // Idempotency: dedupe is on `event_id` (passed in the body as
-    // `frappe:<doctype>:<name>:<modified>` by the Frappe Webhook
+    // `frappe:<doctype>:<name>:<modified>` by the Frappe side
     // Jinja body template). A retry with the same id just bumps
     // attempts on the existing row.
     // ─────────────────────────────────────────────────────────────────
@@ -825,16 +825,16 @@ class ErpnextModuleService extends MedusaService({
         if (!sigOk) {
             // Diagnostic: log enough about the mismatch to triage
             // signature failures without leaking the secret itself.
-            // Common causes when this fires for real Frappe webhooks:
-            //   - Frappe Webhook row has no `Content-Type:
-            //     application/json` header → Express body parser
-            //     skips parsing AND preserveRawBody verify hook never
-            //     fires → rawBody falls back to empty `{}` (body_len:
-            //     2). The seedFrappeWebhooks blueprint pins the
-            //     header explicitly to prevent this.
-            //   - Secret rotated on one side but not the other —
-            //     re-run /admin/erpnext/seed-frappe-webhooks to
-            //     re-PUT every row with the current secret.
+            // Two causes account for almost all of these:
+            //   - The sender did not set `Content-Type:
+            //     application/json`, so Express skips parsing, the
+            //     preserveRawBody verify hook never fires, and rawBody
+            //     falls back to an empty `{}` (body_len: 2). medusync
+            //     always sets it; a hand-rolled Frappe Webhook row may
+            //     not.
+            //   - The secret was rotated on one side only. Ours is the
+            //     Inbound Secret on the Medusync Site; theirs is
+            //     `frappe_to_medusa_secret` here.
             const bodySha = crypto
                 .createHash("sha256")
                 .update(args.rawBody)
