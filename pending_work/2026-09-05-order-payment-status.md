@@ -57,3 +57,15 @@ answers and they are not equivalent:
 
 Until that is settled, `payment_of` is documented in the code as
 advance-based rather than quietly wrong.
+
+## Questions this is waiting on
+
+See `00-QUESTIONS-ANSWER-THESE-FIRST.md`.
+
+- **Q18** — which document is the payment authority when a Sales Order and
+  a Sales Invoice disagree.
+
+One question, and it is the only one on this list that is live and mildly
+wrong today rather than simply absent: an order paid the ordinary way
+through an invoice reads `unpaid`. `erp_payments_total` is correct in the
+meantime and is what a storefront should read.

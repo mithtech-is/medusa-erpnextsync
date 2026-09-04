@@ -58,3 +58,17 @@ module is real and holds data (22 wallets, 11 transactions), and
 nothing writing to it. Neither is debris exactly — they are the shape of
 the wallet this connector would sync if the contract below existed. The
 ERPNext field is the obvious landing place for a balance.
+
+## Questions this is waiting on
+
+See `00-QUESTIONS-ANSWER-THESE-FIRST.md`.
+
+- **Q1** — which ERPNext DocType holds the wallet. Nothing can be built
+  until there is one to map, and the answer decides whether medusync ships
+  a DocType, names one per site, or does neither.
+- **Q2** — which side owns the balance. It decides whether Medusa's figure
+  is authoritative, cached, or reconciled, and a reconciled balance needs a
+  tie-break rule that has to come from you.
+- **Q3** — whether `Customer.wallet_balance_paise` stays.
+
+Q1 is the blocking one. Q2 changes the design; Q3 is tidying.
