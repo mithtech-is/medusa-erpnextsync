@@ -88,6 +88,38 @@ Don't Sync: the pair stays documented in the mapping but moves in neither
 direction, which is how "images flow ERPNext to Medusa but never back" and
 "internal cost never leaves" are expressed.
 
+## The catalogue, and products created here
+
+ERPNext owns the catalogue. It announces which DocType holds it, so this
+plugin searches the right place even on a project that keeps products
+somewhere other than `Item`, and it decides per document whether a record
+may sync at all.
+
+What may happen when a product is created **in Medusa** is the one
+catalogue decision that belongs on this side, because it governs what
+leaves Medusa. `medusa_product_policy`:
+
+| Value | Effect |
+|---|---|
+| `off` | Medusa-created products never reach ERPNext. |
+| `link` | **Default.** They reach ERPNext only once attached to an existing Item. |
+| `create` | They may create an Item. |
+
+Updates to a product that is already linked always flow: the policy
+governs bringing a new product across, not keeping a known one in step.
+
+Attaching a product to the Item that already exists:
+
+```
+GET  /admin/erpnext/products/unlinked?search=jeans
+POST /admin/erpnext/products/{id}/link   { "item_code": "23435" }
+```
+
+Both sides record it — Medusa keeps the item code in
+`metadata.erpnext_item_code`, ERPNext gets the Medusa id stamped on the
+Item — so later pushes land on that record and reconciliation stops
+reporting the pair as two orphans.
+
 ## Develop
 
 ```bash

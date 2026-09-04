@@ -53,6 +53,24 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      */
     site_id: model.text().nullable(),
 
+    /**
+     * Which ERPNext DocType holds the catalogue, as ERPNext reports it.
+     *
+     * Not an opinion this side gets to have: ERPNext owns the catalogue
+     * and announces the DocType, so "link this product to an existing
+     * one" searches the right place even on a project that keeps its
+     * products somewhere other than Item.
+     */
+    products_doctype: model.text().nullable(),
+
+    /**
+     * What may happen when a product is created in Medusa: "off",
+     * "link" (attach to an existing Item only, the default) or "create".
+     * See ./product-policy.ts for why this is the one catalogue decision
+     * that belongs on this side.
+     */
+    medusa_product_policy: model.text().default("link"),
+
     // ── Master toggle ────────────────────────────────────────────────
     /** Kill switch. When false, `forwardEvent` short-circuits and
      *  doesn't write a row. Mirror of Frappe's `Medusa Settings.

@@ -41,6 +41,10 @@ const SaveSchema = z.object({
     /** This instance's name on the wire; must match the Medusync Site
      *  record on the ERPNext side. */
     site_id: z.string().nullable().optional(),
+    /** Normally set by ERPNext announcing it; here for a manual fix. */
+    products_doctype: z.string().nullable().optional(),
+    /** What may happen when a product is created in Medusa. */
+    medusa_product_policy: z.enum(["off", "link", "create"]).nullable().optional(),
     erpnext_url: z.string().nullable().optional(),
     // Whitelisted Frappe method receiving pushes (e.g. medusync.api.receive).
     frappe_receive_method: z.string().nullable().optional(),

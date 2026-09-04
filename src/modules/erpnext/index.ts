@@ -24,6 +24,13 @@ import { evaluateTrigger, presetCondition, validateTrigger } from "./trigger"
 import * as envelope from "./envelope"
 import { decideConflict, fromCanonical, toCanonical, type CanonicalMapping } from "./mapping-sync"
 import { entityRefOf, isWithinEchoWindow } from "./echo"
+import {
+    DEFAULT_PRODUCT_POLICY,
+    decideProductPush,
+    isLinked,
+    normalizeProductPolicy,
+    LINK_KEY,
+} from "./product-policy"
 
 export const ERPNEXT_MODULE = "erpnext"
 
@@ -39,6 +46,9 @@ const DEFAULT_RECEIVE_METHOD = "medusync.api.receive"
 /** Site name used when nothing is configured — what a single-store
  *  install gets, and what the ERPNext side's own default site is called. */
 const DEFAULT_SITE_ID = "default"
+
+/** What ERPNext calls its catalogue until it tells us otherwise. */
+const DEFAULT_PRODUCTS_DOCTYPE = "Item"
 
 
 
@@ -228,6 +238,10 @@ type SaveSettingsInput = {
     /** This instance's name on the wire. Must match the Site ID of the
      *  matching Medusync Site record on the ERPNext side. */
     site_id?: string | null
+    /** Normally set by ERPNext announcing it; exposed for a manual fix. */
+    products_doctype?: string | null
+    /** "off" | "link" | "create" — see ./product-policy.ts. */
+    medusa_product_policy?: string | null
     /** Empty string = unchanged, null = clear, value = update. Same
      *  contract as cashfree-settings to keep the admin UX consistent. */
     erpnext_url?: string | null
@@ -259,6 +273,10 @@ type SaveSettingsInput = {
 
 type ActiveConfig = {
     enable_sync: boolean
+    /** DocType ERPNext says holds the catalogue. */
+    products_doctype: string
+    /** What may happen when a product is created here. */
+    medusa_product_policy: string
     /** This instance's name on the wire. One ERPNext can serve several
      *  Medusa stores; every envelope says which one it came from. */
     site_id: string
@@ -730,6 +748,24 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /**
+     * Record what ERPNext told us about itself.
+     *
+     * Only fields ERPNext owns are taken. `medusa_product_policy` is
+     * deliberately NOT among them: it governs what leaves Medusa, so it
+     * stays this side's decision.
+     */
+    async applyRemoteSettings(data: any): Promise<any> {
+        const doctype = String(data?.products_doctype ?? "").trim()
+        if (!doctype) return { skipped: "nothing-to-apply" }
+        const row = await this.findSettingsRow()
+        if (row?.products_doctype === doctype) {
+            return { via: "settings", products_doctype: doctype, action: "unchanged" }
+        }
+        await this.saveSettings({ products_doctype: doctype })
+        return { via: "settings", products_doctype: doctype, action: "updated" }
+    }
+
+    /**
      * A mapping configuration arrived from ERPNext. Both systems hold the
      * same mapping under one uid; the higher version wins and ERPNext
      * wins a tie, so this either applies the change or records why it
@@ -757,6 +793,14 @@ class ErpnextModuleService extends MedusaService({
         scope?: any,
     ): Promise<any> {
         if (event === "ping") return { pong: true, echo: data }
+
+        // ERPNext owns the catalogue and says which DocType holds it. We
+        // record it rather than guess, so "link this product to an
+        // existing one" searches the right place on a project that keeps
+        // its products somewhere other than Item.
+        if (event === "medusync.settings.changed") {
+            return this.applyRemoteSettings(data)
+        }
 
         // Generic, mapping-driven inbound. Resolve the enabled pull/both
         // mapping(s) for this event or Frappe doctype and apply them via the
@@ -2264,6 +2308,8 @@ class ErpnextModuleService extends MedusaService({
                 erpnext_api_key_masked: null,
                 erpnext_api_secret_masked: null,
                 site_id: process.env.ERPNEXT_SITE_ID || DEFAULT_SITE_ID,
+                products_doctype: DEFAULT_PRODUCTS_DOCTYPE,
+                medusa_product_policy: DEFAULT_PRODUCT_POLICY,
                 request_timeout_ms: DEFAULT_TIMEOUT_MS,
                 auto_retry_failed: true,
                 auto_retry_max_attempts: 5,
@@ -2285,6 +2331,8 @@ class ErpnextModuleService extends MedusaService({
             exists: true,
             enable_sync: row.enable_sync,
             site_id: row.site_id || process.env.ERPNEXT_SITE_ID || DEFAULT_SITE_ID,
+            products_doctype: row.products_doctype || DEFAULT_PRODUCTS_DOCTYPE,
+            medusa_product_policy: normalizeProductPolicy(row.medusa_product_policy),
             erpnext_url: row.erpnext_url,
             frappe_receive_method:
                 row.frappe_receive_method ||
@@ -2338,6 +2386,12 @@ class ErpnextModuleService extends MedusaService({
             // for a Site ID, so the two never disagree over letter case.
             const raw = (input.site_id ?? "").trim().toLowerCase()
             patch.site_id = raw || null
+        }
+        if ("products_doctype" in input) {
+            patch.products_doctype = (input.products_doctype ?? "").trim() || null
+        }
+        if ("medusa_product_policy" in input) {
+            patch.medusa_product_policy = normalizeProductPolicy(input.medusa_product_policy)
         }
         if ("erpnext_url" in input) {
             patch.erpnext_url = normaliseUrl(input.erpnext_url)
@@ -2441,6 +2495,8 @@ class ErpnextModuleService extends MedusaService({
         return {
             enable_sync: row?.enable_sync ?? true,
             site_id: row?.site_id || process.env.ERPNEXT_SITE_ID || DEFAULT_SITE_ID,
+            products_doctype: row?.products_doctype || DEFAULT_PRODUCTS_DOCTYPE,
+            medusa_product_policy: normalizeProductPolicy(row?.medusa_product_policy),
             erpnext_url,
             webhook_secret,
             frappe_receive_method:
@@ -2827,6 +2883,153 @@ class ErpnextModuleService extends MedusaService({
      * each id (we don't reach into the customer / order / product
      * modules from here — keeps this module's deps minimal).
      */
+    /**
+     * Catalogue entries in ERPNext that no Medusa product claims yet.
+     *
+     * What the operator picks from when attaching a product they just
+     * created here to the one that already exists over there.
+     */
+    async listUnlinkedCatalogueItems(args: {
+        search?: string
+        limit?: number
+    } = {}): Promise<{ ok: boolean; doctype: string; items: any[]; message?: string }> {
+        const cfg = await this.getActiveConfig()
+        const doctype = cfg.products_doctype
+        const filters: any[] = [["medusa_product_id", "is", "not set"]]
+        if (args.search?.trim()) {
+            filters.push(["name", "like", `%${args.search.trim()}%`])
+        }
+        const res = await this.pullDoctype(doctype, {
+            filters,
+            fields: ["name", "item_name", "disabled"],
+            limit: Math.min(Math.max(args.limit ?? 20, 1), 200),
+        })
+        if (!res.ok) {
+            return { ok: false, doctype, items: [], message: res.message }
+        }
+        return { ok: true, doctype, items: res.items ?? [] }
+    }
+
+    /**
+     * Attach a Medusa product to an ERPNext catalogue entry.
+     *
+     * Both sides have to record it or the link is half-made: Medusa keeps
+     * the item code so later pushes are allowed and land on the right
+     * record, and ERPNext stamps the Medusa id so reconciliation stops
+     * reporting the pair as two orphans.
+     */
+    async linkProductToItem(args: {
+        product_id: string
+        item_code: string
+        scope?: any
+    }): Promise<{ ok: boolean; message?: string; item_code?: string; product_id?: string }> {
+        const cfg = await this.getActiveConfig()
+        const itemCode = (args.item_code ?? "").trim()
+        if (!args.product_id || !itemCode) {
+            return { ok: false, message: "product_id and item_code are both required" }
+        }
+
+        // The Item has to exist, and must not already belong to a
+        // different product — silently stealing a link would leave the
+        // other product pointing at a record that no longer names it.
+        const lookup = await this.pullDoctype(cfg.products_doctype, {
+            filters: [["name", "=", itemCode]],
+            fields: ["name", "medusa_product_id"],
+            limit: 1,
+        })
+        if (!lookup.ok) {
+            return { ok: false, message: lookup.message ?? "could not reach ERPNext" }
+        }
+        const item = (lookup.items ?? [])[0]
+        if (!item) {
+            return { ok: false, message: `${cfg.products_doctype} "${itemCode}" does not exist` }
+        }
+        if (item.medusa_product_id && item.medusa_product_id !== args.product_id) {
+            return {
+                ok: false,
+                message: `${itemCode} is already linked to ${item.medusa_product_id}`,
+            }
+        }
+
+        const productSvc: any = args.scope?.resolve?.("product")
+        if (!productSvc) {
+            return { ok: false, message: "product module unavailable in this scope" }
+        }
+        const product = await productSvc.retrieveProduct(args.product_id)
+        await productSvc.updateProducts(args.product_id, {
+            metadata: { ...(product.metadata ?? {}), [LINK_KEY]: itemCode },
+        })
+
+        const stamped = await this.stampMedusaIdOnItem(itemCode, args.product_id)
+        if (!stamped.ok) {
+            return { ok: false, message: stamped.message }
+        }
+        return { ok: true, item_code: itemCode, product_id: args.product_id }
+    }
+
+    /** Write our id onto the ERPNext record, through the same signed,
+     *  idempotent path every other write uses. */
+    private async stampMedusaIdOnItem(
+        itemCode: string,
+        productId: string,
+    ): Promise<{ ok: boolean; message?: string }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.erpnext_url || !cfg.webhook_secret) {
+            return { ok: false, message: "ERPNext URL / webhook secret not configured" }
+        }
+        const event = "product.linked"
+        const event_id = `medusa:link:${cfg.products_doctype}:${itemCode}:${productId}`
+        const body = JSON.stringify(
+            envelope.build({
+                event,
+                event_id,
+                site_id: cfg.site_id,
+                kind: envelope.KIND_MAPPED,
+                doctype: cfg.products_doctype,
+                key_field: "name",
+                key_value: itemCode,
+                payload: { medusa_product_id: productId },
+                // Never create: the operator picked a record that exists.
+                allow_create: false,
+                allow_update: true,
+            }),
+        )
+        const targetUrl = receiveUrl(cfg, true)
+        const signature = crypto.createHmac("sha256", cfg.webhook_secret).update(body).digest("hex")
+        const row = await this.upsertEventRow(
+            { event, event_id, data: { item_code: itemCode, product_id: productId } },
+            { status: "pending", last_error: null, target_url: targetUrl, site_id: cfg.site_id },
+        )
+        try {
+            const res = await fetch(targetUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-medusa-signature": signature,
+                    "x-medusa-event-id": event_id,
+                },
+                body,
+                signal: AbortSignal.timeout(cfg.request_timeout_ms),
+            })
+            if (!res.ok) {
+                const text = await res.text().catch(() => "")
+                const errMsg = (res.status + ": " + text).slice(0, ERROR_TRUNCATE)
+                await this.updateErpnextSyncEvents({ id: row.id, status: "failed", last_error: errMsg })
+                return { ok: false, message: errMsg }
+            }
+            await this.updateErpnextSyncEvents({
+                id: row.id,
+                status: "success",
+                succeeded_at: new Date(),
+            })
+            return { ok: true }
+        } catch (err: any) {
+            const errMsg = describeError(err).slice(0, ERROR_TRUNCATE)
+            await this.updateErpnextSyncEvents({ id: row.id, status: "failed", last_error: errMsg })
+            return { ok: false, message: errMsg }
+        }
+    }
+
     /** Enabled mappings that push this entity, regardless of which event
      *  fires them. Used by the manual push, which has no event of its own. */
     async listEnabledPushMappingsForEntity(entity: string): Promise<any[]> {
@@ -4288,6 +4491,31 @@ class ErpnextModuleService extends MedusaService({
             )
             return { ok: true, status: "skipped", reason: "not-configured" }
         }
+        // ERPNext owns the catalogue. A product invented in the storefront
+        // must not quietly become an Item with no cost, stock or purchase
+        // history behind it; the operator says whether it may create one,
+        // must be attached to an existing one first, or must not travel.
+        if (args.mapping.medusa_entity === "product") {
+            const verdict = decideProductPush({
+                policy: cfg.medusa_product_policy,
+                event: args.event,
+                linked: isLinked(args.record),
+            })
+            if (verdict.allow === false) {
+                const reason = verdict.reason
+                await this.upsertEventRow(
+                    { event: args.event, event_id: args.event_id, data: args.record },
+                    {
+                        status: "skipped",
+                        last_error: reason,
+                        target_url: null,
+                        mapping_id: args.mapping.id,
+                    },
+                )
+                return { ok: true, status: "skipped", reason }
+            }
+        }
+
         // Does this RECORD qualify? `events` decided the event was a
         // candidate; the trigger decides whether this particular record
         // should be in ERPNext at all yet. Used to be a hard-coded KYC
