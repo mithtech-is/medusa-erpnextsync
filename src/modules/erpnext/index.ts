@@ -5242,6 +5242,9 @@ class ErpnextModuleService extends MedusaService({
         key_value?: string
         skipped_fields?: string[]
         message?: string
+        /** Reasons this rehearsal did not count as a pass. Empty is a pass. */
+        warnings?: string[]
+        rehearsal_passed?: boolean
     }> {
         const mapping = await this.getMapping(args.mapping_id)
         if (!mapping) return { ok: false, message: "mapping not found" }
@@ -5279,16 +5282,38 @@ class ErpnextModuleService extends MedusaService({
                   getByPath(record, mapping.key_medusa_field) ?? "",
               )
             : ""
-        await this.recordMappingTest(args.mapping_id, true, {
+        // A rehearsal that produced an empty payload, or no key to
+        // correlate on, has not shown that the mapping works -- it has
+        // shown that it would send nothing. Recording that as a pass would
+        // satisfy the enable gate without proving anything, which is worse
+        // than having no gate: it looks like a check.
+        const fieldCount = Object.keys(result.payload ?? {}).length
+        const warnings: string[] = []
+        if (!fieldCount) {
+            warnings.push(
+                "The mapping carried nothing from this record. Check the Medusa paths against " +
+                    "the Sample.",
+            )
+        }
+        if (!keyValue) {
+            warnings.push(
+                `No value at the key path '${mapping.key_medusa_field}', so ERPNext would have ` +
+                    "nothing to correlate on.",
+            )
+        }
+        await this.recordMappingTest(args.mapping_id, warnings.length === 0, {
             payload: result.payload,
             key_value: keyValue,
             skipped_fields: result.skippedFields,
+            warnings,
         })
         return {
             ok: true,
             payload: result.payload,
             key_value: keyValue,
             skipped_fields: result.skippedFields,
+            warnings,
+            rehearsal_passed: warnings.length === 0,
         }
     }
 
