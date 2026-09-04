@@ -1,8 +1,8 @@
 # medusa-plugin-erpnext (erpnextsync)
 
-The **Medusa side** of the RISITEX ERPNext â†” Medusa integration: a generic
-Medusa v2 plugin that syncs a Medusa B2B commerce backend with a Frappe/ERPNext
-site, with **ERPNext as the source of truth** for stock and price.
+The **Medusa side** of a two-way ERPNext â†” Medusa connector: a Medusa v2
+plugin that syncs a Medusa commerce backend with a Frappe/ERPNext site, with
+**ERPNext as the source of truth** for stock and price.
 
 - **This repo** = the installable Medusa plugin (`src/`, `package.json`, â€¦).
 - **ERPNext side** = the Frappe `medusync` app, published separately at
@@ -172,7 +172,7 @@ POST /admin/erpnext/studio/plan-inbound       { "event": "...", "data": {} }
 ```
 
 The sample is a real record when you name one, and one built from the
-entity's own declared paths when you do not — which is what a brand-new
+entity's own declared paths when you do not â€” which is what a brand-new
 mapping needs, since there is usually nothing to point at yet. `dry-run`
 no longer requires `record_id`: without it the push is rehearsed against
 that sample. `plan-inbound` reports which enabled mapping would take an
@@ -195,7 +195,7 @@ sync fails in practice.
 The `erpnext_sync_event` row it leaves is marked `is_test`, and everything
 that reads the table skips marked rows. Otherwise the retry job would
 re-send a fabricated payload for real, and a rehearsed success would let
-`skip_unchanged` suppress a genuine push as a duplicate — both invisible
+`skip_unchanged` suppress a genuine push as a duplicate â€” both invisible
 from either end. They are pruned after a day whatever retention says.
 
 `pending_work/` records what is still missing on this side: the enable
@@ -236,12 +236,12 @@ unlimited attempts inside the window.
 
 This side has no shipped mapping set of its own. Mappings here are the far
 side's copies, and ERPNext restores its defaults and pushes them over when
-somebody enables one — so "restore defaults" here is exactly "switch
+somebody enables one â€” so "restore defaults" here is exactly "switch
 everything off and wait", which is what the reset does.
 
-The four rules that make the secret worth anything — long enough,
+The four rules that make the secret worth anything â€” long enough,
 short-lived, single use, compared without leaking how far the comparison
-got — live in `src/modules/erpnext/reset.ts` with no database in sight, so
+got â€” live in `src/modules/erpnext/reset.ts` with no database in sight, so
 they can be tested exactly. `medusync/reset.py` is the mirror; the hash
 has to agree or no handshake can complete.
 

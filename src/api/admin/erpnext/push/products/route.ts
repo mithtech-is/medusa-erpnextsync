@@ -7,9 +7,9 @@ import { ERPNEXT_MODULE } from "../../../../../modules/erpnext"
  * POST /admin/erpnext/push/products
  *
  * Manually push Medusa Products to ERPNext (event: `product.synced`).
- * The Frappe-side maps Product → Item using ISIN as the unique
- * identifier (each product carries its ISIN in metadata + variant
- * options; see workflows/hooks/validate-product-isin.ts).
+ * The Frappe side maps Product → Item on whatever key the mapping
+ * names — `handle` by default, or a metadata path for a store that
+ * identifies its catalogue by something of its own.
  *
  * Body:
  *   - product_ids?: string[]

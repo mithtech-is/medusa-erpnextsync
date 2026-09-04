@@ -3,7 +3,7 @@ import { model } from "@medusajs/framework/utils"
 /**
  * `erpnext_setting` — singleton row for the Medusa-side ERPNext sync.
  *
- * Mirrors the `cashfree_setting` / `gamification_setting` / `ovo_setting`
+ * Mirrors the shape a Medusa project's own `*_setting`
  * pattern: a single row keyed by `singleton_key = "default"` so the
  * admin UI is one GET / one POST, with no list/pagination concerns.
  *
@@ -18,7 +18,7 @@ import { model } from "@medusajs/framework/utils"
  *     settings page.
  *
  * Secret handling:
- *   - Stored as plaintext (same as `cashfree_setting.client_secret` /
+ *   - Stored as plaintext (the same choice other settings models make /
  *     `webhook_secret`). The admin GET response masks them to a
  *     3-char prefix + 3-char suffix preview so a screenshot can't
  *     leak the value. Treat the DB + backups as sensitive.
@@ -171,7 +171,7 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      *
      * Entries are newline- or comma-separated and matched
      * case-insensitively against the record's `id`, `email`, `handle`,
-     * `display_id` and `metadata.isin`.
+     * `display_id` and `external_id`.
      *
      * Why this exists: pointing a production Medusa at a non-production
      * ERPNext is a normal thing to want while integrating, but it would

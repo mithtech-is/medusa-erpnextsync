@@ -43,7 +43,7 @@
  *     mode; the UI shows a "mandatory" badge instead.
  *   - Child tables (`Table` / `Table MultiSelect`) are skipped. They
  *     need array-of-rows handling that a flat dot-path pair can't
- *     express — the customer bank/demat child rows are done by a
+ *     express — a customer's child rows are done by a
  *     dedicated handler, not by the generic mapper.
  */
 
@@ -262,7 +262,6 @@ const SYNONYM_GROUPS: string[][] = [
     ["id", "medusa_id", "external_id", "reference_id", "client_id"],
     ["pan", "pan_no", "pan_number", "pan_card"],
     ["gstin", "gst_no", "gst_number"],
-    ["isin", "isin_no", "isin_code"],
     ["amount", "grand_total", "total_amount", "net_amount"],
     ["quantity", "qty", "units"],
     ["rate", "unit_price", "price", "unit_rate"],
@@ -346,8 +345,8 @@ export function tokenSimilarity(a: string[], b: string[]): number {
  *
  * The direction is part of the key because one ERPNext column can be
  * legitimately written by two different pairs running opposite ways
- * (Product↔Security fills `isin` from `handle` on pull and from
- * `metadata.isin` on push). Keying by column alone loses one of them.
+ * (a mapping may fill one ERPNext field from `handle` on pull and
+ * from a metadata path on push). Keying by column alone loses one.
  */
 export type CanonicalPairLookup = Map<
     string,

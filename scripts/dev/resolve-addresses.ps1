@@ -25,10 +25,12 @@
 [CmdletBinding()]
 param(
   [string]$Distro = "Ubuntu",
-  [string]$BenchUser = "divya",
-  [string]$BenchPath = "/home/divya/frappe-bench",
+  [string]$BenchUser = $env:USERNAME,
+  [string]$BenchPath = "~/frappe-bench",
   [string]$Site = "site1.local",
-  [string]$BackendEnv = (Join-Path $PSScriptRoot "..\..\..\..\risitex-mainb2b\apps\backend\.env"),
+  # The Medusa project is not in this repo and its path is yours. Pass it,
+  # or set MEDUSA_BACKEND_ENV; without one the script only prints.
+  [string]$BackendEnv = $env:MEDUSA_BACKEND_ENV,
   [int]$FrappePort = 8000,
   [int]$MedusaPort = 9000,
   [string]$MedusaAdminEmail = $env:MEDUSA_ADMIN_EMAIL,
@@ -73,30 +75,36 @@ Write-Host "Medusa -> Frappe : $erpnextUrl  (frappe answering now: $frappeReacha
 Write-Host "Frappe -> Medusa : $medusaUrl"
 if ($NoWrite) { return }
 
-# ── 2. sandbox backend .env ───────────────────────────────────────────────────
-$BackendEnv = [System.IO.Path]::GetFullPath($BackendEnv)
-if (Test-Path -LiteralPath $BackendEnv) {
-  $lines = Get-Content -LiteralPath $BackendEnv
-  $found = $false
-  $lines = $lines | ForEach-Object {
-    if ($_ -match '^\s*ERPNEXT_URL=') { $found = $true; "ERPNEXT_URL=$erpnextUrl" } else { $_ }
-  }
-  if (-not $found) { $lines += "ERPNEXT_URL=$erpnextUrl" }
-  [System.IO.File]::WriteAllText($BackendEnv, (($lines -join "`n") + "`n"))
-  Write-Host "wrote ERPNEXT_URL -> $BackendEnv"
+# ── 2. the Medusa project's .env ──────────────────────────────────────────────
+# Its path is not this repo's business, so there is no default worth guessing.
+# Without one, everything else still runs and this step says it was skipped.
+if ([string]::IsNullOrWhiteSpace($BackendEnv)) {
+  Write-Warning "no -BackendEnv and no MEDUSA_BACKEND_ENV; ERPNEXT_URL not written"
 } else {
-  Write-Warning "backend .env not found at $BackendEnv (skipped)"
+  $BackendEnv = [System.IO.Path]::GetFullPath($BackendEnv)
+  if (Test-Path -LiteralPath $BackendEnv) {
+    $lines = Get-Content -LiteralPath $BackendEnv
+    $found = $false
+    $lines = $lines | ForEach-Object {
+      if ($_ -match '^\s*ERPNEXT_URL=') { $found = $true; "ERPNEXT_URL=$erpnextUrl" } else { $_ }
+    }
+    if (-not $found) { $lines += "ERPNEXT_URL=$erpnextUrl" }
+    [System.IO.File]::WriteAllText($BackendEnv, (($lines -join "`n") + "`n"))
+    Write-Host "wrote ERPNEXT_URL -> $BackendEnv"
+  } else {
+    Write-Warning ".env not found at $BackendEnv (skipped)"
+  }
 }
 
 # ── 3. Medusync Site.medusa_url (Frappe side) ─────────────────────────────────
 # Every connected store is a Medusync Site record and delivery reads the URL
 # from there; the Single's connection fields are legacy and no longer used to
-# send anything. Update every enabled site, since on this stack they all point
-# at the same local Medusa.
+# send anything. Every enabled site is updated, which is right while they all
+# point at one local Medusa — pass -NoWrite first if that is not true here.
 $script = @"
 #!/usr/bin/env bash
 set -e
-export PATH="/home/$BenchUser/.local/bin:`$PATH"
+export PATH="`$HOME/.local/bin:`$PATH"
 cd $BenchPath/sites
 ../env/bin/python - <<'PYEOF'
 import frappe

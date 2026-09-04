@@ -48,7 +48,7 @@ const IDENTITY_PATHS = [
     "email",
     "handle",
     "display_id",
-    "metadata.isin",
+    "external_id",
 ] as const
 
 /**

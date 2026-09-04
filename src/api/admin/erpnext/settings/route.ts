@@ -19,7 +19,7 @@ import { ERPNEXT_MODULE } from "../../../../modules/erpnext"
  *                                         show "using env" vs "using
  *                                         saved value")
  *
- * POST contract for secret-typed fields (matches cashfree-settings):
+ * POST contract for secret-typed fields:
  *   - field absent / empty string → leave as-is
  *   - null                        → clear
  *   - other                       → update
@@ -60,7 +60,7 @@ const SaveSchema = z.object({
     auto_retry_min_interval_minutes: z.number().int().optional(),
     last_full_resync_at: z.string().nullable().optional(),
     /** Outbound safety valve — newline/comma separated record ids,
-     *  emails, handles or ISINs. Empty = no restriction. */
+     *  emails or handles. Empty = no restriction. */
     push_allowlist: z.string().nullable().optional(),
     /** Days to keep erpnext_sync_event rows. 0 = keep forever. */
     log_retention_days: z.number().int().min(0).max(1825).optional(),

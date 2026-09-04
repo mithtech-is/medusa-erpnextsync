@@ -172,7 +172,7 @@ const SettingsTab: React.FC<{
     view.frappe_receive_method ?? "",
   )
   // Three secret fields. Empty = leave-as-is, null sentinel = clear,
-  // value = update. Mirrors cashfree-settings UX.
+  // value = update. Mirrors how Medusa's own settings pages behave.
   const [webhookSecret, setWebhookSecret] = useState("")
   const [frappeToMedusaSecret, setFrappeToMedusaSecret] = useState("")
   const [apiKey, setApiKey] = useState("")
@@ -434,34 +434,6 @@ const SettingsTab: React.FC<{
           >
             Reseed canonical mappings
           </Button>
-          <Button
-            onClick={async () => {
-              setErr(null)
-              const r = await fetch(
-                "/admin/erpnext/seed-frappe-webhooks",
-                {
-                  method: "POST",
-                  credentials: "include",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    medusa_base_url:
-                      window.location.origin || undefined,
-                  }),
-                },
-              )
-              const b = await r.json()
-              if (r.ok) {
-                setFlash(
-                  `Frappe webhooks seeded: ${b.seeded?.length ?? 0}, skipped: ${b.skipped?.length ?? 0}, errors: ${b.errors?.length ?? 0}`,
-                )
-              } else {
-                setErr(b.message ?? "seed_frappe_webhooks_failed")
-              }
-            }}
-            variant="secondary"
-          >
-            Reseed Frappe webhooks
-          </Button>
           {flash && <StatusBadge color="green">{flash}</StatusBadge>}
           {err && (
             <Text size="small" className="text-red-600">
@@ -603,7 +575,7 @@ const SettingsTab: React.FC<{
           Medusa points at a non-production ERPNext and you want the real
           path exercised on a few records without sending everyone's
           personal data there. One per line — a customer id, email,
-          product handle, order display id, or ISIN. Decoy records are
+          product handle, order display id, or external id. Decoy records are
           always excluded regardless of this setting.
         </Text>
         <Textarea
@@ -677,9 +649,9 @@ const PullTab: React.FC = () => {
   const [running, setRunning] = useState(false)
   const [items, setItems] = useState<any[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // Live doctype list from the connected site, so leftover/custom doctypes
-  // (e.g. "RISITEX Wallet Settlement") are pickable by exact name instead of
-  // typed — which is what caused the earlier case/spelling 500s.
+  // Live doctype list from the connected site, so a site's own custom
+  // doctypes are pickable by exact name instead of typed — which is what
+  // caused the earlier case/spelling 500s.
   const [doctypes, setDoctypes] = useState<string[]>([])
   const [dtSearch, setDtSearch] = useState("")
   const [dtLoading, setDtLoading] = useState(false)
@@ -1344,7 +1316,6 @@ const ENTITY_DOCTYPE_SUGGESTIONS: Record<string, string[]> = {
   payment_collection: ["Payment Entry"],
   promotion: ["Pricing Rule"],
   region: ["Territory"],
-  wallet_settlement: ["RISITEX Wallet Settlement"],
 }
 
 // Turn a raw fetch/HTTP failure into one plain sentence an admin can act on.
@@ -2667,7 +2638,7 @@ const MappingEditor: React.FC<{
         {/* Two rows writing the same ERPNext column IN THE SAME
             DIRECTION is a silent data race — whichever runs last wins,
             and which one that is depends on array order. (Opposite
-            directions are fine: Product↔Security fills `isin` from the
+            directions are fine: a mapping may fill one field from the
             handle on pull and from metadata on push.) The fix is almost
             always one row with a fallback: {a || b}. */}
         {(() => {

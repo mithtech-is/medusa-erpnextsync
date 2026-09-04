@@ -1,166 +1,161 @@
-# Local development stack (Windows + WSL)
+# Running both halves locally
 
-How the ERPNext ↔ Medusa connector is developed and exercised locally. Two
-things are version-controlled and pushed: this plugin and the Frappe app
-`medusync`. Everything else is a disposable harness.
+The connector is two applications that only prove anything together. This is
+how to get both up and how to move a change from one into the other. Two
+things are version-controlled: this plugin, and the Frappe app `medusync`.
+The Medusa project and the bench you test against are yours and disposable.
 
-## Where things live
+Written against a Windows + WSL2 setup, because that is the awkward case —
+the addressing section is the only part that is. On one Linux or macOS
+machine, `localhost` works everywhere and you can skip it.
 
-| Piece | Location | Git |
+## The pieces
+
+| Piece | Git |
+|---|---|
+| Plugin `medusa-plugin-erpnext` (this repo) | `mithtech-is/medusa-erpnextsync`, branch `main` |
+| Frappe app `medusync` | `suparikoli/medusync`, branch `master` |
+| A Medusa 2.19 project to install the plugin into | yours |
+| A Frappe bench with ERPNext v16 and a site | yours |
+
+If the bench belongs to another user, every bench command goes through them:
+`wsl -d Ubuntu -u <user> -- bash -lc '…'`, or a script file
+(`wsl -d Ubuntu -u <user> -- bash /mnt/c/…/x.sh`), which is the reliable way
+to pass anything containing quotes or backticks.
+
+## Ports
+
+| Service | Where | Port |
 |---|---|---|
-| Plugin `medusa-plugin-erpnext` (this repo) | `C:\Users\KillerKoli\Divya\00-medusa\00-medusa\000-medusa-plugins-extensions\medusa-plugin-erpnext-generic` | `mithtech-is/medusa-erpnextsync`, branch `main` |
-| Frappe app `medusync` | WSL `/home/divya/frappe-bench/apps/medusync` | `suparikoli/medusync`, branch `master` |
-| Medusa sandbox `risitex-mainb2b` | `C:\Users\KillerKoli\Divya\00-medusa\00-medusa\risitex-mainb2b` | local only, **no remote** (see its `SANDBOX.md`) |
-| ERPNext bench | WSL `/home/divya/frappe-bench`, site `site1.local`, ERPNext v16 | not git |
-| Archived leftovers | `C:\Users\KillerKoli\Divya\00-medusa\00-medusa\_archive\` | — |
+| Postgres (Medusa) | usually a container | 5432, or whatever you mapped |
+| Redis (Medusa) | usually a container | 6379, or whatever you mapped |
+| MariaDB (Frappe) | the bench's host | 3306 |
+| Redis cache/queue (Frappe) | the bench | 13000 / 11000 |
+| Frappe web | the bench | 8000 |
+| Frappe socketio | the bench | 9000 |
+| Medusa API | your machine | 9000 |
+| Medusa admin, if served separately | your machine | 7001 |
 
-The bench belongs to WSL user **divya**; run every bench command as
-`wsl -d Ubuntu -u divya -- bash -lc '…'` or via a script file
-(`wsl -d Ubuntu -u divya -- bash /mnt/c/…/x.sh`). `bench` lives at
-`/home/divya/.local/bin/bench`.
-
-## Services and ports
-
-| Service | Where | Port | Start |
-|---|---|---|---|
-| Postgres (Medusa) | Docker `risitex-postgres` | 127.0.0.1:5435 | `docker start risitex-postgres` |
-| Redis (Medusa) | Docker `risitex-redis` | 127.0.0.1:26379 | `docker start risitex-redis` |
-| MariaDB (Frappe) | WSL systemd | 3306 (WSL) | always on |
-| Redis cache/queue (Frappe) | WSL bench | 13000 / 11000 (WSL) | part of `bench start` |
-| Frappe web | WSL bench | 8000 | `bench start` |
-| Frappe socketio | WSL bench | 9000 **inside WSL** | `bench start` |
-| Medusa API | Windows | 9000 | `pnpm dev` in `apps/backend` |
-| Medusa admin (static + proxy) | Windows | 7001 | `node serve-admin.js` in `apps/backend` |
-
-Never run `pnpm docker:up` in the sandbox (its `infrastructure/docker/.env`
-is missing; it would create the wrong containers). Start the two containers by
-name.
+**Frappe's socketio and Medusa's API both want 9000.** They coexist while
+Frappe is inside WSL in NAT mode, because that is a different network
+namespace. Put them on one host — mirrored networking, or one Linux box —
+and one of them has to move: change `socketio_port` in the bench's
+`common_site_config.json`.
 
 ## Addressing between Windows and WSL
 
-WSL2 is in NAT mode (no `.wslconfig`). Windows → WSL uses the WSL IP (or
-`127.0.0.1` through localhost forwarding); WSL → Windows uses the WSL default
-gateway (the vEthernet adapter, e.g. `172.26.48.1`). The WSL IP changes on
-every WSL restart, so run:
+WSL2 in NAT mode (no `.wslconfig`): Windows → WSL through `127.0.0.1`
+(localhost forwarding) or the WSL IP; WSL → Windows through the WSL default
+gateway (the vEthernet adapter, e.g. `172.26.48.1`). **The WSL IP changes on
+every WSL restart**, so:
 
 ```bash
-pwsh scripts/dev/resolve-addresses.ps1
+pwsh scripts/dev/resolve-addresses.ps1 -BackendEnv <path-to-your-.env>
 ```
 
-It writes `ERPNEXT_URL` into the sandbox backend `.env` and the
-`medusa_url` of every enabled **Medusync Site**, and prints what it chose.
-(The Single's connection fields are legacy since sites arrived; delivery reads
-the Site record.) Pass
-`-MedusaAdminEmail`/`-MedusaAdminPassword` (or set `MEDUSA_ADMIN_EMAIL` /
+It writes `ERPNEXT_URL` into the Medusa project's `.env` and the `medusa_url`
+of every enabled **Medusync Site**, and prints what it chose. It prefers
+`127.0.0.1` for the Frappe side because that survives a WSL restart. Pass
+`-MedusaAdminEmail` / `-MedusaAdminPassword` (or set `MEDUSA_ADMIN_EMAIL` /
 `MEDUSA_ADMIN_PASSWORD`) while Medusa is up to also update the plugin's
-setting row through the admin API.
+setting row through the admin API. `-NoWrite` just prints.
 
-Verified 2026-09-04: from Windows both `http://127.0.0.1:8000` (localhost
-forwarding) and `http://<wsl-ip>:8000` reach Frappe; the resolver prefers
-`127.0.0.1` because it survives WSL restarts. From WSL, Medusa answers at
-`http://172.26.48.1:9000` (the gateway). Windows Firewall already allows
-node.exe inbound.
-
-Windows `netstat` can show `:8000`/`:9000` as LISTENING through `wslrelay`
-even when the bench is down; `ss -ltnp` inside WSL is the truth.
+Windows `netstat` shows `:8000` / `:9000` as LISTENING through `wslrelay`
+even when the bench is down. `ss -ltnp` inside WSL is the truth.
 
 ## Bring-up (cold)
 
 ```bash
-# 1. datastores
-docker start risitex-postgres risitex-redis
+# 1. the Medusa datastores
+docker start <your postgres> <your redis>
 
-# 2. Frappe (long-lived background task)
-wsl -d Ubuntu -u divya -- bash -lc 'cd /home/divya/frappe-bench && bench start'
+# 2. Frappe (long-lived)
+wsl -d Ubuntu -u <user> -- bash -lc 'cd ~/frappe-bench && bench start'
 
-# 3. addresses
-pwsh scripts/dev/resolve-addresses.ps1
+# 3. addresses (Windows + WSL only)
+pwsh scripts/dev/resolve-addresses.ps1 -BackendEnv <path>
 
-# 4. Medusa (sandbox)
-cd ../../risitex-mainb2b/apps/backend
+# 4. Medusa
 pnpm exec medusa db:migrate
-pnpm dev                       # medusa develop, API on :9000 (admin disabled in .env)
-node serve-admin.js            # static admin on http://127.0.0.1:7001/app
+pnpm dev
 
-# 5. smoke
+# 5. smoke — both directions, they prove different things
 #   Medusa admin → ERPNext page → Test connection
-#   Frappe desk → Medusync Settings → Test connection to Medusa
+#   Frappe desk  → Medusync Settings → Test connection to Medusa
 ```
 
-## Stop / clean slate
+## Stopping
 
 ```bash
-# Windows: Medusa processes of the sandbox
-Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'risitex-mainb2b|medusa-plugin-erpnext' -and $_.Name -eq 'node.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+# Windows: the Medusa processes
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'medusa' -and $_.Name -eq 'node.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 # WSL: the bench
-wsl -d Ubuntu -u divya -- bash -lc 'pkill -f "bench start"; pkill -f honcho; pkill -f "frappe serve"; pkill -f "frappe worker"; pkill -f "frappe schedule"; pkill -f "redis-server config/redis_"; pkill -f "redis-server 127.0.0.1:13000"; pkill -f "redis-server 127.0.0.1:11000"'
-# (a daemonized redis rewrites its argv to "redis-server 127.0.0.1:PORT"; honcho cannot start while those ports are taken)
-# Docker
-docker stop risitex-postgres risitex-redis
+wsl -d Ubuntu -u <user> -- bash -lc 'pkill -f "bench start"; pkill -f honcho; pkill -f "frappe serve"; pkill -f "frappe worker"; pkill -f "frappe schedule"; pkill -f "redis-server config/redis_"; pkill -f "redis-server 127.0.0.1:13000"; pkill -f "redis-server 127.0.0.1:11000"'
 ```
+
+A daemonised redis rewrites its argv to `redis-server 127.0.0.1:PORT`, so the
+first `pkill` pattern misses it and honcho then cannot start because the port
+is taken. That is what the last two patterns are for.
 
 ## Plugin dev loop
 
-The sandbox consumes the plugin through Medusa's yalc flow
-(`apps/backend/package.json` → `"medusa-plugin-erpnext": "file:.yalc/medusa-plugin-erpnext"`).
+A Medusa project consumes a local plugin through Medusa's yalc flow —
+`package.json` ends up with
+`"medusa-plugin-erpnext": "file:.yalc/medusa-plugin-erpnext"`.
 
 ```bash
 # in the plugin
 npm run typecheck                # tsc, app + specs
-npm test                         # vitest unit tests
+npm test                         # vitest
 npx medusa plugin:build
 npx medusa plugin:publish        # -> the local yalc STORE
 
-# in risitex-mainb2b/apps/backend
-npx yalc update medusa-plugin-erpnext   # store -> apps/backend/.yalc  (REQUIRED)
-cd .. && pnpm install                   # .yalc -> node_modules
-pnpm --filter @risitex/backend exec medusa db:migrate   # when the plugin adds migrations
+# in the Medusa project
+npx yalc update medusa-plugin-erpnext   # store -> ./.yalc  (REQUIRED)
+pnpm install                            # .yalc -> node_modules
+pnpm exec medusa db:migrate             # when the plugin adds migrations
 ```
 
 **`plugin:publish` alone is not enough.** It writes to the yalc store; the
-consumer's `apps/backend/.yalc` copy only moves when you run `yalc update`
-there. Skipping it installs the previous build, and a new module the code
-imports is simply missing at boot. Run migrations AFTER the update, or the
-plugin's newest migration is not on disk yet and `db:migrate` reports
-"Database already up-to-date".
+consumer's `.yalc` copy only moves when `yalc update` runs there. Skip it and
+you install the previous build — a module the new code imports is simply
+missing at boot. Migrate *after* the update, or the newest migration is not
+on disk yet and `db:migrate` reports "already up-to-date".
 
-`npx medusa plugin:develop` in the plugin watches and republishes on save;
-`medusa develop` in the sandbox picks it up. If the running app seems to serve
-stale plugin code, stop it, re-run the update + install, and restart.
+`npx medusa plugin:develop` watches and republishes on save. If the running
+app seems to serve stale plugin code, stop it, re-run update + install, and
+restart.
 
-`medusa develop` runs with `DISABLE_MEDUSA_ADMIN=true`; after changing the
-plugin's admin UI rebuild the static bundle:
+If Medusa runs with `DISABLE_MEDUSA_ADMIN=true` and you serve the admin
+bundle separately, a change to the plugin's admin UI needs the bundle rebuilt:
 `MEDUSA_BACKEND_URL=http://127.0.0.1:7001 npx medusa build --admin-only`.
+`plugin:build` does not touch it.
 
 ## Frappe dev loop
 
 ```bash
-# edit apps/medusync in WSL (as divya), then
-wsl -d Ubuntu -u divya -- bash -lc 'cd /home/divya/frappe-bench && bench --site site1.local migrate'   # after doctype/patch changes
-wsl -d Ubuntu -u divya -- bash -lc 'cd /home/divya/frappe-bench && bench --site site1.local run-tests --app medusync'
+wsl -d Ubuntu -u <user> -- bash -lc 'cd ~/frappe-bench && bench --site <site> migrate'
+wsl -d Ubuntu -u <user> -- bash -lc 'cd ~/frappe-bench && bench --site <site> run-tests --app medusync'
 ```
 
-`hooks.py` changes need a full `bench start` restart; plain `.py` edits reload
-in the web process but the **worker** may keep a stale module until restarted.
+`hooks.py` changes need a full `bench start` restart. Plain `.py` edits reload
+in the web process, but the **worker** can keep a stale module until it is
+restarted — which is exactly where a queued delivery runs.
 
-Site-specific behaviour is chosen per site in `sites/site1.local/site_config.json`:
+Handler packs are chosen per site in `sites/<site>/site_config.json`:
 
 ```json
-"medusync_handler_packs": ["risitex"]
+"medusync_handler_packs": ["commerce"]
 ```
 
-Each connected Medusa store is a **Medusync Site** record in the Desk, holding
+Absent means `commerce`, which is what a site without an opinion wants.
+
+Each connected Medusa store is a **Medusync Site** record in the Desk holding
 that store's URL and its own pair of shared secrets. The plugin's matching
-`site_id` is on the ERPNext Sync settings page; the two must be equal, because
-every envelope names its site and each side uses that to recognise its own
-change coming home.
+`site_id` is on its settings page, and the two must be equal: every envelope
+names its site, and each side uses that to recognise its own change coming
+home.
 
-Writing into the WSL app from Windows tools over `\\wsl.localhost\…` fails on
-permissions (files belong to `divya`); write to a Windows folder and copy in
-with `wsl -u divya cp …`, or edit inside WSL.
-
-## Do not run from the sandbox
-
-`apps/backend/render.yaml`, `infrastructure/server/*`, `infrastructure/postgres/*.ps1`,
-`scripts/reset.ps1` — all production-facing. The sandbox has no git remote on
-purpose; do not add one.
+Writing into a WSL app from Windows tools over `\\wsl.localhost\…` fails on
+permissions when the files belong to another user. Write to a Windows folder
+and copy in with `wsl -u <user> cp …`, or edit inside WSL.

@@ -2,7 +2,7 @@
 
 **Requirement.** Price lists sync bidirectionally with per-list direction.
 Rate-based tier prices and quantity ladders already sync
-(`variant.tier_price.set`, see `docs/B2B_TIER_PRICING_DESIGN.md`). Still
+(`variant.tier_price.set`). Still
 open:
 - ERPNext **Pricing Rules** expressed as percentages or discounts (not flat
   rates) have no Medusa counterpart in the plugin.

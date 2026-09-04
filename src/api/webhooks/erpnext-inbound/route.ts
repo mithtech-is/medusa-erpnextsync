@@ -6,7 +6,7 @@ import { ERPNEXT_MODULE } from "../../../modules/erpnext"
  *
  * F1 — counterpart of the Frappe-side `medusync.api.receive`
  * endpoint. Frappe's standard `Webhook` rows (seeded by F2
- * via /admin/erpnext/seed-frappe-webhooks) POST here.
+ * configured against this URL) POST here.
  *
  * Headers expected:
  *   - x-frappe-webhook-signature   (base64 HMAC-SHA256 of body)
@@ -59,7 +59,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             signatureHeader: sig,
             eventIdHeader,
             // Pass the request scope so handlers can resolve other
-            // Medusa modules (customer, product, cashfree_wallet, etc.)
+            // Medusa modules (customer, product, and the project's own)
             // without the ErpnextModule needing them injected at
             // construction time.
             scope: req.scope,

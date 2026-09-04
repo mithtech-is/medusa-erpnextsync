@@ -264,12 +264,11 @@ async function recoverMissingCustomersOnFrappe(
 
     // 5. Re-push each missing customer via the canonical mapping
     //    path. We use the SAME hydration path as the live subscriber
-    //    (registry.customerEntity.fetchById) — that pulls KYC
-    //    metadata, the customer_identity client_id, the primary
-    //    demat BOID + DP name, the Cashfree VBA, the ISO-formatted
-    //    DoB and the bank_accounts[] / demat_accounts[] arrays.
-    //    Without this hydration the canonical mapping reads bare DB
-    //    columns and ends up pushing only email/phone/name to Frappe.
+    //    (registry.customerEntity.fetchById), so whatever that entity
+    //    declares — including fields a project's own modules add — is
+    //    on the record before the mapping reads it. Without the
+    //    hydration the mapping sees bare DB columns and pushes only
+    //    email, phone and name.
     //
     //    Event_id prefix `reconciliation:` differentiates these from
     //    live events in the Sync Events admin view.
