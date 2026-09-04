@@ -37,6 +37,22 @@ import { model } from "@medusajs/framework/utils"
  *   row.webhook_secret unset   → fall back to ERPNEXT_WEBHOOK_SECRET.
  */
 export const ErpnextSetting = model.define("erpnext_setting", {
+    /**
+     * Consecutive failed pushes to ERPNext. Reset to zero the moment one
+     * succeeds. See ../breaker.ts for why it is consecutive and not total.
+     */
+    consecutive_failures: model.number().default(0),
+
+    /**
+     * Set when the failures above reached `trip_after`. While it is set,
+     * pushes are skipped rather than attempted and the retry job lets one
+     * through per run to find out whether ERPNext has come back.
+     */
+    tripped_at: model.dateTime().nullable(),
+
+    /** Consecutive failures before we stop trying. Ten by default. */
+    trip_after: model.number().default(10),
+
     id: model.id().primaryKey(),
     /** Always "default" — enforces single-row semantics. The unique
      *  index on this column lives in the migration. */

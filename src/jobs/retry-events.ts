@@ -44,10 +44,26 @@ export default async function retryEvents(container: MedusaContainer) {
         console.warn("[erpnext-retry] list failed:", err?.message)
         return
     }
+    // When the breaker has given up on ERPNext, this run sends exactly
+    // one row — somebody has to knock, or it never learns the far side
+    // came back — and leaves the rest of the queue where it is. The
+    // alternative is fifty timeouts every five minutes for an afternoon.
+    let breakerOpen = true
+    try {
+        breakerOpen = !(await erpnext.breakerState()).tripped
+    } catch {
+        /* if we cannot read it, behave as though nothing is wrong */
+    }
+    let probeSpent = false
+
     let processed = 0
     let recovered = 0
     let poisoned = 0
     for (const row of candidates) {
+        if (!breakerOpen) {
+            if (probeSpent) break
+            probeSpent = true
+        }
         const attempts = row.attempts ?? 0
         if (attempts >= maxAttempts) {
             // Mark poison so it stops cycling. Operator must press
@@ -95,7 +111,11 @@ export default async function retryEvents(container: MedusaContainer) {
                     recovered += 1
                 }
             } else {
-                const result = await erpnext.retryEvent(row.event_id)
+                // Tell forwardEvent this is the knock, so the breaker
+                // lets it past itself.
+                const result = await erpnext.retryEvent(row.event_id, undefined, {
+                    probe: !breakerOpen,
+                })
                 if (result?.ok) recovered += 1
             }
             processed += 1

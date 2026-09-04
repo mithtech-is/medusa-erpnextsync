@@ -189,4 +189,18 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
 
     /** User id of the admin who last saved this row. */
     updated_by_user_id: model.text().nullable(),
+
+    /**
+     * Something about this mapping needs a person.
+     *
+     * "Mapping Required" — ERPNext enabled it and this side has not
+     * rehearsed it, so it was left switched off. "Field Missing" — it
+     * names an ERPNext field the DocType no longer has, so it cannot do
+     * what it says and has been switched off.
+     *
+     * Empty when nothing is outstanding. Never part of the mapping's
+     * signature: it is local state, like the rehearsal result.
+     */
+    attention: model.text().nullable(),
+    attention_detail: model.text().nullable(),
 })

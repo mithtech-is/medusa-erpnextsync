@@ -12,6 +12,7 @@ import { listMedusaEntities, getMedusaEntity } from "./registry"
 import { TOTAL_KEY, mergeReceipt, receiptFrom } from "./order-payments"
 import { ErpnextResetRequest } from "./models/reset-request"
 import * as resetRules from "./reset"
+import * as breakerRules from "./breaker"
 import {
     buildAutofill,
     type AutofillResult,
@@ -283,6 +284,12 @@ type ForwardArgs = {
     /** Already-enriched payload (the subscriber fetches the full
      *  customer/order before calling us). */
     data: any
+    /**
+     * The retry job's one delivery per run to a connection the breaker has
+     * given up on. Somebody has to knock, or it never learns ERPNext came
+     * back. See ../breaker.ts.
+     */
+    probe?: boolean
 }
 
 type ForwardResult =
@@ -415,6 +422,20 @@ class ErpnextModuleService extends MedusaService({
             return { ok: true, status: "skipped", reason: gate.reason }
         }
 
+        // ERPNext has refused ten pushes in a row; it will refuse the
+        // eleventh, and every attempt waits out the timeout. Skip until
+        // the retry job's probe finds it has come back.
+        const settingsRow: any = await this.findSettingsRow()
+        if (!breakerRules.allows(settingsRow, { probe: args.probe === true })) {
+            await this.upsertEventRow(args, {
+                status: "skipped",
+                last_error:
+                    "ERPNext is not answering, so pushes to it are paused (see Stopped Trying At on the connection)",
+                target_url: null,
+            })
+            return { ok: true, status: "skipped", reason: "connection-paused" }
+        }
+
         const targetUrl = receiveUrl(cfg)
         // Was this record just written BY ERPNext? Then what we are about
         // to send is ERPNext's own change coming home; tag it so the far
@@ -474,6 +495,7 @@ class ErpnextModuleService extends MedusaService({
                 status: "success",
                 succeeded_at: new Date(),
             })
+            await this.recordPushOutcome(settingsRow, true)
             return { ok: true, status: "success" }
         } catch (err: any) {
             const errMsg = describeError(err).slice(0, ERROR_TRUNCATE)
@@ -482,6 +504,7 @@ class ErpnextModuleService extends MedusaService({
                 status: "failed",
                 last_error: errMsg,
             })
+            await this.recordPushOutcome(settingsRow, false)
             return { ok: false, status: "failed", error: errMsg }
         }
     }
@@ -595,6 +618,156 @@ class ErpnextModuleService extends MedusaService({
     // Jinja body template). A retry with the same id just bumps
     // attempts on the existing row.
     // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Move the breaker after a push. Never throws: the breaker is an
+     * optimisation, and failing to record one failure must not turn it
+     * into two.
+     */
+    private async recordPushOutcome(settingsRow: any, ok: boolean): Promise<void> {
+        try {
+            if (!settingsRow?.id) return
+            const patch = ok
+                ? breakerRules.afterSuccess(settingsRow)
+                : breakerRules.afterFailure(settingsRow)
+            if (!patch) return
+            await this.updateErpnextSettings({ id: settingsRow.id, ...patch } as any)
+        } catch {
+            // deliberately silent
+        }
+    }
+
+    /** Where the connection stands, for the admin and for the retry job. */
+    async breakerState(): Promise<any> {
+        const row: any = await this.findSettingsRow()
+        return breakerRules.stateOf(row)
+    }
+
+    /** Forget the failures and start trying again. What the button does. */
+    async closeBreaker(): Promise<any> {
+        const row: any = await this.findSettingsRow()
+        if (row?.id) {
+            await this.updateErpnextSettings({
+                id: row.id,
+                consecutive_failures: 0,
+                tripped_at: null,
+            } as any)
+        }
+        return this.breakerState()
+    }
+
+    /**
+     * Which enabled mappings name an ERPNext field that no longer exists?
+     *
+     * ERPNext moves. A customisation is removed, an app is uninstalled, a
+     * field is renamed, and a mapping that worked for a year starts
+     * referring to nothing. It fails silently — the payload simply stops
+     * carrying that field — and somebody notices a month later from the
+     * wrong end.
+     *
+     * The one it finds is switched off, because it cannot do what it says.
+     * Only that one: a check that stopped every mapping because one went
+     * stale would be worse than the drift.
+     *
+     * Never throws. It runs from a scheduled job, and a job that dies on
+     * one bad mapping stops checking the rest.
+     */
+    async checkMappingDrift(): Promise<any> {
+        const report: any = { checked: 0, flagged: [], cleared: [], errors: [] }
+        let mappings: any[] = []
+        try {
+            mappings = await this.listErpnextMappings({ enabled: true } as any, { take: 500 })
+        } catch (err: any) {
+            report.errors.push(describeError(err))
+            return report
+        }
+
+        // One fetch per doctype, not per mapping: the meta call crosses the
+        // network and several mappings usually share a doctype.
+        const fieldsByDoctype = new Map<string, Set<string> | null>()
+        const alwaysValid = new Set([
+            "name",
+            "owner",
+            "creation",
+            "modified",
+            "docstatus",
+            "idx",
+        ])
+
+        for (const mapping of mappings) {
+            report.checked += 1
+            try {
+                const doctype = String(mapping.doctype ?? "").trim()
+                const pairs = Array.isArray(mapping.field_mappings) ? mapping.field_mappings : []
+                if (!doctype || !pairs.length) continue
+
+                if (!fieldsByDoctype.has(doctype)) {
+                    let known: Set<string> | null = null
+                    try {
+                        const meta: any = await this.getDoctypeMeta(doctype)
+                        if (meta?.ok && Array.isArray(meta.fields)) {
+                            known = new Set(
+                                meta.fields
+                                    .map((f: any) => String(f?.fieldname ?? ""))
+                                    .filter(Boolean),
+                            )
+                        }
+                    } catch {
+                        // ERPNext unreachable. Not knowing is not the same
+                        // as knowing it is gone, so say nothing this run.
+                        known = null
+                    }
+                    fieldsByDoctype.set(doctype, known)
+                }
+
+                const known = fieldsByDoctype.get(doctype)
+                if (!known) continue
+
+                const missing = pairs
+                    .map((p: any) => String(p?.erpnext_field ?? p?.frappe_field ?? ""))
+                    .filter((f: string) => f && !known.has(f) && !alwaysValid.has(f))
+
+                if (!missing.length) {
+                    if (mapping.attention === "Field Missing") {
+                        await this.updateErpnextMappings({
+                            id: mapping.id,
+                            attention: null,
+                            attention_detail: null,
+                        } as any)
+                        report.cleared.push(mapping.name ?? mapping.id)
+                    }
+                    continue
+                }
+
+                const detail =
+                    `${doctype} no longer has: ${missing.join(", ")}. This mapping is switched ` +
+                    `off until it does, or until the field map stops asking for it.`
+                await this.updateErpnextMappings({
+                    id: mapping.id,
+                    enabled: false,
+                    attention: "Field Missing",
+                    attention_detail: detail,
+                } as any)
+                report.flagged.push({ name: mapping.name ?? mapping.id, missing })
+            } catch (err: any) {
+                report.errors.push({ mapping: mapping?.name ?? mapping?.id, error: describeError(err) })
+            }
+        }
+        return report
+    }
+
+    /** Every mapping waiting on somebody. What a dashboard would show. */
+    async mappingsNeedingAttention(): Promise<any[]> {
+        try {
+            const rows = await this.listErpnextMappings(
+                { attention: { $ne: null } } as any,
+                { take: 200 },
+            )
+            return rows as any[]
+        } catch {
+            return []
+        }
+    }
 
     async receiveInbound(args: {
         rawBody: Buffer
@@ -2443,7 +2616,11 @@ class ErpnextModuleService extends MedusaService({
      * Re-attempt a previously failed (or skipped) event. Replays the
      * stored payload — see route doc for why we don't re-fetch.
      */
-    async retryEvent(eventId: string, scope?: any): Promise<ForwardResult> {
+    async retryEvent(
+        eventId: string,
+        scope?: any,
+        opts?: { probe?: boolean },
+    ): Promise<ForwardResult> {
         const [row] = await this.listErpnextSyncEvents(
             { event_id: eventId },
             { take: 1 },
@@ -2505,6 +2682,9 @@ class ErpnextModuleService extends MedusaService({
             event: row.event,
             event_id: row.event_id,
             data: row.payload,
+            // The retry job's one knock per run at a connection the
+            // breaker has given up on.
+            probe: opts?.probe === true,
         })
     }
 
