@@ -203,4 +203,24 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
      */
     attention: model.text().nullable(),
     attention_detail: model.text().nullable(),
+
+    /**
+     * Fingerprint of what this mapping did when it was last rehearsed.
+     * The enable gate compares it with the mapping as it stands now, so a
+     * pass survives being switched on and does not survive somebody
+     * adding a field afterwards. See ../signature.ts.
+     */
+    tested_signature: model.text().nullable(),
+
+    /**
+     * Fingerprint of a shipped default as it was written, so an upgrade
+     * can tell an untouched one from an edited one. Null for a mapping
+     * somebody wrote.
+     */
+    shipped_signature: model.text().nullable(),
+
+    last_test_at: model.dateTime().nullable(),
+    /** "" | "passed" | "failed" */
+    last_test_status: model.text().nullable(),
+    last_test_report: model.json().nullable(),
 })

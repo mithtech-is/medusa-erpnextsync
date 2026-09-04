@@ -14,6 +14,13 @@ import { Migration } from "@mikro-orm/migrations"
  * names an ERPNext field the DocType no longer has. The second switches
  * that mapping off; the first leaves it alone and asks.
  *
+ * And the enable gate: `tested_signature` is what a rehearsal approved,
+ * compared with the mapping as it stands now, so a pass survives being
+ * switched on and does not survive somebody adding a field afterwards.
+ * `shipped_signature` is the same fingerprint taken when a default was
+ * written, so an upgrade can tell an untouched default from an edited
+ * one. See ../signature.ts.
+ *
  * Every default is the "nothing is wrong" value, so existing rows are
  * unchanged by this landing.
  */
@@ -28,7 +35,12 @@ export class Migration20260906090000 extends Migration {
         this.addSql(`
             ALTER TABLE "erpnext_mapping"
                 ADD COLUMN IF NOT EXISTS "attention" TEXT NULL,
-                ADD COLUMN IF NOT EXISTS "attention_detail" TEXT NULL;
+                ADD COLUMN IF NOT EXISTS "attention_detail" TEXT NULL,
+                ADD COLUMN IF NOT EXISTS "tested_signature" TEXT NULL,
+                ADD COLUMN IF NOT EXISTS "shipped_signature" TEXT NULL,
+                ADD COLUMN IF NOT EXISTS "last_test_at" TIMESTAMPTZ NULL,
+                ADD COLUMN IF NOT EXISTS "last_test_status" TEXT NULL,
+                ADD COLUMN IF NOT EXISTS "last_test_report" JSONB NULL;
         `)
         // "Which mappings need somebody?" is the question a dashboard asks
         // and the answer is almost always none, so index only the rows
@@ -45,7 +57,12 @@ export class Migration20260906090000 extends Migration {
         this.addSql(`
             ALTER TABLE "erpnext_mapping"
                 DROP COLUMN IF EXISTS "attention",
-                DROP COLUMN IF EXISTS "attention_detail";
+                DROP COLUMN IF EXISTS "attention_detail",
+                DROP COLUMN IF EXISTS "tested_signature",
+                DROP COLUMN IF EXISTS "shipped_signature",
+                DROP COLUMN IF EXISTS "last_test_at",
+                DROP COLUMN IF EXISTS "last_test_status",
+                DROP COLUMN IF EXISTS "last_test_report";
         `)
         this.addSql(`
             ALTER TABLE "erpnext_setting"

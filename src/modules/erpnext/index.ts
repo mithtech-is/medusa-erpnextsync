@@ -13,6 +13,7 @@ import { TOTAL_KEY, mergeReceipt, receiptFrom } from "./order-payments"
 import { ErpnextResetRequest } from "./models/reset-request"
 import * as resetRules from "./reset"
 import * as breakerRules from "./breaker"
+import { mayEnable, signatureOf } from "./signature"
 import {
     buildAutofill,
     type AutofillResult,
@@ -3066,8 +3067,30 @@ class ErpnextModuleService extends MedusaService({
         }
         const patch = fromCanonical(canon)
         if (existing) {
+            // ERPNext may edit this mapping freely. What it may not do is
+            // switch it on here: nothing runs on this side until somebody
+            // on this side has rehearsed it. Refusing with an exception
+            // would turn ERPNext's push into a 5xx and a retry loop, so it
+            // is declined quietly and said on the mapping instead.
+            //
+            // The two sides then disagree about `enabled` at the same
+            // version, and nothing reconciles that until a person acts.
+            // That is the honest state and it is documented rather than
+            // papered over by making the version rule consider `enabled`.
+            const gatedPatch: any = { ...patch }
+            const wouldEnable = gatedPatch.enabled === true && !existing.enabled
+            if (wouldEnable) {
+                const verdict = mayEnable(existing as any, { ...(existing as any), ...gatedPatch })
+                if (verdict.ok === false) {
+                    gatedPatch.enabled = false
+                    gatedPatch.attention = "Mapping Required"
+                    gatedPatch.attention_detail =
+                        "ERPNext switched this on, and it has not been rehearsed here. " +
+                        "Dry-run it and enable it, or leave it off."
+                }
+            }
             await this.updateErpnextMappings([
-                { id: existing.id, ...patch, last_synced_at: new Date() },
+                { id: existing.id, ...gatedPatch, last_synced_at: new Date() },
             ])
             return { action: "updated", id: existing.id }
         }
@@ -4315,8 +4338,47 @@ class ErpnextModuleService extends MedusaService({
         allow_create?: boolean
         allow_update?: boolean
         updated_by_user_id?: string | null
+        /**
+         * Set only by applyMappingConfig, when this save is ERPNext's copy
+         * of the mapping arriving rather than an operator editing it. It
+         * does not bypass the gate — it changes what the gate does when it
+         * refuses, because throwing at ERPNext would turn its push into a
+         * 5xx and a retry loop.
+         */
+        from_erpnext?: boolean
     }) {
         const validated = validateFieldMappings(input.field_mappings ?? [])
+
+        // A mapping goes live only after somebody HERE has tried it. Only
+        // the transition is gated: one that is already running keeps
+        // running whatever is edited on it, because retro-fitting the rule
+        // would stop a working store on the next save of anything.
+        const existingRow: any = input.id
+            ? (await this.listErpnextMappings({ id: input.id } as any, { take: 1 }))[0]
+            : null
+        const gateVerdict = mayEnable(existingRow, input as any)
+        if (gateVerdict.ok === false) {
+            // Held before the branch: reassigning `input` below resets the
+            // narrowing that made `reason` reachable, since the verdict was
+            // derived from it.
+            const refusal = gateVerdict.reason
+            if (input.from_erpnext) {
+                // ERPNext asked for this. Same rule as first contact:
+                // nothing runs here until somebody here has looked at it.
+                // Keep every other field it sent, leave it switched off,
+                // and say why on the mapping rather than in an exception.
+                input = {
+                    ...input,
+                    enabled: false,
+                    attention: "Mapping Required",
+                    attention_detail:
+                        "ERPNext switched this on, and it has not been rehearsed here. " +
+                        "Dry-run it and enable it, or leave it off.",
+                } as any
+            } else {
+                throw new Error(refusal)
+            }
+        }
 
         // Reject a malformed condition at SAVE time. Conditions fail
         // closed at run time, so a typo here would silently stop the
@@ -4350,6 +4412,16 @@ class ErpnextModuleService extends MedusaService({
             allow_create: input.allow_create ?? true,
             allow_update: input.allow_update ?? true,
             updated_by_user_id: input.updated_by_user_id ?? null,
+            // Set by the gate above when ERPNext switched on a mapping this
+            // side has not rehearsed. Undefined on an ordinary save, and
+            // `?? null` would then clear a flag somebody still has to act
+            // on, so it is only written when it is actually present.
+            ...((input as any).attention !== undefined
+                ? {
+                      attention: (input as any).attention,
+                      attention_detail: (input as any).attention_detail ?? null,
+                  }
+                : {}),
         }
         if (input.id) {
             const [current] = await this.listErpnextMappings({ id: input.id }, { take: 1 })
@@ -5138,6 +5210,27 @@ class ErpnextModuleService extends MedusaService({
         return report
     }
 
+    /**
+     * Remember that this exact mapping was rehearsed.
+     *
+     * The gate reads `tested_signature`, so recording a pass is what makes
+     * a mapping switchable-on. Written straight to the row: a rehearsal is
+     * not an edit, and going through saveMapping would bump the version
+     * and re-run the very gate this is satisfying.
+     */
+    async recordMappingTest(mappingId: string, passed: boolean, report?: any): Promise<any> {
+        const [row] = await this.listErpnextMappings({ id: mappingId } as any, { take: 1 })
+        if (!row) return { ok: false, reason: "no such mapping" }
+        await this.updateErpnextMappings({
+            id: mappingId,
+            tested_signature: passed ? signatureOf(row as any) : null,
+            last_test_at: new Date(),
+            last_test_status: passed ? "passed" : "failed",
+            last_test_report: report ?? null,
+        } as any)
+        return { ok: true, id: mappingId, passed }
+    }
+
     async dryRunPush(args: {
         mapping_id: string
         /** Omit to rehearse against a sample instead of a real record. */
@@ -5186,6 +5279,11 @@ class ErpnextModuleService extends MedusaService({
                   getByPath(record, mapping.key_medusa_field) ?? "",
               )
             : ""
+        await this.recordMappingTest(args.mapping_id, true, {
+            payload: result.payload,
+            key_value: keyValue,
+            skipped_fields: result.skippedFields,
+        })
         return {
             ok: true,
             payload: result.payload,
