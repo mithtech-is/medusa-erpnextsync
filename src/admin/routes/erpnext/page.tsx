@@ -881,6 +881,10 @@ const PullTab: React.FC = () => {
 
 const EventsTab: React.FC = () => {
   const [status, setStatus] = useState<"" | EventRow["status"]>("")
+  // Rehearsals look exactly like real traffic here, which is the point of
+  // marking them: "real" is the useful default, and "rehearsals" is how
+  // you check what a dry run actually did.
+  const [showTests, setShowTests] = useState<"all" | "real" | "tests">("real")
   const [rows, setRows] = useState<EventRow[] | null>(null)
   const [count, setCount] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -893,6 +897,8 @@ const EventsTab: React.FC = () => {
     try {
       const qs = new URLSearchParams()
       if (status) qs.set("status", status)
+      if (showTests === "real") qs.set("is_test", "0")
+      if (showTests === "tests") qs.set("is_test", "1")
       qs.set("limit", "100")
       const res = await fetch(`/admin/erpnext/events?${qs}`, {
         credentials: "include",
@@ -906,7 +912,7 @@ const EventsTab: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [status])
+  }, [status, showTests])
 
   useEffect(() => {
     refresh()
@@ -931,6 +937,17 @@ const EventsTab: React.FC = () => {
       <div className="mb-3 flex items-center justify-between">
         <Heading level="h2">Sync events</Heading>
         <div className="flex items-center gap-2">
+          {(["real", "all", "tests"] as const).map((s) => (
+            <Button
+              key={s}
+              variant={showTests === s ? "primary" : "secondary"}
+              size="small"
+              onClick={() => setShowTests(s)}
+            >
+              {s === "real" ? "Real" : s === "tests" ? "Rehearsals" : "Both"}
+            </Button>
+          ))}
+          <span className="mx-1 text-ui-fg-muted">|</span>
           {(["", "pending", "success", "failed", "skipped"] as const).map(
             (s) => (
               <Button
@@ -2093,10 +2110,10 @@ const MappingEditor: React.FC<{
       setError("save first, then test")
       return
     }
-    if (!testRecordId.trim()) {
-      setError("enter a Medusa record id to test against")
-      return
-    }
+    // A record id is optional now. Without one the rehearsal runs against
+    // a sample built from the entity's own declared paths, which is what a
+    // mapping somebody is halfway through writing needs: there is usually
+    // nothing to point at yet, and that is exactly when trying it matters.
     setBusy(true)
     setError(null)
     try {
@@ -2110,13 +2127,78 @@ const MappingEditor: React.FC<{
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ record_id: testRecordId.trim() }),
+          body: JSON.stringify(
+            testRecordId.trim() ? { record_id: testRecordId.trim() } : {},
+          ),
         },
       )
       const body = await res.json()
       setTestResult(body)
     } catch (e: any) {
       setError(e?.message ?? "test_failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * What a record of this entity actually looks like. A real one when the
+   * operator names an id, and one built from the entity's declared paths
+   * when they do not -- which is the common case while a mapping is being
+   * written.
+   */
+  const showSample = async () => {
+    if (!draft.medusa_entity) {
+      setError("pick a Medusa entity first")
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const query = new URLSearchParams({ entity: String(draft.medusa_entity) })
+      if (testRecordId.trim()) query.set("id", testRecordId.trim())
+      const res = await fetch(`/admin/erpnext/studio/sample?${query.toString()}`, {
+        credentials: "include",
+      })
+      setTestResult(await res.json())
+    } catch (e: any) {
+      setError(e?.message ?? "sample_failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * What would happen if this arrived from ERPNext: which mapping would
+   * take it, the entity and key it would land on, the payload it would
+   * write, and the fields dropped for want of a source value. Reads;
+   * writes nothing.
+   *
+   * The sample it sends is the ERPNext side of this mapping's own field
+   * list, which is enough to exercise the translation without the
+   * operator hand-writing a payload.
+   */
+  const planInbound = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const sample: Record<string, any> = { doctype: draft.doctype }
+      for (const pair of (draft.field_mappings ?? []) as any[]) {
+        if (!pair.erpnext_field) continue
+        sample[pair.erpnext_field] = `sample ${pair.erpnext_field}`
+      }
+      const res = await fetch("/admin/erpnext/studio/plan-inbound", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event: String(draft.events?.[0] ?? `${draft.doctype}.updated`).trim(),
+          data: sample,
+        }),
+      })
+      setTestResult(await res.json())
+    } catch (e: any) {
+      setError(e?.message ?? "plan_failed")
     } finally {
       setBusy(false)
     }
@@ -2155,8 +2237,14 @@ const MappingEditor: React.FC<{
           ← Back to list
         </Button>
         <div className="flex gap-2">
+          <Button variant="secondary" size="small" onClick={showSample} disabled={busy}>
+            Sample
+          </Button>
           <Button variant="secondary" size="small" onClick={test} disabled={busy || !id}>
-            Test
+            Test push
+          </Button>
+          <Button variant="secondary" size="small" onClick={planInbound} disabled={busy || !id}>
+            Test pull
           </Button>
           <Button variant="secondary" size="small" onClick={pullNow} disabled={busy || !id}>
             Pull now
