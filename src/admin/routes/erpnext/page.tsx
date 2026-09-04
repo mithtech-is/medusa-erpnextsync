@@ -172,7 +172,7 @@ const SettingsTab: React.FC<{
     view.frappe_receive_method ?? "",
   )
   // Three secret fields. Empty = leave-as-is, null sentinel = clear,
-  // value = update. Mirrors cashfree-settings UX.
+  // value = update. Mirrors how Medusa's own settings pages behave.
   const [webhookSecret, setWebhookSecret] = useState("")
   const [frappeToMedusaSecret, setFrappeToMedusaSecret] = useState("")
   const [apiKey, setApiKey] = useState("")
@@ -385,9 +385,8 @@ const SettingsTab: React.FC<{
               />
               <Text size="small" className="text-ui-fg-subtle">
                 Verifies pushes coming IN from Frappe. Generate here, then
-                copy it into <strong>Medusync Settings → Outbound
-                Secret</strong> (or onto each Frappe Webhook row, if you
-                use those instead).
+                copy it into the Medusync Site's <strong>Outbound
+                Secret</strong> on the ERPNext side.
               </Text>
             </div>
             <div>
@@ -433,34 +432,6 @@ const SettingsTab: React.FC<{
             variant="secondary"
           >
             Reseed canonical mappings
-          </Button>
-          <Button
-            onClick={async () => {
-              setErr(null)
-              const r = await fetch(
-                "/admin/erpnext/seed-frappe-webhooks",
-                {
-                  method: "POST",
-                  credentials: "include",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    medusa_base_url:
-                      window.location.origin || undefined,
-                  }),
-                },
-              )
-              const b = await r.json()
-              if (r.ok) {
-                setFlash(
-                  `Frappe webhooks seeded: ${b.seeded?.length ?? 0}, skipped: ${b.skipped?.length ?? 0}, errors: ${b.errors?.length ?? 0}`,
-                )
-              } else {
-                setErr(b.message ?? "seed_frappe_webhooks_failed")
-              }
-            }}
-            variant="secondary"
-          >
-            Reseed Frappe webhooks
           </Button>
           {flash && <StatusBadge color="green">{flash}</StatusBadge>}
           {err && (
@@ -603,7 +574,7 @@ const SettingsTab: React.FC<{
           Medusa points at a non-production ERPNext and you want the real
           path exercised on a few records without sending everyone's
           personal data there. One per line — a customer id, email,
-          product handle, order display id, or ISIN. Decoy records are
+          product handle, order display id, or external id. Decoy records are
           always excluded regardless of this setting.
         </Text>
         <Textarea
@@ -677,9 +648,9 @@ const PullTab: React.FC = () => {
   const [running, setRunning] = useState(false)
   const [items, setItems] = useState<any[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // Live doctype list from the connected site, so leftover/custom doctypes
-  // (e.g. "RISITEX Wallet Settlement") are pickable by exact name instead of
-  // typed — which is what caused the earlier case/spelling 500s.
+  // Live doctype list from the connected site, so a site's own custom
+  // doctypes are pickable by exact name instead of typed — which is what
+  // caused the earlier case/spelling 500s.
   const [doctypes, setDoctypes] = useState<string[]>([])
   const [dtSearch, setDtSearch] = useState("")
   const [dtLoading, setDtLoading] = useState(false)
@@ -881,6 +852,10 @@ const PullTab: React.FC = () => {
 
 const EventsTab: React.FC = () => {
   const [status, setStatus] = useState<"" | EventRow["status"]>("")
+  // Rehearsals look exactly like real traffic here, which is the point of
+  // marking them: "real" is the useful default, and "rehearsals" is how
+  // you check what a dry run actually did.
+  const [showTests, setShowTests] = useState<"all" | "real" | "tests">("real")
   const [rows, setRows] = useState<EventRow[] | null>(null)
   const [count, setCount] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -893,6 +868,8 @@ const EventsTab: React.FC = () => {
     try {
       const qs = new URLSearchParams()
       if (status) qs.set("status", status)
+      if (showTests === "real") qs.set("is_test", "0")
+      if (showTests === "tests") qs.set("is_test", "1")
       qs.set("limit", "100")
       const res = await fetch(`/admin/erpnext/events?${qs}`, {
         credentials: "include",
@@ -906,7 +883,7 @@ const EventsTab: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [status])
+  }, [status, showTests])
 
   useEffect(() => {
     refresh()
@@ -931,6 +908,17 @@ const EventsTab: React.FC = () => {
       <div className="mb-3 flex items-center justify-between">
         <Heading level="h2">Sync events</Heading>
         <div className="flex items-center gap-2">
+          {(["real", "all", "tests"] as const).map((s) => (
+            <Button
+              key={s}
+              variant={showTests === s ? "primary" : "secondary"}
+              size="small"
+              onClick={() => setShowTests(s)}
+            >
+              {s === "real" ? "Real" : s === "tests" ? "Rehearsals" : "Both"}
+            </Button>
+          ))}
+          <span className="mx-1 text-ui-fg-muted">|</span>
           {(["", "pending", "success", "failed", "skipped"] as const).map(
             (s) => (
               <Button
@@ -1162,7 +1150,7 @@ type Direction = "push" | "pull" | "both"
  */
 const DIRECTION_HELP: Record<Direction, string> = {
   push: "Medusa events write into ERPNext over the REST API. Needs only the API key in Settings — nothing installed on ERPNext.",
-  pull: "A cron polls ERPNext every 5 min for rows changed since the last run. Needs only the API key. For instant updates instead of 5-minute ones, seed the Frappe webhooks from the Settings tab.",
+  pull: "A cron polls ERPNext every 5 min for rows changed since the last run. Needs only the API key. For instant updates instead of 5-minute ones, enable the mapping on the ERPNext side so medusync pushes as documents change.",
   both: "Both of the above on the same record. Per-field overrides below decide which side owns each field — set a field to one-way to stop the other side overwriting it.",
 }
 
@@ -1327,7 +1315,6 @@ const ENTITY_DOCTYPE_SUGGESTIONS: Record<string, string[]> = {
   payment_collection: ["Payment Entry"],
   promotion: ["Pricing Rule"],
   region: ["Territory"],
-  wallet_settlement: ["RISITEX Wallet Settlement"],
 }
 
 // Turn a raw fetch/HTTP failure into one plain sentence an admin can act on.
@@ -2093,10 +2080,10 @@ const MappingEditor: React.FC<{
       setError("save first, then test")
       return
     }
-    if (!testRecordId.trim()) {
-      setError("enter a Medusa record id to test against")
-      return
-    }
+    // A record id is optional now. Without one the rehearsal runs against
+    // a sample built from the entity's own declared paths, which is what a
+    // mapping somebody is halfway through writing needs: there is usually
+    // nothing to point at yet, and that is exactly when trying it matters.
     setBusy(true)
     setError(null)
     try {
@@ -2110,13 +2097,78 @@ const MappingEditor: React.FC<{
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ record_id: testRecordId.trim() }),
+          body: JSON.stringify(
+            testRecordId.trim() ? { record_id: testRecordId.trim() } : {},
+          ),
         },
       )
       const body = await res.json()
       setTestResult(body)
     } catch (e: any) {
       setError(e?.message ?? "test_failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * What a record of this entity actually looks like. A real one when the
+   * operator names an id, and one built from the entity's declared paths
+   * when they do not -- which is the common case while a mapping is being
+   * written.
+   */
+  const showSample = async () => {
+    if (!draft.medusa_entity) {
+      setError("pick a Medusa entity first")
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const query = new URLSearchParams({ entity: String(draft.medusa_entity) })
+      if (testRecordId.trim()) query.set("id", testRecordId.trim())
+      const res = await fetch(`/admin/erpnext/studio/sample?${query.toString()}`, {
+        credentials: "include",
+      })
+      setTestResult(await res.json())
+    } catch (e: any) {
+      setError(e?.message ?? "sample_failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * What would happen if this arrived from ERPNext: which mapping would
+   * take it, the entity and key it would land on, the payload it would
+   * write, and the fields dropped for want of a source value. Reads;
+   * writes nothing.
+   *
+   * The sample it sends is the ERPNext side of this mapping's own field
+   * list, which is enough to exercise the translation without the
+   * operator hand-writing a payload.
+   */
+  const planInbound = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const sample: Record<string, any> = { doctype: draft.doctype }
+      for (const pair of (draft.field_mappings ?? []) as any[]) {
+        if (!pair.erpnext_field) continue
+        sample[pair.erpnext_field] = `sample ${pair.erpnext_field}`
+      }
+      const res = await fetch("/admin/erpnext/studio/plan-inbound", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event: String(draft.events?.[0] ?? `${draft.doctype}.updated`).trim(),
+          data: sample,
+        }),
+      })
+      setTestResult(await res.json())
+    } catch (e: any) {
+      setError(e?.message ?? "plan_failed")
     } finally {
       setBusy(false)
     }
@@ -2155,8 +2207,14 @@ const MappingEditor: React.FC<{
           ← Back to list
         </Button>
         <div className="flex gap-2">
+          <Button variant="secondary" size="small" onClick={showSample} disabled={busy}>
+            Sample
+          </Button>
           <Button variant="secondary" size="small" onClick={test} disabled={busy || !id}>
-            Test
+            Test push
+          </Button>
+          <Button variant="secondary" size="small" onClick={planInbound} disabled={busy || !id}>
+            Test pull
           </Button>
           <Button variant="secondary" size="small" onClick={pullNow} disabled={busy || !id}>
             Pull now
@@ -2579,7 +2637,7 @@ const MappingEditor: React.FC<{
         {/* Two rows writing the same ERPNext column IN THE SAME
             DIRECTION is a silent data race — whichever runs last wins,
             and which one that is depends on array order. (Opposite
-            directions are fine: Product↔Security fills `isin` from the
+            directions are fine: a mapping may fill one field from the
             handle on pull and from metadata on push.) The fix is almost
             always one row with a fallback: {a || b}. */}
         {(() => {

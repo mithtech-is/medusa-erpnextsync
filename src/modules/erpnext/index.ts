@@ -9,6 +9,11 @@ import { ErpnextSetting } from "./models/setting"
 import { ErpnextMapping } from "./models/mapping"
 import { applyMapping, getByPath, isTemplatePath, type MappingDirection, type MappingFieldPair } from "./mapping-engine"
 import { listMedusaEntities, getMedusaEntity } from "./registry"
+import { TOTAL_KEY, mergeReceipt, receiptFrom } from "./order-payments"
+import { ErpnextResetRequest } from "./models/reset-request"
+import * as resetRules from "./reset"
+import * as breakerRules from "./breaker"
+import { mayEnable, signatureOf } from "./signature"
 import {
     buildAutofill,
     type AutofillResult,
@@ -21,6 +26,69 @@ import {
     type PushDecision,
 } from "./push-guard"
 import { evaluateTrigger, presetCondition, validateTrigger } from "./trigger"
+import * as envelope from "./envelope"
+import { decideConflict, fromCanonical, toCanonical, type CanonicalMapping } from "./mapping-sync"
+import { entityRefOf, isWithinEchoWindow } from "./echo"
+import {
+    DEFAULT_PRODUCT_POLICY,
+    decideProductPush,
+    isLinked,
+    normalizeProductPolicy,
+    LINK_KEY,
+} from "./product-policy"
+
+/** Write a dotted path into a plain object, creating what it passes through. */
+function setByPath(target: Record<string, any>, dotted: string, value: any): void {
+    const parts = String(dotted || "").split(".").filter(Boolean)
+    if (!parts.length) return
+    let cursor = target
+    for (const key of parts.slice(0, -1)) {
+        if (typeof cursor[key] !== "object" || cursor[key] === null) cursor[key] = {}
+        cursor = cursor[key]
+    }
+    cursor[parts[parts.length - 1]] = value
+}
+
+/**
+ * A plausible value for one declared path.
+ *
+ * Plausible matters more than pretty: a mapping that parses a date or
+ * multiplies a number should meet a date and a number here, not the
+ * string "sample", or the rehearsal passes and the real push does not.
+ */
+function placeholderFor(p: { path: string; type?: string; label?: string }): any {
+    switch (p.type) {
+        case "number":
+            return 1
+        case "boolean":
+            return false
+        case "datetime":
+            return new Date().toISOString()
+        case "array":
+            return []
+        case "id":
+            return `sample_${String(p.path).replace(/[^a-z0-9]+/gi, "_")}`
+        default:
+            return `Sample ${p.label ?? p.path}`
+    }
+}
+
+/**
+ * Resolve a module that this deployment may simply not have.
+ *
+ * Custom modules are per project: one may exist on the store
+ * this plugin grew up on and on nobody else's Medusa. A bare
+ * `scope.resolve` there is an exception thrown from inside an inbound
+ * webhook, which the sender then retries forever. Answering "not
+ * installed" is both true and actionable.
+ */
+function resolveOptional(scope: any, key: string): any | null {
+    try {
+        return scope?.resolve?.(key) ?? null
+    } catch {
+        return null
+    }
+}
 
 export const ERPNEXT_MODULE = "erpnext"
 
@@ -32,6 +100,15 @@ export const ERPNEXT_MODULE = "erpnext"
 // HMAC contract is fixed: sha256 over the raw body, `x-medusa-signature`
 // header, `{event, id, data}` payload shape.
 const DEFAULT_RECEIVE_METHOD = "medusync.api.receive"
+
+/** Site name used when nothing is configured — what a single-store
+ *  install gets, and what the ERPNext side's own default site is called. */
+const DEFAULT_SITE_ID = "default"
+
+/** What ERPNext calls its catalogue until it tells us otherwise. */
+const DEFAULT_PRODUCTS_DOCTYPE = "Item"
+
+
 
 /** Build the full receive URL from the effective config. The mapped
  *  push appends `_mapped` to the method name. */
@@ -208,6 +285,12 @@ type ForwardArgs = {
     /** Already-enriched payload (the subscriber fetches the full
      *  customer/order before calling us). */
     data: any
+    /**
+     * The retry job's one delivery per run to a connection the breaker has
+     * given up on. Somebody has to knock, or it never learns ERPNext came
+     * back. See ../breaker.ts.
+     */
+    probe?: boolean
 }
 
 type ForwardResult =
@@ -216,8 +299,15 @@ type ForwardResult =
 
 type SaveSettingsInput = {
     enable_sync?: boolean
+    /** This instance's name on the wire. Must match the Site ID of the
+     *  matching Medusync Site record on the ERPNext side. */
+    site_id?: string | null
+    /** Normally set by ERPNext announcing it; exposed for a manual fix. */
+    products_doctype?: string | null
+    /** "off" | "link" | "create" — see ./product-policy.ts. */
+    medusa_product_policy?: string | null
     /** Empty string = unchanged, null = clear, value = update. Same
-     *  contract as cashfree-settings to keep the admin UX consistent. */
+     *  contract Medusa's own settings pages use. */
     erpnext_url?: string | null
     /** Whitelisted Frappe method receiving pushes, e.g.
      *  `medusync.api.receive`. Plain field — empty/null clears back to
@@ -225,7 +315,7 @@ type SaveSettingsInput = {
     frappe_receive_method?: string | null
     /** Medusa→Frappe HMAC secret (legacy column name `webhook_secret`). */
     webhook_secret?: string | null
-    /** Frappe→Medusa HMAC secret (F0 — used by the Frappe Webhook
+    /** Frappe→Medusa HMAC secret (used by the Frappe side's
      *  rows seeded by F2; verified by the F1 inbound receiver). */
     frappe_to_medusa_secret?: string | null
     erpnext_api_key?: string | null
@@ -247,6 +337,13 @@ type SaveSettingsInput = {
 
 type ActiveConfig = {
     enable_sync: boolean
+    /** DocType ERPNext says holds the catalogue. */
+    products_doctype: string
+    /** What may happen when a product is created here. */
+    medusa_product_policy: string
+    /** This instance's name on the wire. One ERPNext can serve several
+     *  Medusa stores; every envelope says which one it came from. */
+    site_id: string
     erpnext_url: string | null
     webhook_secret: string | null
     /** Whitelisted Frappe method receiving pushes, e.g.
@@ -279,6 +376,7 @@ class ErpnextModuleService extends MedusaService({
     ErpnextSyncEvent,
     ErpnextSetting,
     ErpnextMapping,
+    ErpnextResetRequest,
 }) {
     // ─────────────────────────────────────────────────────────────────
     // Sync-event surface
@@ -325,13 +423,35 @@ class ErpnextModuleService extends MedusaService({
             return { ok: true, status: "skipped", reason: gate.reason }
         }
 
+        // ERPNext has refused ten pushes in a row; it will refuse the
+        // eleventh, and every attempt waits out the timeout. Skip until
+        // the retry job's probe finds it has come back.
+        const settingsRow: any = await this.findSettingsRow()
+        if (!breakerRules.allows(settingsRow, { probe: args.probe === true })) {
+            await this.upsertEventRow(args, {
+                status: "skipped",
+                last_error:
+                    "ERPNext is not answering, so pushes to it are paused (see Stopped Trying At on the connection)",
+                target_url: null,
+            })
+            return { ok: true, status: "skipped", reason: "connection-paused" }
+        }
+
         const targetUrl = receiveUrl(cfg)
-        const body = JSON.stringify({
-            event: args.event,
-            id: args.event_id,
-            data: args.data,
-            ts: nowTs(),
-        })
+        // Was this record just written BY ERPNext? Then what we are about
+        // to send is ERPNext's own change coming home; tag it so the far
+        // side drops it instead of applying it again and bouncing it back.
+        const cause = await this.echoCauseFor(args.data?.__entity_ref ?? null)
+        const body = JSON.stringify(
+            envelope.build({
+                event: args.event,
+                event_id: args.event_id,
+                site_id: cfg.site_id,
+                data: args.data,
+                correlation_id: cause?.correlation_id ?? null,
+                echo_of: cause?.origin ?? null,
+            }),
+        )
         const signature = crypto
             .createHmac("sha256", cfg.webhook_secret)
             .update(body)
@@ -376,6 +496,7 @@ class ErpnextModuleService extends MedusaService({
                 status: "success",
                 succeeded_at: new Date(),
             })
+            await this.recordPushOutcome(settingsRow, true)
             return { ok: true, status: "success" }
         } catch (err: any) {
             const errMsg = describeError(err).slice(0, ERROR_TRUNCATE)
@@ -384,6 +505,7 @@ class ErpnextModuleService extends MedusaService({
                 status: "failed",
                 last_error: errMsg,
             })
+            await this.recordPushOutcome(settingsRow, false)
             return { ok: false, status: "failed", error: errMsg }
         }
     }
@@ -493,17 +615,167 @@ class ErpnextModuleService extends MedusaService({
     //      the route handler can pick a sensible HTTP status code.
     //
     // Idempotency: dedupe is on `event_id` (passed in the body as
-    // `frappe:<doctype>:<name>:<modified>` by the Frappe Webhook
+    // `frappe:<doctype>:<name>:<modified>` by the Frappe side
     // Jinja body template). A retry with the same id just bumps
     // attempts on the existing row.
     // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Move the breaker after a push. Never throws: the breaker is an
+     * optimisation, and failing to record one failure must not turn it
+     * into two.
+     */
+    private async recordPushOutcome(settingsRow: any, ok: boolean): Promise<void> {
+        try {
+            if (!settingsRow?.id) return
+            const patch = ok
+                ? breakerRules.afterSuccess(settingsRow)
+                : breakerRules.afterFailure(settingsRow)
+            if (!patch) return
+            await this.updateErpnextSettings({ id: settingsRow.id, ...patch } as any)
+        } catch {
+            // deliberately silent
+        }
+    }
+
+    /** Where the connection stands, for the admin and for the retry job. */
+    async breakerState(): Promise<any> {
+        const row: any = await this.findSettingsRow()
+        return breakerRules.stateOf(row)
+    }
+
+    /** Forget the failures and start trying again. What the button does. */
+    async closeBreaker(): Promise<any> {
+        const row: any = await this.findSettingsRow()
+        if (row?.id) {
+            await this.updateErpnextSettings({
+                id: row.id,
+                consecutive_failures: 0,
+                tripped_at: null,
+            } as any)
+        }
+        return this.breakerState()
+    }
+
+    /**
+     * Which enabled mappings name an ERPNext field that no longer exists?
+     *
+     * ERPNext moves. A customisation is removed, an app is uninstalled, a
+     * field is renamed, and a mapping that worked for a year starts
+     * referring to nothing. It fails silently — the payload simply stops
+     * carrying that field — and somebody notices a month later from the
+     * wrong end.
+     *
+     * The one it finds is switched off, because it cannot do what it says.
+     * Only that one: a check that stopped every mapping because one went
+     * stale would be worse than the drift.
+     *
+     * Never throws. It runs from a scheduled job, and a job that dies on
+     * one bad mapping stops checking the rest.
+     */
+    async checkMappingDrift(): Promise<any> {
+        const report: any = { checked: 0, flagged: [], cleared: [], errors: [] }
+        let mappings: any[] = []
+        try {
+            mappings = await this.listErpnextMappings({ enabled: true } as any, { take: 500 })
+        } catch (err: any) {
+            report.errors.push(describeError(err))
+            return report
+        }
+
+        // One fetch per doctype, not per mapping: the meta call crosses the
+        // network and several mappings usually share a doctype.
+        const fieldsByDoctype = new Map<string, Set<string> | null>()
+        const alwaysValid = new Set([
+            "name",
+            "owner",
+            "creation",
+            "modified",
+            "docstatus",
+            "idx",
+        ])
+
+        for (const mapping of mappings) {
+            report.checked += 1
+            try {
+                const doctype = String(mapping.doctype ?? "").trim()
+                const pairs = Array.isArray(mapping.field_mappings) ? mapping.field_mappings : []
+                if (!doctype || !pairs.length) continue
+
+                if (!fieldsByDoctype.has(doctype)) {
+                    let known: Set<string> | null = null
+                    try {
+                        const meta: any = await this.getDoctypeMeta(doctype)
+                        if (meta?.ok && Array.isArray(meta.fields)) {
+                            known = new Set(
+                                meta.fields
+                                    .map((f: any) => String(f?.fieldname ?? ""))
+                                    .filter(Boolean),
+                            )
+                        }
+                    } catch {
+                        // ERPNext unreachable. Not knowing is not the same
+                        // as knowing it is gone, so say nothing this run.
+                        known = null
+                    }
+                    fieldsByDoctype.set(doctype, known)
+                }
+
+                const known = fieldsByDoctype.get(doctype)
+                if (!known) continue
+
+                const missing = pairs
+                    .map((p: any) => String(p?.erpnext_field ?? p?.frappe_field ?? ""))
+                    .filter((f: string) => f && !known.has(f) && !alwaysValid.has(f))
+
+                if (!missing.length) {
+                    if (mapping.attention === "Field Missing") {
+                        await this.updateErpnextMappings({
+                            id: mapping.id,
+                            attention: null,
+                            attention_detail: null,
+                        } as any)
+                        report.cleared.push(mapping.name ?? mapping.id)
+                    }
+                    continue
+                }
+
+                const detail =
+                    `${doctype} no longer has: ${missing.join(", ")}. This mapping is switched ` +
+                    `off until it does, or until the field map stops asking for it.`
+                await this.updateErpnextMappings({
+                    id: mapping.id,
+                    enabled: false,
+                    attention: "Field Missing",
+                    attention_detail: detail,
+                } as any)
+                report.flagged.push({ name: mapping.name ?? mapping.id, missing })
+            } catch (err: any) {
+                report.errors.push({ mapping: mapping?.name ?? mapping?.id, error: describeError(err) })
+            }
+        }
+        return report
+    }
+
+    /** Every mapping waiting on somebody. What a dashboard would show. */
+    async mappingsNeedingAttention(): Promise<any[]> {
+        try {
+            const rows = await this.listErpnextMappings(
+                { attention: { $ne: null } } as any,
+                { take: 200 },
+            )
+            return rows as any[]
+        } catch {
+            return []
+        }
+    }
 
     async receiveInbound(args: {
         rawBody: Buffer
         signatureHeader: string | null
         eventIdHeader: string | null
         /** Request scope from the route — used by handlers to resolve
-         *  other Medusa modules (customer, product, cashfree_wallet).
+         *  other Medusa modules (customer, product, and the store's own).
          *  Optional so the retry cron can replay without a scope. */
         scope?: any
     }): Promise<{
@@ -553,16 +825,16 @@ class ErpnextModuleService extends MedusaService({
         if (!sigOk) {
             // Diagnostic: log enough about the mismatch to triage
             // signature failures without leaking the secret itself.
-            // Common causes when this fires for real Frappe webhooks:
-            //   - Frappe Webhook row has no `Content-Type:
-            //     application/json` header → Express body parser
-            //     skips parsing AND preserveRawBody verify hook never
-            //     fires → rawBody falls back to empty `{}` (body_len:
-            //     2). The seedFrappeWebhooks blueprint pins the
-            //     header explicitly to prevent this.
-            //   - Secret rotated on one side but not the other —
-            //     re-run /admin/erpnext/seed-frappe-webhooks to
-            //     re-PUT every row with the current secret.
+            // Two causes account for almost all of these:
+            //   - The sender did not set `Content-Type:
+            //     application/json`, so Express skips parsing, the
+            //     preserveRawBody verify hook never fires, and rawBody
+            //     falls back to an empty `{}` (body_len: 2). medusync
+            //     always sets it; a hand-rolled Frappe Webhook row may
+            //     not.
+            //   - The secret was rotated on one side only. Ours is the
+            //     Inbound Secret on the Medusync Site; theirs is
+            //     `frappe_to_medusa_secret` here.
             const bodySha = crypto
                 .createHash("sha256")
                 .update(args.rawBody)
@@ -583,9 +855,9 @@ class ErpnextModuleService extends MedusaService({
                 message: "Invalid signature.",
             }
         }
-        let payload: any = {}
+        let body: any = {}
         try {
-            payload = JSON.parse(args.rawBody.toString("utf8") || "{}")
+            body = JSON.parse(args.rawBody.toString("utf8") || "{}")
         } catch {
             return {
                 ok: false,
@@ -593,11 +865,15 @@ class ErpnextModuleService extends MedusaService({
                 message: "Body is not valid JSON.",
             }
         }
-        const event = String(payload?.event ?? "").trim()
-        const event_id = String(
-            args.eventIdHeader ?? payload?.event_id ?? payload?.id ?? "",
-        ).trim()
-        const data = payload?.data ?? payload?.doc ?? payload ?? {}
+
+        // One envelope shape carries every kind of traffic; `kind` says
+        // what the body holds. A v1 body has no `kind` and is recognised
+        // by its shape, so a Frappe app that has not been upgraded yet
+        // keeps working through a rolling deploy. See ./envelope.ts.
+        const env = envelope.parse(body)
+        const event = env.event
+        const event_id = String(args.eventIdHeader ?? env.event_id ?? "").trim()
+        const data = env.data ?? body ?? {}
         if (!event) {
             return {
                 ok: false,
@@ -610,35 +886,128 @@ class ErpnextModuleService extends MedusaService({
                 ok: false,
                 status: "bad_request",
                 message:
-                    "Missing event_id (set in body as event_id, id, or in x-frappe-webhook-signature companion header)",
+                    "Missing event_id (set in body as event_id, id, or in the x-medusa-event-id header)",
             }
         }
         // Replay window. `ts` lives inside the signed body, so a captured
-        // request can't be re-dated without breaking the signature. Reject
-        // anything outside the window (and anything unsigned-by-time).
-        const ts = Number(payload?.ts)
-        if (!Number.isFinite(ts) || Math.abs(nowTs() - ts) > REPLAY_WINDOW_SECONDS) {
+        // request can't be re-dated without breaking the signature. A v2
+        // sender always stamps one, so its absence there is itself
+        // suspicious; a v1 body predates the field and is let through on
+        // event-id idempotency alone.
+        if (env.version >= envelope.ENVELOPE_VERSION && env.ts == null) {
             return {
                 ok: false,
                 status: "unauthorized",
-                message: "Stale or missing timestamp — request rejected (replay window).",
+                message: "Missing timestamp — request rejected (replay window).",
             }
+        }
+        if (!envelope.isFresh(env)) {
+            return {
+                ok: false,
+                status: "unauthorized",
+                message: "Stale timestamp — request rejected (replay window).",
+            }
+        }
+
+        // Our own change coming home. ERPNext stamps `echo_of` on anything
+        // it sends that was caused by a write WE made; applying it would
+        // write the same values again and emit the same event again, which
+        // is how a sync loop starts once the round trip has crossed a
+        // worker and no in-request guard survives.
+        if (envelope.isEcho(env, await this.ourSiteIds())) {
+            return {
+                ok: true,
+                status: "skipped",
+                message: "echo of our own change",
+                event,
+                event_id,
+            }
+        }
+
+        const origin =
+            env.origin_system && env.origin_site_id
+                ? envelope.originRef(env.origin_system, env.origin_site_id)
+                : "erpnext:" + DEFAULT_SITE_ID
+
+        // ERPNext proving it holds the secret this side generated. A
+        // control message, not business data: it never reaches a mapping,
+        // and the audit row is written with the body redacted whatever the
+        // payload-logging setting says. A secret that reaches a log has a
+        // much longer life than three minutes.
+        if (event === resetRules.VERIFY_EVENT) {
+            const offered = String((data as any)?.secret ?? "")
+            const verdict = await this.verifyResetSecret(offered)
+            await this.upsertInboundEventRow(
+                { event, event_id, data: resetRules.redacted() },
+                {
+                    status: verdict.ok ? "success" : "skipped",
+                    last_error: null,
+                    origin,
+                    correlation_id: env.correlation_id,
+                    site_id: env.origin_site_id,
+                    action: verdict.ok ? "updated" : "skipped",
+                },
+            )
+            // 200 either way. A refusal is a fact about the secret, not a
+            // transport failure, and telling the sender to retry would hand
+            // an attacker unlimited attempts inside the window.
+            return {
+                ok: true,
+                status: verdict.ok ? "success" : "skipped",
+                event,
+                event_id,
+                result: verdict,
+            }
+        }
+
+        // A rehearsal from the other side. It has already passed the
+        // signature check, the replay window and the echo test, so a green
+        // answer proves everything except the write — and the write is the
+        // only part a dry run must not do.
+        if (env.dry_run) {
+            const plan = await this.planInbound(event, data)
+            await this.upsertInboundEventRow(
+                { event, event_id, data },
+                {
+                    status: "skipped",
+                    last_error: null,
+                    origin,
+                    correlation_id: env.correlation_id,
+                    site_id: env.origin_site_id,
+                    is_test: true,
+                    action: "skipped",
+                },
+            )
+            return { ok: true, status: "skipped", event, event_id, result: { dry_run: true, ...plan } }
         }
 
         // Log the row as pending FIRST so a crashing handler still
         // leaves an audit trail.
         const eventRow = await this.upsertInboundEventRow(
             { event, event_id, data },
-            { status: "pending", last_error: null },
+            {
+                status: "pending",
+                last_error: null,
+                origin,
+                correlation_id: env.correlation_id,
+                site_id: env.origin_site_id,
+            },
         )
         try {
-            const result = await this.dispatchInbound(event, data, event_id, args.scope)
+            const result =
+                env.kind === envelope.KIND_MAPPING
+                    ? await this.dispatchMappingConfig(env)
+                    : await this.dispatchInbound(event, data, event_id, args.scope)
             await this.updateErpnextSyncEvents([
                 {
                     id: eventRow.id,
                     status: "success",
                     succeeded_at: new Date(),
                     last_error: null,
+                    // Which record this write touched, so the push it
+                    // triggers a moment later can recognise itself as an
+                    // echo and say so. See echoCauseFor.
+                    entity_ref: entityRefOf(result),
                 },
             ])
             return { ok: true, status: "success", event, event_id, result }
@@ -662,6 +1031,38 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /**
+     * Record what ERPNext told us about itself.
+     *
+     * Only fields ERPNext owns are taken. `medusa_product_policy` is
+     * deliberately NOT among them: it governs what leaves Medusa, so it
+     * stays this side's decision.
+     */
+    async applyRemoteSettings(data: any): Promise<any> {
+        const doctype = String(data?.products_doctype ?? "").trim()
+        if (!doctype) return { skipped: "nothing-to-apply" }
+        const row = await this.findSettingsRow()
+        if (row?.products_doctype === doctype) {
+            return { via: "settings", products_doctype: doctype, action: "unchanged" }
+        }
+        await this.saveSettings({ products_doctype: doctype })
+        return { via: "settings", products_doctype: doctype, action: "updated" }
+    }
+
+    /**
+     * A mapping configuration arrived from ERPNext. Both systems hold the
+     * same mapping under one uid; the higher version wins and ERPNext
+     * wins a tie, so this either applies the change or records why it
+     * refused. Never throws — a refused mapping is a normal outcome.
+     */
+    private async dispatchMappingConfig(env: envelope.ParsedEnvelope): Promise<any> {
+        const canon = (env.mapping ?? {}) as CanonicalMapping
+        if (env.event.endsWith(".deleted")) {
+            return { via: "mapping-config", ...(await this.disableMappingConfig(canon.uid)) }
+        }
+        return { via: "mapping-config", ...(await this.applyMappingConfig(canon)) }
+    }
+
+    /**
      * Dispatch the inbound payload to a handler. Each handler is a
      * thin shim that resolves the right Medusa module and applies
      * an idempotent upsert. NEW events should be added here — the
@@ -675,6 +1076,14 @@ class ErpnextModuleService extends MedusaService({
         scope?: any,
     ): Promise<any> {
         if (event === "ping") return { pong: true, echo: data }
+
+        // ERPNext owns the catalogue and says which DocType holds it. We
+        // record it rather than guess, so "link this product to an
+        // existing one" searches the right place on a project that keeps
+        // its products somewhere other than Item.
+        if (event === "medusync.settings.changed") {
+            return this.applyRemoteSettings(data)
+        }
 
         // Generic, mapping-driven inbound. Resolve the enabled pull/both
         // mapping(s) for this event or Frappe doctype and apply them via the
@@ -729,6 +1138,12 @@ class ErpnextModuleService extends MedusaService({
                     return_against: data?.return_against ?? null,
                     received_at: data?.received_at ?? null,
                 })
+            // ── Order provenance and money ERPNext received ────────
+            case "order.source.set":
+                return this._handleOrderSource(scope, data)
+            case "order.payment.set":
+                return this._handleOrderPayment(scope, data)
+
             case "order.refunded":
                 return this._mergeOrderMeta(scope, data?.medusa_order_id, "refund", {
                     credit_note: data?.credit_note ?? null,
@@ -754,49 +1169,6 @@ class ErpnextModuleService extends MedusaService({
             case "customer.updated":
                 return this._handleCustomerUpserted(data, event_id, scope)
 
-            // ── Wallet events (credits) ─────────────────────────────
-            case "wallet.deposit.received":
-                return this._handleWalletCredit(data, event_id, scope, {
-                    kind: "deposit",
-                    note: "Frappe Wallet Deposit submit",
-                })
-            case "share.sale.completed":
-                return this._handleWalletCredit(data, event_id, scope, {
-                    kind: "share_sale",
-                    note: "Frappe Security Purchase submit (customer-sell)",
-                    amount_override:
-                        Number(data?.qty ?? 0) * Number(data?.rate ?? 0),
-                })
-
-            // ── Wallet events (debits) ──────────────────────────────
-            case "wallet.withdrawal.posted":
-                return this._handleWalletDebit(data, event_id, scope, {
-                    kind: "withdrawal",
-                    note: "Frappe Wallet Withdrawal submit",
-                })
-
-            // ── Wallet event reversals ──────────────────────────────
-            case "wallet.deposit.canceled":
-            case "wallet.withdrawal.canceled":
-            case "share.sale.canceled":
-                return this._handleWalletReverse(data, event_id, scope, {
-                    event,
-                })
-
-            // ── Security catalog ────────────────────────────────────
-            case "security.updated":
-                return this._handleSecurityUpserted(data, event_id, scope)
-
-            // ── Backend / Direct order creation + cancellation ─────
-            // Storefront orders (source=Platform Purchase) ARE NOT
-            // dispatched here — Frappe Webhook 9's condition filters
-            // them out. We only see operator-created Security Sales
-            // (Backend Order / Direct) that need to materialize in
-            // Medusa as a real Order.
-            case "order.placed":
-                return this._handleOrderPlaced(data, event_id, scope)
-            case "order.canceled":
-                return this._handleOrderCanceled(data, event_id, scope)
             default:
                 return {
                     skipped: true,
@@ -817,6 +1189,106 @@ class ErpnextModuleService extends MedusaService({
      * Returns `{ matched: false }` when no mapping applies, so the caller
      * falls through to the legacy switch.
      */
+    /**
+     * Which enabled mappings would take this inbound event, and is it a
+     * delete. Shared with `planInbound` on purpose: a rehearsal that
+     * reasons independently is worse than none, because it is believed —
+     * the two would agree for a fortnight and then quietly stop.
+     */
+    private _inboundCandidates(
+        event: string,
+        data: any,
+        mappings: any[],
+    ): { candidates: any[]; isDelete: boolean } {
+        const doctype = String(data?.doctype ?? "").trim()
+        const lower = event.toLowerCase()
+        const isDelete =
+            lower.endsWith(".deleted") ||
+            lower.endsWith(".canceled") ||
+            lower.endsWith(".cancelled") ||
+            lower.endsWith(".trashed")
+        const candidates = mappings.filter(
+            (m: any) =>
+                (doctype && m.doctype === doctype) ||
+                (Array.isArray(m.events) && m.events.includes(event)),
+        )
+        return { candidates, isDelete }
+    }
+
+    /**
+     * What would this inbound event do? Reads; writes nothing.
+     *
+     * Reports per mapping: which entity it would land on, the key it
+     * would look up, the payload it would write, and the fields the
+     * mapping dropped because the source had no value for them. Enough to
+     * see a wrong field name before it becomes a wrong record.
+     */
+    async planInbound(event: string, data: any): Promise<any> {
+        let mappings: any[] = []
+        try {
+            mappings = await this.listEnabledPullMappings()
+        } catch {
+            mappings = []
+        }
+        const { candidates, isDelete } = this._inboundCandidates(event, data, mappings)
+        if (!candidates.length) {
+            return {
+                action: "skipped",
+                reason: `no enabled inbound mapping matches '${event}'`,
+                would_fall_through_to: "a built-in handler, if one owns this event",
+            }
+        }
+        const plans = candidates.map((mapping: any) => {
+            const entity = getMedusaEntity(mapping.medusa_entity)
+            if (!entity) {
+                return {
+                    mapping: mapping.name,
+                    action: "error",
+                    reason: `no registry entry for '${mapping.medusa_entity}'`,
+                }
+            }
+            const transform = applyMapping({
+                direction: "pull",
+                fields: mapping.field_mappings as MappingFieldPair[],
+                mappingDirection: mapping.direction as MappingDirection,
+                source: data,
+            })
+            if (transform.ok === false) {
+                return { mapping: mapping.name, action: "skipped", reason: transform.reason }
+            }
+            const mappedKey = (transform.payload as any)?.[mapping.key_medusa_field]
+            const rawKey =
+                data?.[mapping.key_erpnext_field] != null
+                    ? String(data[mapping.key_erpnext_field])
+                    : null
+            const effKey = mappedKey != null && mappedKey !== "" ? String(mappedKey) : rawKey
+            if (!effKey) {
+                return {
+                    mapping: mapping.name,
+                    action: "skipped",
+                    reason: `no value for key field '${mapping.key_erpnext_field}'`,
+                }
+            }
+            if (isDelete && !entity.disableByKey) {
+                return {
+                    mapping: mapping.name,
+                    action: "skipped",
+                    reason: `inbound delete not supported for entity '${mapping.medusa_entity}'`,
+                }
+            }
+            return {
+                mapping: mapping.name,
+                entity: mapping.medusa_entity,
+                action: isDelete ? "disabled" : "upserted",
+                key_field: mapping.key_medusa_field,
+                key_value: effKey,
+                payload: transform.payload,
+                skipped_fields: transform.skippedFields,
+            }
+        })
+        return { action: "planned", mappings: plans }
+    }
+
     private async _applyInboundViaMappings(
         event: string,
         data: any,
@@ -831,19 +1303,7 @@ class ErpnextModuleService extends MedusaService({
         }
         if (!mappings.length) return { matched: false }
 
-        const doctype = String(data?.doctype ?? "").trim()
-        const lower = event.toLowerCase()
-        const isDelete =
-            lower.endsWith(".deleted") ||
-            lower.endsWith(".canceled") ||
-            lower.endsWith(".cancelled") ||
-            lower.endsWith(".trashed")
-
-        const candidates = mappings.filter(
-            (m: any) =>
-                (doctype && m.doctype === doctype) ||
-                (Array.isArray(m.events) && m.events.includes(event)),
-        )
+        const { candidates, isDelete } = this._inboundCandidates(event, data, mappings)
         if (!candidates.length) return { matched: false }
 
         const results: any[] = []
@@ -901,6 +1361,7 @@ class ErpnextModuleService extends MedusaService({
                 )
                 results.push({
                     mapping: mapping.name,
+                    entity: mapping.medusa_entity,
                     ok: out.ok,
                     id: out.id,
                     action: out.action,
@@ -921,6 +1382,7 @@ class ErpnextModuleService extends MedusaService({
             )
             results.push({
                 mapping: mapping.name,
+                entity: mapping.medusa_entity,
                 ok: outcome.ok,
                 id: outcome.id,
                 created: outcome.created,
@@ -950,62 +1412,6 @@ class ErpnextModuleService extends MedusaService({
         return matches?.[0] ?? null
     }
 
-    /**
-     * Walk a Frappe payload looking for a corresponding Medusa Customer.
-     *
-     * Wallet Deposit / Withdrawal doctypes don't natively carry the
-     * customer's email — only the Customer link (e.g. "MANOJ MITHAJAL
-     * BHAT"). The Frappe-side seeded webhook templates were updated
-     * (frappe-webhooks.ts) to resolve the email at fire time via
-     * `frappe.db.get_value('Customer', doc.customer, 'email_id')`.
-     * On older tenants (pre-reseed) the email field is still empty
-     * — this resolver fills the gap by asking Frappe directly via
-     * REST when only the Customer name is present in the payload.
-     *
-     * Resolution order:
-     *   1. `data.customer_email` direct (cheap, no Frappe round-trip)
-     *   2. `data.customer` (Frappe Customer name) → REST lookup of
-     *      Customer.email_id → Medusa customer by email
-     *
-     * Returns the Medusa Customer object, or null if neither path
-     * yields a match (caller logs + skips).
-     */
-    private async _resolveCustomerForWalletEvent(scope: any, data: any) {
-        const direct = String(data?.customer_email ?? "").trim()
-        if (direct) {
-            const c = await this._resolveCustomerByEmail(scope, direct)
-            if (c) return c
-        }
-
-        const frappeCustomerName = String(data?.customer ?? "").trim()
-        if (!frappeCustomerName) return null
-
-        try {
-            const cfg = await this.getActiveConfig()
-            const creds = await this.getApiCredentials()
-            if (!cfg.erpnext_url || !creds.api_key || !creds.api_secret) {
-                return null
-            }
-            const url =
-                `${cfg.erpnext_url}/api/resource/Customer/` +
-                `${encodeURIComponent(frappeCustomerName)}?fields=` +
-                encodeURIComponent(JSON.stringify(["email_id"]))
-            const res = await fetch(url, {
-                method: "GET",
-                headers: {
-                    Authorization: `token ${creds.api_key}:${creds.api_secret}`,
-                },
-                signal: AbortSignal.timeout(cfg.request_timeout_ms ?? 30000),
-            })
-            if (!res.ok) return null
-            const body: any = await res.json().catch(() => ({}))
-            const resolvedEmail = String(body?.data?.email_id ?? "").trim()
-            if (!resolvedEmail) return null
-            return await this._resolveCustomerByEmail(scope, resolvedEmail)
-        } catch {
-            return null
-        }
-    }
 
     /**
      * Set a Medusa inventory level from an ERPNext stock update. One-way:
@@ -1039,6 +1445,55 @@ class ErpnextModuleService extends MedusaService({
         const metadata = { ...(order.metadata || {}), [key]: value }
         await orderSvc.updateOrders([{ id, metadata }])
         return { ok: true, order_id: id, key }
+    }
+
+    /**
+     * Where an order came from, and how its money stands right now.
+     *
+     * A web order and one a salesperson typed in are indistinguishable
+     * once both are Sales Orders, so ERPNext reports the channel back and
+     * the storefront can stop guessing. The whole object is replaced each
+     * time because it describes the order's current state, not an event
+     * that happened to it.
+     */
+    private async _handleOrderSource(scope: any, data: any): Promise<any> {
+        return this._mergeOrderMeta(scope, data?.medusa_order_id, "erp_order", {
+            source: data?.source ?? null,
+            sales_order: data?.sales_order ?? null,
+            status: data?.status ?? null,
+            payment: data?.payment ?? null,
+        })
+    }
+
+    /**
+     * Money ERPNext received against an order — a transfer, a cheque, a UPI
+     * collection. None of it passed through Medusa, so this is the only way
+     * the storefront hears about it.
+     *
+     * Receipts accumulate under the Payment Entry that produced each one:
+     * an order settled by three transfers has three, and re-sending one
+     * overwrites its own entry rather than the others. See order-payments.ts.
+     */
+    private async _handleOrderPayment(scope: any, data: any): Promise<any> {
+        if (!scope) return { skipped: true, reason: "no_scope" }
+        const id = String(data?.medusa_order_id ?? "").trim()
+        if (!id) return { skipped: true, reason: "missing medusa_order_id" }
+        const receipt = receiptFrom(data)
+        if (!receipt) return { skipped: true, reason: "missing payment_entry" }
+        const orderSvc: any = scope.resolve("order")
+        const [order] = await orderSvc.listOrders(
+            { id },
+            { take: 1, select: ["id", "metadata"] },
+        )
+        if (!order) return { skipped: true, reason: `no order ${id}` }
+        const metadata = mergeReceipt(order.metadata, receipt)
+        await orderSvc.updateOrders([{ id, metadata }])
+        return {
+            ok: true,
+            order_id: id,
+            payment_entry: receipt.payment_entry,
+            received: metadata[TOTAL_KEY],
+        }
     }
 
     /**
@@ -1285,7 +1740,27 @@ class ErpnextModuleService extends MedusaService({
             })
         }
         const locSvc: any = scope.resolve("stock_location")
+        // ERPNext holds the warehouse-to-location map now, so it names the
+        // location this level belongs to. A store that never filled the map
+        // in sends nothing and keeps the old single-location behaviour.
+        const requested = String(data?.location_id ?? "").trim()
+        if (requested) {
+            const [known] = await locSvc.listStockLocations(
+                { id: requested },
+                { take: 1 },
+            )
+            // Writing a level against a location this store does not have
+            // would create stock nothing can sell and nobody would notice.
+            // Say so instead, so the map gets fixed.
+            if (!known) {
+                return {
+                    skipped: true,
+                    reason: `no stock location ${requested} (check the warehouse map on the ERPNext site)`,
+                }
+            }
+        }
         const locId =
+            requested ||
             process.env.INVENTORY_LOCATION_ID ||
             (await locSvc.listStockLocations({}, { take: 1 }))?.[0]?.id
         if (!locId) {
@@ -1304,7 +1779,14 @@ class ErpnextModuleService extends MedusaService({
                 { inventory_item_id: item.id, location_id: locId, stocked_quantity: quantity },
             ])
         }
-        return { ok: true, sku, quantity, location_id: locId, inventory_item_id: item.id }
+        return {
+            ok: true,
+            sku,
+            quantity,
+            location_id: locId,
+            warehouse: data?.warehouse ?? null,
+            inventory_item_id: item.id,
+        }
     }
 
     private async _handleCustomerUpserted(
@@ -1319,25 +1801,13 @@ class ErpnextModuleService extends MedusaService({
         }
         const customer = await this._resolveCustomerByEmail(scope, email)
         const customerModule = scope.resolve("customer")
+        // Only fields a standard ERPNext Customer has. A site with its
+        // own custom fields maps them through a Medusync Mapping, which
+        // is the path built for exactly that and does not require this
+        // file to know the site's schema.
         const meta = {
-            kyc_status: data?.custom_kyc_status ?? null,
-            kyc_verified_on: data?.custom_kyc_verified_on ?? null,
             pan: data?.pan ?? null,
             gstin: data?.gstin ?? null,
-            dob: data?.custom_dob ?? null,
-            client_id: data?.custom_client_id ?? null,
-            // Frappe retired `custom_is_polemarch_customer` in v0_26_0.
-            // Every customer is implicitly a Polemarch customer unless
-            // explicitly opted out via `custom_is_mithtech_only` (which
-            // also gates the Frappe Webhook condition + canonical
-            // mapping pull_filter, so in practice we never see
-            // mithtech-only rows here at all — `is_polemarch_customer`
-            // collapses to `true` for every row we receive). Keep the
-            // derivation defensive in case Frappe's payload starts
-            // including mithtech-only rows during a future schema drift.
-            is_polemarch_customer: !Boolean(
-                Number(data?.custom_is_mithtech_only ?? 0),
-            ),
             frappe_customer_name: data?.name ?? null,
             // Stamp the event_id so a retry sees the same input was
             // processed and is a no-op at the diff level.
@@ -1366,619 +1836,30 @@ class ErpnextModuleService extends MedusaService({
             customer_id = customer.id
         }
 
-        // Phase B (Frappe → Medusa) — bank + demat child-row sync.
-        // The Frappe Customer Webhook (frappe-webhooks.ts) embeds the
-        // `custom_bank_details` and `custom_dp_details` child tables in
-        // the payload. We forward both arrays through the cashfree_
-        // wallet module: existing rows are display-field-updated, new
-        // demat rows are created (with manual_override=true so the
-        // verification audit trail records the Frappe operator's
-        // decision). New BANK rows are NOT auto-created — the Medusa
-        // bank flow requires the full account number + Cashfree penny-
-        // drop to compute bank_hash + encrypt the account column, so
-        // operator-added banks on the Frappe side land as a
-        // `manual_review_pending` log entry that an admin can use to
-        // bootstrap the customer's Medusa side via the storefront.
-        //
-        // Loop prevention: each upsert is no-op when the data matches
-        // what's already on Medusa, so the resulting bank/demat row
-        // update doesn't fire a Medusa event and the push back to
-        // Frappe stays idle.
-        let bankSync: any = null
-        let dematSync: any = null
-        try {
-            bankSync = await this._syncBankAccountsFromFrappe(
-                scope,
-                customer_id,
-                Array.isArray(data?.bank_accounts) ? data.bank_accounts : [],
-            )
-        } catch (err) {
-            bankSync = { error: (err as Error)?.message ?? String(err) }
-        }
-        try {
-            dematSync = await this._syncDematAccountsFromFrappe(
-                scope,
-                customer_id,
-                Array.isArray(data?.demat_accounts) ? data.demat_accounts : [],
-            )
-        } catch (err) {
-            dematSync = { error: (err as Error)?.message ?? String(err) }
-        }
-
-        return created
-            ? { created: true, customer_id, banks: bankSync, demats: dematSync }
-            : { updated: true, customer_id, banks: bankSync, demats: dematSync }
+        return created ? { created: true, customer_id } : { updated: true, customer_id }
     }
 
-    /**
-     * Phase B — bank-account reverse-sync from Frappe payload.
-     *
-     * For each incoming row:
-     *   - Match Medusa BankAccount by (customer_id, ifsc, account_
-     *     number_last4). The Frappe-side child stores `ac_number`
-     *     which is the Medusa-pushed last4 for Medusa-originated
-     *     rows; for operator-added rows it may be the full number,
-     *     so we take the trailing 4 chars to be safe.
-     *   - If matched: only update display fields (bank_name,
-     *     account_holder_name, is_primary). Skip the write entirely
-     *     when nothing differs — that's what stops the bounce-back
-     *     loop. Verification status is NEVER overwritten from this
-     *     path because Cashfree/admin owns that decision.
-     *   - If unmatched: NO create. The Medusa BankAccount entity
-     *     requires the full encrypted account_number to compute the
-     *     bank_hash used for dedupe and registry lookup, and the
-     *     storefront/admin flow is the only path that knows how to
-     *     handle that securely. Unmatched rows are reported in the
-     *     result so the admin can investigate.
-     */
-    private async _syncBankAccountsFromFrappe(
-        scope: any,
-        customer_id: string,
-        rows: any[],
-    ): Promise<any> {
-        if (!Array.isArray(rows) || rows.length === 0) {
-            return { updated: 0, unmatched: 0, no_op: 0, skipped: 0 }
-        }
-        const wallet = scope.resolve("cashfree_wallet")
-        const existing = ((await wallet.listBankAccounts(
-            { customer_id } as any,
-            { take: 100 } as any,
-        )) ?? []) as any[]
-        let updated = 0
-        let unmatched = 0
-        let no_op = 0
-        let skipped = 0
-        for (const row of rows) {
-            const ifsc = String(row?.bank_code ?? "").toUpperCase()
-            const acNum = String(row?.ac_number ?? "")
-            const last4 = acNum.slice(-4)
-            if (!ifsc || !last4) {
-                skipped++
-                continue
-            }
-            const match = existing.find(
-                (b) =>
-                    String(b.ifsc ?? "").toUpperCase() === ifsc &&
-                    String(b.account_number_last4 ?? "") === last4,
-            )
-            if (!match) {
-                unmatched++
-                continue
-            }
-            const bankName = String(row?.bank_name ?? "") || match.bank_name
-            const holder =
-                String(row?.account_holder ?? "") || match.account_holder_name
-            const isPrimary = Boolean(Number(row?.is_primary ?? 0))
-            const diffs: Record<string, any> = {}
-            if (bankName !== match.bank_name) diffs.bank_name = bankName
-            if (holder !== match.account_holder_name)
-                diffs.account_holder_name = holder
-            if (isPrimary !== Boolean(match.is_primary))
-                diffs.is_primary = isPrimary
-            if (Object.keys(diffs).length === 0) {
-                no_op++
-                continue
-            }
-            await wallet.updateBankAccounts({
-                selector: { id: match.id },
-                data: diffs,
-            })
-            updated++
-        }
-        return { updated, unmatched, no_op, skipped }
-    }
 
-    /**
-     * Phase B — demat-account reverse-sync from Frappe payload.
-     *
-     * Demat rows are simpler than banks: no encryption, no
-     * Cashfree-side hash, and the bo_id (CDSL 16-digit OR NSDL
-     * dp_id+client_id) uniquely identifies the row across both
-     * systems. So this handler DOES create new demat rows on the
-     * Medusa side for operator-added entries — with
-     * `verification_status="verified"` and a manual_override flag
-     * in verification_raw so the audit trail records the Frappe
-     * operator as the source.
-     *
-     * Loop prevention: same as banks — display-field updates are a
-     * no-op when nothing differs.
-     */
-    private async _syncDematAccountsFromFrappe(
-        scope: any,
-        customer_id: string,
-        rows: any[],
-    ): Promise<any> {
-        if (!Array.isArray(rows) || rows.length === 0) {
-            return { updated: 0, created: 0, no_op: 0, skipped: 0 }
-        }
-        const wallet = scope.resolve("cashfree_wallet")
-        const existing = ((await wallet.listDematAccounts(
-            { customer_id } as any,
-            { take: 100 } as any,
-        )) ?? []) as any[]
-        let updated = 0
-        let created = 0
-        let no_op = 0
-        let skipped = 0
-        for (const row of rows) {
-            const depository = String(row?.depository ?? "").toUpperCase()
-            const dpId = String(row?.dp_id ?? "")
-            const clientId = String(row?.client_id ?? "")
-            // Reconstruct bo_id the same way the Frappe-side helper
-            // does (sync_demat_accounts in medusa_webhook.py): CDSL
-            // is the raw 16-digit number; NSDL is dp_id+client_id.
-            let bo_id = String(row?.bo_id ?? "")
-            if (!bo_id) {
-                bo_id = depository === "CDSL" ? "" : `${dpId}${clientId}`
-            }
-            if (!bo_id) {
-                skipped++
-                continue
-            }
-            // Match priority: bo_id (Medusa field: `boid`), then
-            // (dp_id, client_id) pair.
-            const match = existing.find((d) => {
-                if (depository === "CDSL") {
-                    return String(d.boid ?? "") === bo_id
-                }
-                return (
-                    String(d.dp_id ?? "") === dpId &&
-                    String(d.client_id ?? "") === clientId
-                )
-            })
-            const dpName = String(row?.dp_name ?? "")
-            const holder = String(row?.primary_bo_name ?? "")
-            const cmrUrl = String(row?.cmr_copy ?? "")
-            const isPrimary = Boolean(Number(row?.is_primary ?? 0))
-            if (match) {
-                const diffs: Record<string, any> = {}
-                if (dpName && dpName !== match.dp_name) diffs.dp_name = dpName
-                if (
-                    holder &&
-                    holder !== (match.account_holder_name ?? "")
-                )
-                    diffs.account_holder_name = holder
-                if (cmrUrl && cmrUrl !== (match.cmr_file_url ?? ""))
-                    diffs.cmr_file_url = cmrUrl
-                if (isPrimary !== Boolean(match.is_primary))
-                    diffs.is_primary = isPrimary
-                if (Object.keys(diffs).length === 0) {
-                    no_op++
-                    continue
-                }
-                await wallet.updateDematAccounts({
-                    selector: { id: match.id },
-                    data: diffs,
-                })
-                updated++
-            } else {
-                // Create new demat with manual_override flag. Frappe
-                // operator is the source of truth — Medusa records
-                // verification_status="verified" without a Cashfree
-                // CMR call, but logs the override for audit.
-                await wallet.createDematAccounts({
-                    customer_id,
-                    depository: depository || "CDSL",
-                    boid: depository === "CDSL" ? bo_id : null,
-                    dp_id: dpId || null,
-                    client_id: clientId || null,
-                    dp_name: dpName,
-                    account_holder_name: holder,
-                    cmr_file_url: cmrUrl,
-                    is_primary: isPrimary,
-                    verification_status: "verified",
-                    verified_at: new Date(),
-                    verification_raw: {
-                        manual_override: true,
-                        source: "frappe.customer.updated",
-                        note: "Created from Frappe-side custom_dp_details child row",
-                    },
-                })
-                created++
-            }
-        }
-        return { updated, created, no_op, skipped }
-    }
 
-    private async _handleWalletCredit(
-        data: any,
-        event_id: string,
-        scope: any,
-        opts: { kind: string; note: string; amount_override?: number },
-    ): Promise<any> {
-        if (!scope) return { skipped: true, reason: "no_scope" }
-        const customer = await this._resolveCustomerForWalletEvent(scope, data)
-        if (!customer) {
-            return {
-                skipped: true,
-                reason: "customer_not_found",
-                email: data?.customer_email,
-                frappe_customer: data?.customer,
-            }
-        }
-        const amountRupees = Number(opts.amount_override ?? data?.amount ?? 0)
-        if (!amountRupees || amountRupees <= 0) {
-            return { skipped: true, reason: "zero_amount" }
-        }
-        // Frappe stores currency in INR (rupees) — `amount=100` means
-        // ₹100. The Medusa wallet service stores everything in paise
-        // and accepts `amount_inr` as paise (misnamed field, see
-        // service.ts). Convert here so we don't end up with ₹0.30
-        // wallet credits when Frappe books a ₹30 deposit.
-        const amountPaise = Math.round(amountRupees * 100)
-        const walletModule = scope.resolve("cashfree_wallet")
-        const tx = await walletModule.credit({
-            customer_id: customer.id,
-            amount_inr: amountPaise,
-            kind: "vba_credit",
-            reference_type: "vba_event",
-            reference_id: data?.gateway_ref ?? data?.name ?? event_id,
-            cashfree_event_id: event_id,
-            idempotency_key: `frappe:${event_id}`,
-            metadata: {
-                source: opts.kind,
-                note: opts.note,
-                frappe_name: data?.name,
-                frappe_event_id: event_id,
-            },
-        })
-        return { credited: true, tx_id: tx?.id, amount_rupees: amountRupees }
-    }
 
-    private async _handleWalletDebit(
-        data: any,
-        event_id: string,
-        scope: any,
-        opts: { kind: string; note: string },
-    ): Promise<any> {
-        if (!scope) return { skipped: true, reason: "no_scope" }
-        const customer = await this._resolveCustomerForWalletEvent(scope, data)
-        if (!customer) {
-            return {
-                skipped: true,
-                reason: "customer_not_found",
-                email: data?.customer_email,
-                frappe_customer: data?.customer,
-            }
-        }
-        const amountRupees = Number(data?.amount ?? 0)
-        if (!amountRupees || amountRupees <= 0) {
-            return { skipped: true, reason: "zero_amount" }
-        }
-        // Rupees→paise (see _handleWalletCredit comment).
-        const amountPaise = Math.round(Math.abs(amountRupees) * 100)
-        const walletModule = scope.resolve("cashfree_wallet")
-        // Use the dedicated debit() method (positive amount; kind=
-        // manual_adjust). The earlier attempt to pass a negative
-        // amount to credit() failed because credit() rejects
-        // non-positive amounts.
-        const tx = await walletModule.debit({
-            customer_id: customer.id,
-            amount_inr: amountPaise,
-            kind: "manual_adjust",
-            reference_type: "manual",
-            reference_id: data?.name ?? event_id,
-            idempotency_key: `frappe:${event_id}`,
-            note: opts.note,
-            metadata: {
-                source: opts.kind,
-                frappe_name: data?.name,
-                frappe_event_id: event_id,
-            },
-        })
-        return { debited: true, tx_id: tx?.transaction_id, amount_rupees: amountRupees }
-    }
 
-    private async _handleWalletReverse(
-        data: any,
-        event_id: string,
-        scope: any,
-        opts: { event: string },
-    ): Promise<any> {
-        if (!scope) return { skipped: true, reason: "no_scope" }
-        const walletModule = scope.resolve("cashfree_wallet")
-        // The original tx was created with idempotency_key=frappe:
-        // <original-event-id>. The cancel event_id is the original
-        // event_id + ":cancel" (see frappe-webhooks.ts blueprints).
-        // Trim the suffix to find the source row.
-        const originalEventId = String(event_id).replace(/:cancel$/, "")
-        // walletModule exposes reverseDebit(original_transaction_id)
-        // but we don't have the tx_id here — only the idempotency
-        // key. Use the standard reverse-by-reference helper if it
-        // exists; otherwise fall back to a no-op + log.
-        if (typeof walletModule.reverseByIdempotencyKey === "function") {
-            const result = await walletModule.reverseByIdempotencyKey(
-                `frappe:${originalEventId}`,
-                opts.event,
-            )
-            return { reversed: true, ...result }
-        }
-        return {
-            skipped: true,
-            reason: "no_reverse_helper",
-            todo: "Add cashfree_wallet.reverseByIdempotencyKey(key, reason) or store the tx_id on the original sync_event row to enable reversal",
-            original_event_id: originalEventId,
-        }
-    }
 
-    /**
-     * Backend / Direct order from Frappe → create a Medusa Order.
-     *
-     * Skip if `medusa_order_id` is already set — that's a storefront
-     * order that originated in Medusa and round-tripped through
-     * Frappe (shouldn't reach us because the Frappe Webhook's
-     * source filter excludes Platform Purchase, but defense in
-     * depth).
-     *
-     * Idempotency: subsequent calls with the same event_id hit the
-     * existing erpnext_sync_event row and short-circuit before
-     * reaching here. If somehow they don't, we still skip when the
-     * order already exists by metadata.frappe_name.
-     */
-    private async _handleOrderPlaced(
-        data: any,
-        event_id: string,
-        scope: any,
-    ): Promise<any> {
-        if (!scope) return { skipped: true, reason: "no_scope" }
-        if (data?.medusa_order_id) {
-            return {
-                skipped: true,
-                reason: "already_medusa_order",
-                medusa_order_id: data.medusa_order_id,
-            }
-        }
-        // Resolve customer — Frappe gives us the Customer DocName in
-        // data.customer (e.g. "CUST-2024-00001"), not the email. Look
-        // it up on the Frappe side via a join in the webhook payload
-        // is a future enhancement; for now we try to match by
-        // customer_email if the Frappe Webhook body includes it
-        // (Security Sale templates may not — falling back to a skip
-        // with a clear reason).
-        const email = String(data?.customer_email ?? "").toLowerCase()
-        if (!email) {
-            return {
-                skipped: true,
-                reason: "no_customer_email_in_payload",
-                hint: "Update SecuritySale__on_submit webhook template to include customer_email (lookup via doc.customer → Customer.email_id)",
-            }
-        }
-        const customer = await this._resolveCustomerByEmail(scope, email)
-        if (!customer) {
-            return { skipped: true, reason: "customer_not_found", email }
-        }
-        // Resolve product by ISIN (handle = lowercased ISIN per the
-        // canonical mapping).
-        const productModule = scope.resolve("product")
-        const isin = String(data?.security ?? "").trim()
-        if (!isin) return { skipped: true, reason: "missing_security_isin" }
-        const products = await productModule.listProducts(
-            { handle: isin.toLowerCase() },
-            { take: 1, relations: ["variants"] },
-        )
-        const product = products?.[0]
-        const variantId = product?.variants?.[0]?.id
-        if (!variantId) {
-            return {
-                skipped: true,
-                reason: "no_variant_for_isin",
-                isin,
-                hint: "Run the Security pull cron or fire a security.updated webhook first so the Product exists",
-            }
-        }
-        // Dedupe — if an order already exists for this frappe_name, skip.
-        const orderModule = scope.resolve("order")
-        const existingOrders = await orderModule
-            .listOrders(
-                { metadata: { frappe_name: data?.name } as any },
-                { take: 1 },
-            )
-            .catch(() => [])
-        if (existingOrders?.length) {
-            return {
-                skipped: true,
-                reason: "order_already_exists",
-                order_id: existingOrders[0].id,
-            }
-        }
-        const qty = Number(data?.qty ?? 0)
-        const rate = Number(data?.rate ?? 0)
-        if (qty <= 0 || rate <= 0) {
-            return { skipped: true, reason: "zero_qty_or_rate" }
-        }
-        const [order] = await orderModule.createOrders([
-            {
-                customer_id: customer.id,
-                email: customer.email,
-                currency_code: "inr",
-                metadata: {
-                    source: data?.source || "Backend Order",
-                    frappe_name: data?.name,
-                    frappe_posting_date: data?.posting_date,
-                    erpnext_synced_event_id: event_id,
-                },
-            },
-        ])
-        // Line items are a separate call in Medusa v2.
-        await orderModule.createOrderLineItems(order.id, [
-            {
-                title: product.title,
-                quantity: qty,
-                unit_price: rate,
-                variant_id: variantId,
-                product_id: product.id,
-                metadata: {
-                    isin,
-                    frappe_security: data?.security,
-                },
-            },
-        ])
-        return { created: true, order_id: order.id, variant_id: variantId }
-    }
 
-    /**
-     * Backend / Direct order cancellation from Frappe → cancel the
-     * Medusa Order. Lookup priority: medusa_order_id → metadata.
-     * frappe_name. Already-canceled orders short-circuit.
-     */
-    private async _handleOrderCanceled(
-        data: any,
-        event_id: string,
-        scope: any,
-    ): Promise<any> {
-        if (!scope) return { skipped: true, reason: "no_scope" }
-        const orderModule = scope.resolve("order")
-        let order: any = null
-        if (data?.medusa_order_id) {
-            order = await orderModule
-                .retrieveOrder(data.medusa_order_id)
-                .catch(() => null)
-        }
-        if (!order && data?.name) {
-            const matches = await orderModule
-                .listOrders(
-                    { metadata: { frappe_name: data.name } as any },
-                    { take: 1 },
-                )
-                .catch(() => [])
-            order = matches?.[0] ?? null
-        }
-        if (!order) {
-            return { skipped: true, reason: "order_not_found" }
-        }
-        if (order.canceled_at) {
-            return {
-                skipped: true,
-                reason: "already_canceled",
-                order_id: order.id,
-            }
-        }
-        await orderModule.cancel(order.id)
-        return { canceled: true, order_id: order.id }
-    }
 
-    private async _handleSecurityUpserted(
-        data: any,
-        event_id: string,
-        scope: any,
-    ): Promise<any> {
-        if (!scope) return { skipped: true, reason: "no_scope" }
-        const isin = String(data?.isin ?? "").trim()
-        if (!isin) return { skipped: true, reason: "missing_isin" }
-        const productModule = scope.resolve("product")
-        const handle = isin.toLowerCase()
-        // Existence check keyed on metadata.isin FIRST (the natural
-        // key). A canonical product may already exist under a human
-        // handle (e.g. "api-holdings") carrying this ISIN — matching
-        // ONLY by the lowercased-ISIN handle misses it and creates a
-        // priceless duplicate stub (no variant / no INR price /
-        // no pricing_mode). Fall back to the handle lookup so legacy
-        // stubs from earlier versions of this handler still update.
-        const byIsin = await productModule.listProducts(
-            { metadata: { isin } },
-            { select: ["id", "handle", "metadata"], take: 1 },
-        )
-        let existing = byIsin?.[0]
-        if (!existing) {
-            const byHandle = await productModule.listProducts(
-                { handle },
-                { select: ["id", "handle", "metadata"], take: 1 },
-            )
-            existing = byHandle?.[0]
-        }
-        const metadata = {
-            isin,
-            security_type: data?.security_type ?? null,
-            face_value: Number(data?.face_value ?? 0),
-            last_traded_price: Number(data?.last_traded_price ?? 0),
-            company_name: data?.company_name ?? null,
-            sector: data?.sector ?? null,
-            rta: data?.rta ?? null,
-            polemarch_page_url: data?.polemarch_page_url ?? null,
-            calcula_page_url: data?.calcula_page_url ?? null,
-            tradable: Number(data?.tradable ?? 0) === 1,
-            active: Number(data?.active ?? 0) === 1,
-            frappe_name: data?.name,
-            erpnext_synced_event_id: event_id,
-        }
-        const status =
-            Number(data?.active ?? 0) && Number(data?.tradable ?? 0)
-                ? "published"
-                : "draft"
-        const title = data?.security_name || `Security ${isin}`
-        if (existing) {
-            // MERGE metadata rather than replace — updateProducts
-            // overwrites the whole metadata blob, so a bare patch would
-            // wipe Medusa-native keys (pricing_mode, search_aliases,
-            // canary flags, calcula-derived price fields, …). Leave
-            // `handle` untouched so a canonical product keeps its
-            // storefront URL instead of being renamed to the ISIN.
-            await productModule.updateProducts(existing.id, {
-                title,
-                status,
-                metadata: { ...(existing.metadata || {}), ...metadata },
-            })
-            // If the existing product has no variants (e.g. created by
-            // an earlier handler version that didn't include them),
-            // attach a default one so order.placed can find it.
-            const variants = await productModule
-                .listProductVariants({ product_id: existing.id }, { take: 1 })
-                .catch(() => [])
-            if (!variants?.length) {
-                await productModule.createProductVariants([
-                    {
-                        product_id: existing.id,
-                        title: "Default",
-                        sku: isin,
-                        manage_inventory: false,
-                    },
-                ])
-            }
-            return { updated: true, product_id: existing.id }
-        }
-        const [created] = await productModule.createProducts([
-            {
-                handle,
-                title,
-                status,
-                metadata,
-                // Embed a default variant so order.placed can resolve
-                // a variant_id immediately after the product lands.
-                variants: [
-                    {
-                        title: "Default",
-                        sku: isin,
-                        manage_inventory: false,
-                    },
-                ],
-            } as any,
-        ])
-        return { created: true, product_id: created?.id }
-    }
 
     private async upsertInboundEventRow(
         args: { event: string; event_id: string; data: any },
-        patch: { status: string; last_error: string | null },
+        patch: {
+            status: string
+            last_error: string | null
+            origin?: string | null
+            correlation_id?: string | null
+            entity_ref?: string | null
+            site_id?: string | null
+            /** A rehearsal, not real traffic. See the model. */
+            is_test?: boolean
+            action?: string | null
+        },
     ) {
         const [existing] = await this.listErpnextSyncEvents(
             { event_id: args.event_id, direction: "inbound" as any },
@@ -2017,7 +1898,11 @@ class ErpnextModuleService extends MedusaService({
      * Re-attempt a previously failed (or skipped) event. Replays the
      * stored payload — see route doc for why we don't re-fetch.
      */
-    async retryEvent(eventId: string, scope?: any): Promise<ForwardResult> {
+    async retryEvent(
+        eventId: string,
+        scope?: any,
+        opts?: { probe?: boolean },
+    ): Promise<ForwardResult> {
         const [row] = await this.listErpnextSyncEvents(
             { event_id: eventId },
             { take: 1 },
@@ -2079,6 +1964,9 @@ class ErpnextModuleService extends MedusaService({
             event: row.event,
             event_id: row.event_id,
             data: row.payload,
+            // The retry job's one knock per run at a connection the
+            // breaker has given up on.
+            probe: opts?.probe === true,
         })
     }
 
@@ -2088,7 +1976,10 @@ class ErpnextModuleService extends MedusaService({
      */
     async listFailedForRetry(limit = 50) {
         return this.listErpnextSyncEvents(
-            { status: ["failed", "skipped"] as any },
+            // A rehearsal that failed is information, not a delivery owed
+            // to anyone. Retrying one would send a fabricated payload for
+            // real, which is the opposite of what a dry run is for.
+            { status: ["failed", "skipped"] as any, is_test: false } as any,
             { take: limit, order: { last_attempt_at: "ASC" } },
         )
     }
@@ -2106,6 +1997,12 @@ class ErpnextModuleService extends MedusaService({
             action?: string | null
             /** SHA-256 of the transformed payload, for skip-unchanged. */
             payload_hash?: string | null
+            /** Provenance: who caused this row, and the chain it belongs
+             *  to. See the wire contract in ./envelope.ts. */
+            origin?: string | null
+            correlation_id?: string | null
+            entity_ref?: string | null
+            site_id?: string | null
         },
     ) {
         const [existing] = await this.listErpnextSyncEvents(
@@ -2166,6 +2063,9 @@ class ErpnextModuleService extends MedusaService({
                 frappe_to_medusa_secret_masked: null,
                 erpnext_api_key_masked: null,
                 erpnext_api_secret_masked: null,
+                site_id: process.env.ERPNEXT_SITE_ID || DEFAULT_SITE_ID,
+                products_doctype: DEFAULT_PRODUCTS_DOCTYPE,
+                medusa_product_policy: DEFAULT_PRODUCT_POLICY,
                 request_timeout_ms: DEFAULT_TIMEOUT_MS,
                 auto_retry_failed: true,
                 auto_retry_max_attempts: 5,
@@ -2186,6 +2086,9 @@ class ErpnextModuleService extends MedusaService({
         return {
             exists: true,
             enable_sync: row.enable_sync,
+            site_id: row.site_id || process.env.ERPNEXT_SITE_ID || DEFAULT_SITE_ID,
+            products_doctype: row.products_doctype || DEFAULT_PRODUCTS_DOCTYPE,
+            medusa_product_policy: normalizeProductPolicy(row.medusa_product_policy),
             erpnext_url: row.erpnext_url,
             frappe_receive_method:
                 row.frappe_receive_method ||
@@ -2220,7 +2123,7 @@ class ErpnextModuleService extends MedusaService({
     /**
      * Persist the settings row.
      *
-     * Secret-field semantics (matches cashfree-settings):
+     * Secret-field semantics:
      *   - `undefined` (key absent)  → leave as-is
      *   - `""` (empty string)       → leave as-is (admin UI sends ""
      *                                  when the user didn't touch the
@@ -2234,6 +2137,18 @@ class ErpnextModuleService extends MedusaService({
         const patch: Record<string, any> = {}
 
         if (input.enable_sync !== undefined) patch.enable_sync = input.enable_sync
+        if ("site_id" in input) {
+            // Lower-cased and trimmed to match the ERPNext side's own rule
+            // for a Site ID, so the two never disagree over letter case.
+            const raw = (input.site_id ?? "").trim().toLowerCase()
+            patch.site_id = raw || null
+        }
+        if ("products_doctype" in input) {
+            patch.products_doctype = (input.products_doctype ?? "").trim() || null
+        }
+        if ("medusa_product_policy" in input) {
+            patch.medusa_product_policy = normalizeProductPolicy(input.medusa_product_policy)
+        }
         if ("erpnext_url" in input) {
             patch.erpnext_url = normaliseUrl(input.erpnext_url)
         }
@@ -2335,6 +2250,9 @@ class ErpnextModuleService extends MedusaService({
 
         return {
             enable_sync: row?.enable_sync ?? true,
+            site_id: row?.site_id || process.env.ERPNEXT_SITE_ID || DEFAULT_SITE_ID,
+            products_doctype: row?.products_doctype || DEFAULT_PRODUCTS_DOCTYPE,
+            medusa_product_policy: normalizeProductPolicy(row?.medusa_product_policy),
             erpnext_url,
             webhook_secret,
             frappe_receive_method:
@@ -2347,6 +2265,221 @@ class ErpnextModuleService extends MedusaService({
             auto_retry_min_interval_minutes:
                 row?.auto_retry_min_interval_minutes ?? 15,
             source: { url: url_source, secret: secret_source },
+        }
+    }
+
+    /**
+     * Every site id this instance answers to.
+     *
+     * Used to recognise our own change coming home: an envelope whose
+     * origin is this system at one of these ids, or which is tagged
+     * echo_of one of them, is an echo and must not be applied.
+     */
+    async ourSiteIds(): Promise<string[]> {
+        const cfg = await this.getActiveConfig()
+        return [cfg.site_id]
+    }
+
+    /**
+     * Did an inbound write touch this record recently, and if so, who
+     * caused it?
+     *
+     * The breadcrumb is the inbound erpnext_sync_event row itself: it
+     * records which Medusa record it wrote and where it came from. An
+     * outbound push that finds one is an echo of that write, and says so
+     * in its envelope, so the far side drops it rather than applying it
+     * and bouncing it back again.
+     *
+     * Deliberately time-boxed. A person editing the same record an hour
+     * later must reach ERPNext normally; only the immediate return trip
+     * is suppressed.
+     */
+    async echoCauseFor(
+        entityRef: string | null,
+    ): Promise<{ origin: string; correlation_id: string | null } | null> {
+        if (!entityRef || entityRef.endsWith(":")) return null
+        try {
+            const [row] = await this.listErpnextSyncEvents(
+                { entity_ref: entityRef, direction: "inbound" as any },
+                { take: 1, order: { created_at: "DESC" } as any },
+            )
+            if (!row?.origin) return null
+            // last_attempt_at is when this row was last applied; an inbound
+            // row is REUSED across retries, so created_at can be hours old
+            // on a write that landed seconds ago.
+            const at = (row.last_attempt_at ?? row.created_at) as any
+            if (!isWithinEchoWindow(at)) return null
+            return { origin: row.origin, correlation_id: row.correlation_id ?? null }
+        } catch {
+            // A lookup failure must never block a legitimate push; the
+            // worst case is one redundant round trip, which the far side
+            // dedupes on event_id anyway.
+            return null
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Mapping configuration sync
+    //
+    // A mapping is one configuration living in two systems. It can be
+    // edited from either, so both copies share a mapping_uid and carry a
+    // version; the higher version wins, and ERPNext wins a tie because
+    // ERPNext owns which documents may sync at all.
+    // -----------------------------------------------------------------
+
+    /** Apply a mapping that arrived from ERPNext. Never throws: a refused
+     *  mapping is a normal outcome the log records, not a failed request. */
+    async applyMappingConfig(canon: CanonicalMapping): Promise<{
+        action: "created" | "updated" | "skipped"
+        reason?: string
+        id?: string
+    }> {
+        if (!canon?.uid) return { action: "skipped", reason: "missing_uid" }
+        const [existing] = await this.listErpnextMappings(
+            { mapping_uid: canon.uid },
+            { take: 1 },
+        )
+        const decision = decideConflict(
+            existing ? Number(existing.version ?? 1) : null,
+            Number(canon.version ?? 1),
+        )
+        if (!decision.apply) {
+            return { action: "skipped", reason: decision.reason, id: existing?.id }
+        }
+        const patch = fromCanonical(canon)
+        if (existing) {
+            // ERPNext may edit this mapping freely. What it may not do is
+            // switch it on here: nothing runs on this side until somebody
+            // on this side has rehearsed it. Refusing with an exception
+            // would turn ERPNext's push into a 5xx and a retry loop, so it
+            // is declined quietly and said on the mapping instead.
+            //
+            // The two sides then disagree about `enabled` at the same
+            // version, and nothing reconciles that until a person acts.
+            // That is the honest state and it is documented rather than
+            // papered over by making the version rule consider `enabled`.
+            const gatedPatch: any = { ...patch }
+            const wouldEnable = gatedPatch.enabled === true && !existing.enabled
+            if (wouldEnable) {
+                const verdict = mayEnable(existing as any, { ...(existing as any), ...gatedPatch })
+                if (verdict.ok === false) {
+                    gatedPatch.enabled = false
+                    gatedPatch.attention = "Mapping Required"
+                    gatedPatch.attention_detail =
+                        "ERPNext switched this on, and it has not been rehearsed here. " +
+                        "Dry-run it and enable it, or leave it off."
+                }
+            }
+            await this.updateErpnextMappings([
+                { id: existing.id, ...gatedPatch, last_synced_at: new Date() },
+            ])
+            return { action: "updated", id: existing.id }
+        }
+        const [created] = await this.createErpnextMappings([
+            {
+                ...patch,
+                // A mapping we have never seen arrives switched OFF, whatever
+                // the sender says. First contact between two systems that each
+                // already had mappings would otherwise turn on a rule nobody
+                // reviewed here — and a half-translated one at that, since
+                // events and any Medusa-only options have no counterpart on
+                // the other side. An operator enables it once they have
+                // looked. Updates to a uid we already hold apply as sent.
+                enabled: false,
+                // Which Medusa events fire a push is a Medusa-side concern
+                // ERPNext has no opinion on. Empty until an operator says when.
+                events: [],
+                last_synced_at: new Date(),
+            } as any,
+        ])
+        return { action: "created", id: created?.id, reason: "created_disabled" }
+    }
+
+    /** A mapping deleted on the other side is disabled here, not removed:
+     *  records already correlated by it must stay traceable. */
+    async disableMappingConfig(uid: string): Promise<{ action: string; id?: string }> {
+        if (!uid) return { action: "skipped" }
+        const [existing] = await this.listErpnextMappings({ mapping_uid: uid }, { take: 1 })
+        if (!existing) return { action: "skipped" }
+        if (existing.enabled === false) return { action: "skipped", id: existing.id }
+        await this.updateErpnextMappings([{ id: existing.id, enabled: false }])
+        return { action: "disabled", id: existing.id }
+    }
+
+    /** Tell ERPNext about a mapping edited here. */
+    async pushMappingConfig(mappingId: string, deleted = false): Promise<ForwardResult> {
+        const [row] = await this.listErpnextMappings({ id: mappingId }, { take: 1 })
+        if (!row?.mapping_uid) {
+            return { ok: true, status: "skipped", reason: "mapping-has-no-uid" }
+        }
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync || !cfg.erpnext_url || !cfg.webhook_secret) {
+            return { ok: true, status: "skipped", reason: "not-configured" }
+        }
+        const event = deleted ? "mapping.deleted" : "mapping.upserted"
+        const event_id = [
+            "medusa:mapping",
+            row.mapping_uid,
+            String(row.version ?? 1),
+            event,
+        ].join(":")
+        const canon = deleted
+            ? { uid: row.mapping_uid, version: Number(row.version ?? 1) }
+            : toCanonical(row as any)
+        const body = JSON.stringify(
+            envelope.build({
+                event,
+                event_id,
+                site_id: cfg.site_id,
+                kind: envelope.KIND_MAPPING,
+                mapping: canon as any,
+            }),
+        )
+        const targetUrl = receiveUrl(cfg)
+        const signature = crypto
+            .createHmac("sha256", cfg.webhook_secret)
+            .update(body)
+            .digest("hex")
+        const eventRow = await this.upsertEventRow(
+            { event, event_id, data: canon },
+            { status: "pending", last_error: null, target_url: targetUrl, site_id: cfg.site_id },
+        )
+        try {
+            const res = await fetch(targetUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-medusa-signature": signature,
+                    "x-medusa-event-id": event_id,
+                },
+                body,
+                signal: AbortSignal.timeout(cfg.request_timeout_ms),
+            })
+            if (!res.ok) {
+                const text = await res.text().catch(() => "")
+                const errMsg = (res.status + ": " + text).slice(0, ERROR_TRUNCATE)
+                await this.updateErpnextSyncEvents({
+                    id: eventRow.id,
+                    status: "failed",
+                    last_error: errMsg,
+                })
+                return { ok: false, status: "failed", httpStatus: res.status, error: errMsg }
+            }
+            await this.updateErpnextSyncEvents({
+                id: eventRow.id,
+                status: "success",
+                succeeded_at: new Date(),
+            })
+            await this.updateErpnextMappings([{ id: row.id, last_synced_at: new Date() }])
+            return { ok: true, status: "success" }
+        } catch (err: any) {
+            const errMsg = describeError(err).slice(0, ERROR_TRUNCATE)
+            await this.updateErpnextSyncEvents({
+                id: eventRow.id,
+                status: "failed",
+                last_error: errMsg,
+            })
+            return { ok: false, status: "failed", error: errMsg }
         }
     }
 
@@ -2528,9 +2661,172 @@ class ErpnextModuleService extends MedusaService({
      * each id (we don't reach into the customer / order / product
      * modules from here — keeps this module's deps minimal).
      */
+    /**
+     * Catalogue entries in ERPNext that no Medusa product claims yet.
+     *
+     * What the operator picks from when attaching a product they just
+     * created here to the one that already exists over there.
+     */
+    async listUnlinkedCatalogueItems(args: {
+        search?: string
+        limit?: number
+    } = {}): Promise<{ ok: boolean; doctype: string; items: any[]; message?: string }> {
+        const cfg = await this.getActiveConfig()
+        const doctype = cfg.products_doctype
+        const filters: any[] = [["medusa_product_id", "is", "not set"]]
+        if (args.search?.trim()) {
+            filters.push(["name", "like", `%${args.search.trim()}%`])
+        }
+        const res = await this.pullDoctype(doctype, {
+            filters,
+            fields: ["name", "item_name", "disabled"],
+            limit: Math.min(Math.max(args.limit ?? 20, 1), 200),
+        })
+        if (!res.ok) {
+            return { ok: false, doctype, items: [], message: res.message }
+        }
+        return { ok: true, doctype, items: res.items ?? [] }
+    }
+
+    /**
+     * Attach a Medusa product to an ERPNext catalogue entry.
+     *
+     * Both sides have to record it or the link is half-made: Medusa keeps
+     * the item code so later pushes are allowed and land on the right
+     * record, and ERPNext stamps the Medusa id so reconciliation stops
+     * reporting the pair as two orphans.
+     */
+    async linkProductToItem(args: {
+        product_id: string
+        item_code: string
+        scope?: any
+    }): Promise<{ ok: boolean; message?: string; item_code?: string; product_id?: string }> {
+        const cfg = await this.getActiveConfig()
+        const itemCode = (args.item_code ?? "").trim()
+        if (!args.product_id || !itemCode) {
+            return { ok: false, message: "product_id and item_code are both required" }
+        }
+
+        // The Item has to exist, and must not already belong to a
+        // different product — silently stealing a link would leave the
+        // other product pointing at a record that no longer names it.
+        const lookup = await this.pullDoctype(cfg.products_doctype, {
+            filters: [["name", "=", itemCode]],
+            fields: ["name", "medusa_product_id"],
+            limit: 1,
+        })
+        if (!lookup.ok) {
+            return { ok: false, message: lookup.message ?? "could not reach ERPNext" }
+        }
+        const item = (lookup.items ?? [])[0]
+        if (!item) {
+            return { ok: false, message: `${cfg.products_doctype} "${itemCode}" does not exist` }
+        }
+        if (item.medusa_product_id && item.medusa_product_id !== args.product_id) {
+            return {
+                ok: false,
+                message: `${itemCode} is already linked to ${item.medusa_product_id}`,
+            }
+        }
+
+        const productSvc: any = args.scope?.resolve?.("product")
+        if (!productSvc) {
+            return { ok: false, message: "product module unavailable in this scope" }
+        }
+        const product = await productSvc.retrieveProduct(args.product_id)
+        await productSvc.updateProducts(args.product_id, {
+            metadata: { ...(product.metadata ?? {}), [LINK_KEY]: itemCode },
+        })
+
+        const stamped = await this.stampMedusaIdOnItem(itemCode, args.product_id)
+        if (!stamped.ok) {
+            return { ok: false, message: stamped.message }
+        }
+        return { ok: true, item_code: itemCode, product_id: args.product_id }
+    }
+
+    /** Write our id onto the ERPNext record, through the same signed,
+     *  idempotent path every other write uses. */
+    private async stampMedusaIdOnItem(
+        itemCode: string,
+        productId: string,
+    ): Promise<{ ok: boolean; message?: string }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.erpnext_url || !cfg.webhook_secret) {
+            return { ok: false, message: "ERPNext URL / webhook secret not configured" }
+        }
+        const event = "product.linked"
+        const event_id = `medusa:link:${cfg.products_doctype}:${itemCode}:${productId}`
+        const body = JSON.stringify(
+            envelope.build({
+                event,
+                event_id,
+                site_id: cfg.site_id,
+                kind: envelope.KIND_MAPPED,
+                doctype: cfg.products_doctype,
+                key_field: "name",
+                key_value: itemCode,
+                payload: { medusa_product_id: productId },
+                // Never create: the operator picked a record that exists.
+                allow_create: false,
+                allow_update: true,
+            }),
+        )
+        const targetUrl = receiveUrl(cfg, true)
+        const signature = crypto.createHmac("sha256", cfg.webhook_secret).update(body).digest("hex")
+        const row = await this.upsertEventRow(
+            { event, event_id, data: { item_code: itemCode, product_id: productId } },
+            { status: "pending", last_error: null, target_url: targetUrl, site_id: cfg.site_id },
+        )
+        try {
+            const res = await fetch(targetUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-medusa-signature": signature,
+                    "x-medusa-event-id": event_id,
+                },
+                body,
+                signal: AbortSignal.timeout(cfg.request_timeout_ms),
+            })
+            if (!res.ok) {
+                const text = await res.text().catch(() => "")
+                const errMsg = (res.status + ": " + text).slice(0, ERROR_TRUNCATE)
+                await this.updateErpnextSyncEvents({ id: row.id, status: "failed", last_error: errMsg })
+                return { ok: false, message: errMsg }
+            }
+            await this.updateErpnextSyncEvents({
+                id: row.id,
+                status: "success",
+                succeeded_at: new Date(),
+            })
+            return { ok: true }
+        } catch (err: any) {
+            const errMsg = describeError(err).slice(0, ERROR_TRUNCATE)
+            await this.updateErpnextSyncEvents({ id: row.id, status: "failed", last_error: errMsg })
+            return { ok: false, message: errMsg }
+        }
+    }
+
+    /** Enabled mappings that push this entity, regardless of which event
+     *  fires them. Used by the manual push, which has no event of its own. */
+    async listEnabledPushMappingsForEntity(entity: string): Promise<any[]> {
+        if (!entity) return []
+        const rows = await this.listErpnextMappings(
+            { enabled: true, medusa_entity: entity },
+            { take: 100 },
+        )
+        return rows.filter((m: any) => m.direction === "push" || m.direction === "both")
+    }
+
     async bulkPush(args: {
         event: string
         items: Array<{ id: string; payload: any }>
+        /** Registry entity these items belong to. When given, each item is
+         *  pushed through the SAME mapping engine a live event uses, so a
+         *  manual push and an automatic one produce identical documents.
+         *  Without it the legacy full-payload path is used. */
+        entity?: string
     }): Promise<{
         total: number
         success: number
@@ -2550,15 +2846,46 @@ class ErpnextModuleService extends MedusaService({
         let success = 0
         let failed = 0
         let skipped = 0
+
+        // A manual push used to send the raw record to the unmapped
+        // endpoint, so "Push customers" and a live customer.created wrote
+        // DIFFERENT documents in ERPNext — the button reported green while
+        // writing nothing a mapping had shaped. Route both through the
+        // mapping engine; fall back to the old path only when the entity
+        // has no mapping at all.
+        const mappings = args.entity ? await this.listEnabledPushMappingsForEntity(args.entity) : []
+
         for (const it of args.items) {
-            const r = await this.forwardEvent({
-                event: args.event,
-                // Synthetic event id: prefix + entity id + timestamp.
-                // Lets the Frappe side dedupe but still distinguishes
-                // "live event" vs "manual replay" runs.
-                event_id: `manual_push:${args.event}:${it.id}:${Date.now()}`,
-                data: it.payload,
-            })
+            // Synthetic event id: prefix + entity id + timestamp. Lets the
+            // far side dedupe but still distinguishes "live event" from
+            // "manual replay" runs.
+            const eventId = `manual_push:${args.event}:${it.id}:${Date.now()}`
+            let r: ForwardResult
+            if (mappings.length) {
+                const outcomes: ForwardResult[] = []
+                for (const mapping of mappings) {
+                    outcomes.push(
+                        await this.pushViaMapping({
+                            mapping,
+                            event: args.event,
+                            event_id: `${eventId}:${mapping.id}`,
+                            record: it.payload,
+                        }),
+                    )
+                }
+                // One failure across several mappings is a failure for the
+                // record: the operator needs to see it, not an average.
+                r =
+                    outcomes.find((o) => !o.ok) ??
+                    outcomes.find((o) => o.ok && o.status === "success") ??
+                    outcomes[0]
+            } else {
+                r = await this.forwardEvent({
+                    event: args.event,
+                    event_id: eventId,
+                    data: it.payload,
+                })
+            }
             if (r.ok && r.status === "success") {
                 success++
                 results.push({ id: it.id, status: "success" })
@@ -2587,147 +2914,7 @@ class ErpnextModuleService extends MedusaService({
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Field-mapping mirror — read/write the Frappe-side `Polemarch Sync
-    // Mapping` Single doctype from the Medusa admin. Frappe stays the
-    // canonical store; this is a pull-through view.
-    // ─────────────────────────────────────────────────────────────────
 
-    /**
-     * Fetch the `Polemarch Sync Mapping` Single doc from Frappe,
-     * including all six child mapping tables. Used by the
-     * `/app/erpnext-mappings` admin page to render the n8n-style
-     * field mapper without duplicating storage on the Medusa side.
-     */
-    async getSyncMapping(): Promise<{
-        ok: boolean
-        url: string | null
-        mapping?: any
-        httpStatus?: number
-        message?: string
-    }> {
-        const cfg = await this.getActiveConfig()
-        const row = await this.findSettingsRow()
-        const apiKey = row?.erpnext_api_key ?? process.env.ERPNEXT_API_KEY ?? null
-        const apiSecret =
-            row?.erpnext_api_secret ?? process.env.ERPNEXT_API_SECRET ?? null
-        if (!cfg.erpnext_url || !apiKey || !apiSecret) {
-            return {
-                ok: false,
-                url: cfg.erpnext_url,
-                message: "erpnext_url / api_key / api_secret not all configured",
-            }
-        }
-        try {
-            // Single doctype: name == doctype name. URL-encode both.
-            const dt = encodeURIComponent("Polemarch Sync Mapping")
-            const res = await fetch(
-                `${cfg.erpnext_url}/api/resource/${dt}/${dt}`,
-                {
-                    method: "GET",
-                    headers: {
-                        Authorization: `token ${apiKey}:${apiSecret}`,
-                    },
-                    signal: AbortSignal.timeout(cfg.request_timeout_ms),
-                },
-            )
-            const text = await res.text().catch(() => "")
-            if (!res.ok) {
-                return {
-                    ok: false,
-                    url: cfg.erpnext_url,
-                    httpStatus: res.status,
-                    message: text.slice(0, 300) || `HTTP ${res.status}`,
-                }
-            }
-            const parsed = JSON.parse(text)
-            // Frappe wraps single-doc responses under `data`.
-            return {
-                ok: true,
-                url: cfg.erpnext_url,
-                mapping: parsed?.data ?? parsed,
-            }
-        } catch (err: any) {
-            return {
-                ok: false,
-                url: cfg.erpnext_url,
-                message: describeError(err).slice(0, 300),
-            }
-        }
-    }
-
-    /**
-     * Save edits to the `Polemarch Sync Mapping` Single doc back to
-     * Frappe. Body must be the full mapping doc with child tables;
-     * partial updates are NOT supported because Frappe replaces the
-     * whole child table when the parent is saved (no incremental row
-     * insert via the resource API).
-     *
-     * Returns the updated mapping echoed by Frappe so the admin UI
-     * can refresh in place.
-     */
-    async saveSyncMapping(data: any): Promise<{
-        ok: boolean
-        url: string | null
-        mapping?: any
-        httpStatus?: number
-        message?: string
-    }> {
-        const cfg = await this.getActiveConfig()
-        const row = await this.findSettingsRow()
-        const apiKey = row?.erpnext_api_key ?? process.env.ERPNEXT_API_KEY ?? null
-        const apiSecret =
-            row?.erpnext_api_secret ?? process.env.ERPNEXT_API_SECRET ?? null
-        if (!cfg.erpnext_url || !apiKey || !apiSecret) {
-            return {
-                ok: false,
-                url: cfg.erpnext_url,
-                message: "erpnext_url / api_key / api_secret not all configured",
-            }
-        }
-        try {
-            const dt = encodeURIComponent("Polemarch Sync Mapping")
-            const res = await fetch(
-                `${cfg.erpnext_url}/api/resource/${dt}/${dt}`,
-                {
-                    method: "PUT",
-                    headers: {
-                        Authorization: `token ${apiKey}:${apiSecret}`,
-                        "Content-Type": "application/json",
-                        // Frappe rejects PUT on resource without
-                        // X-Frappe-CSRF-Token unless the request is
-                        // token-auth-only (no session cookie). Our
-                        // call carries no session cookie so we're
-                        // safe — but if Frappe ever tightens, fall
-                        // back to frappe.client.set_value here.
-                    },
-                    body: JSON.stringify(data),
-                    signal: AbortSignal.timeout(cfg.request_timeout_ms),
-                },
-            )
-            const text = await res.text().catch(() => "")
-            if (!res.ok) {
-                return {
-                    ok: false,
-                    url: cfg.erpnext_url,
-                    httpStatus: res.status,
-                    message: text.slice(0, 500) || `HTTP ${res.status}`,
-                }
-            }
-            const parsed = JSON.parse(text)
-            return {
-                ok: true,
-                url: cfg.erpnext_url,
-                mapping: parsed?.data ?? parsed,
-            }
-        } catch (err: any) {
-            return {
-                ok: false,
-                url: cfg.erpnext_url,
-                message: describeError(err).slice(0, 300),
-            }
-        }
-    }
 
     // ─────────────────────────────────────────────────────────────────
     // Doctype + field introspection (Frappe side)
@@ -3292,8 +3479,47 @@ class ErpnextModuleService extends MedusaService({
         allow_create?: boolean
         allow_update?: boolean
         updated_by_user_id?: string | null
+        /**
+         * Set only by applyMappingConfig, when this save is ERPNext's copy
+         * of the mapping arriving rather than an operator editing it. It
+         * does not bypass the gate — it changes what the gate does when it
+         * refuses, because throwing at ERPNext would turn its push into a
+         * 5xx and a retry loop.
+         */
+        from_erpnext?: boolean
     }) {
         const validated = validateFieldMappings(input.field_mappings ?? [])
+
+        // A mapping goes live only after somebody HERE has tried it. Only
+        // the transition is gated: one that is already running keeps
+        // running whatever is edited on it, because retro-fitting the rule
+        // would stop a working store on the next save of anything.
+        const existingRow: any = input.id
+            ? (await this.listErpnextMappings({ id: input.id } as any, { take: 1 }))[0]
+            : null
+        const gateVerdict = mayEnable(existingRow, input as any)
+        if (gateVerdict.ok === false) {
+            // Held before the branch: reassigning `input` below resets the
+            // narrowing that made `reason` reachable, since the verdict was
+            // derived from it.
+            const refusal = gateVerdict.reason
+            if (input.from_erpnext) {
+                // ERPNext asked for this. Same rule as first contact:
+                // nothing runs here until somebody here has looked at it.
+                // Keep every other field it sent, leave it switched off,
+                // and say why on the mapping rather than in an exception.
+                input = {
+                    ...input,
+                    enabled: false,
+                    attention: "Mapping Required",
+                    attention_detail:
+                        "ERPNext switched this on, and it has not been rehearsed here. " +
+                        "Dry-run it and enable it, or leave it off.",
+                } as any
+            } else {
+                throw new Error(refusal)
+            }
+        }
 
         // Reject a malformed condition at SAVE time. Conditions fail
         // closed at run time, so a typo here would silently stop the
@@ -3327,15 +3553,55 @@ class ErpnextModuleService extends MedusaService({
             allow_create: input.allow_create ?? true,
             allow_update: input.allow_update ?? true,
             updated_by_user_id: input.updated_by_user_id ?? null,
+            // Set by the gate above when ERPNext switched on a mapping this
+            // side has not rehearsed. Undefined on an ordinary save, and
+            // `?? null` would then clear a flag somebody still has to act
+            // on, so it is only written when it is actually present.
+            ...((input as any).attention !== undefined
+                ? {
+                      attention: (input as any).attention,
+                      attention_detail: (input as any).attention_detail ?? null,
+                  }
+                : {}),
         }
         if (input.id) {
+            const [current] = await this.listErpnextMappings({ id: input.id }, { take: 1 })
+            // The same mapping exists on the ERPNext side. Bumping the
+            // version here is what lets the two copies be ordered rather
+            // than silently overwriting each other; the uid pairs them.
             const [updated] = await this.updateErpnextMappings([
-                { id: input.id, ...patch },
+                {
+                    id: input.id,
+                    ...patch,
+                    mapping_uid: current?.mapping_uid || envelope.newCorrelationId(),
+                    version: Number(current?.version ?? 1) + 1,
+                },
             ])
+            await this.announceMappingChange(updated?.id)
             return updated
         }
-        const [created] = await this.createErpnextMappings([patch])
+        const [created] = await this.createErpnextMappings([
+            { ...patch, mapping_uid: envelope.newCorrelationId(), version: 1 },
+        ])
+        await this.announceMappingChange(created?.id)
         return created
+    }
+
+    /**
+     * Tell ERPNext a mapping changed here.
+     *
+     * Deliberately swallowing failures: the operator's save has already
+     * succeeded, and an ERPNext outage must not make the form look
+     * broken. The mapping carries a version, so the next successful
+     * exchange in either direction reconciles the two copies anyway.
+     */
+    private async announceMappingChange(mappingId?: string, deleted = false): Promise<void> {
+        if (!mappingId) return
+        try {
+            await this.pushMappingConfig(mappingId, deleted)
+        } catch (err) {
+            console.warn("[erpnext] mapping change not announced:", describeError(err))
+        }
     }
 
     /**
@@ -3349,6 +3615,25 @@ class ErpnextModuleService extends MedusaService({
         retention_days: number
         cutoff: string | null
     }> {
+        // Rehearsals go first and go regardless of the retention
+        // setting. They are not evidence of anything, they are the
+        // noisiest rows in the table while somebody is building a
+        // mapping, and a site that turned retention off should not
+        // accumulate them forever.
+        const TEST_EVENT_RETENTION_DAYS = 1
+        const testCutoff = new Date(
+            Date.now() - TEST_EVENT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+        )
+        for (let batch = 0; batch < 20; batch += 1) {
+            const rehearsals = await this.listErpnextSyncEvents(
+                { is_test: true, created_at: { $lt: testCutoff } } as any,
+                { take: 500, select: ["id"] } as any,
+            )
+            if (!rehearsals.length) break
+            await this.deleteErpnextSyncEvents(rehearsals.map((r: any) => r.id))
+            if (rehearsals.length < 500) break
+        }
+
         const row = await this.findSettingsRow()
         const retentionDays = Number(row?.log_retention_days ?? 180)
         if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
@@ -3397,6 +3682,10 @@ class ErpnextModuleService extends MedusaService({
     }
 
     async deleteMapping(id: string) {
+        // Announce first: the push reads the row to learn its uid, and a
+        // deleted mapping on one side disables rather than destroys on the
+        // other, so records already correlated by it stay traceable.
+        await this.announceMappingChange(id, true)
         await this.deleteErpnextMappings([id])
         return { ok: true, id }
     }
@@ -3462,156 +3751,6 @@ class ErpnextModuleService extends MedusaService({
         return { seeded, updated, errors }
     }
 
-    /**
-     * F2 — seed Frappe `Webhook` rows on the connected Frappe site.
-     *
-     * Reads `FRAPPE_WEBHOOK_BLUEPRINTS` and POSTs each one to Frappe's
-     * `/api/resource/Webhook`. Idempotent — lookup by name first, skip
-     * if present.
-     *
-     * Resolves the request_url from `erpnext_setting.medusa_base_url`
-     * (NEW — set by the operator to whichever Medusa host the Frappe
-     * side should call back; e.g. `https://medusa.example.com`).
-     * If that's empty, falls back to env var MEDUSA_BASE_URL.
-     *
-     * Webhook rows are signed with `frappe_to_medusa_secret` so the
-     * F1 receiver can HMAC-verify on the other end.
-     *
-     * Called by:
-     *   - POST /admin/erpnext/seed-frappe-webhooks (admin button F4)
-     *   - Plugin migration hook on install (one-shot at first deploy)
-     */
-    async seedFrappeWebhooks(opts?: {
-        medusaBaseUrl?: string
-    }): Promise<{
-        seeded: string[]
-        updated: string[]
-        skipped: string[]
-        errors: { name: string; message: string }[]
-    }> {
-        const { FRAPPE_WEBHOOK_BLUEPRINTS } = await import(
-            "./frappe-webhooks.js"
-        )
-        const cfg = await this.getActiveConfig()
-        const row = await this.findSettingsRow()
-        const apiKey = row?.erpnext_api_key ?? process.env.ERPNEXT_API_KEY
-        const apiSecret =
-            row?.erpnext_api_secret ?? process.env.ERPNEXT_API_SECRET
-        const secret =
-            row?.frappe_to_medusa_secret ??
-            process.env.ERPNEXT_FRAPPE_TO_MEDUSA_SECRET
-        const medusaBase = (
-            opts?.medusaBaseUrl ||
-            process.env.MEDUSA_BASE_URL ||
-            ""
-        ).replace(/\/$/, "")
-        if (!cfg.erpnext_url || !apiKey || !apiSecret) {
-            throw new Error(
-                "erpnext_url + api_key + api_secret must be set on the Settings tab before seeding.",
-            )
-        }
-        if (!secret) {
-            throw new Error(
-                "frappe_to_medusa_secret must be set on the Settings tab. Without it, Frappe's Webhook rows would sign with an empty secret and the receiver will reject every push.",
-            )
-        }
-        if (!medusaBase) {
-            throw new Error(
-                "medusaBaseUrl (or env MEDUSA_BASE_URL) must be set so the Frappe Webhook rows know where to POST.",
-            )
-        }
-        const headers = {
-            "Content-Type": "application/json",
-            Authorization: `token ${apiKey}:${apiSecret}`,
-        }
-        const seeded: string[] = []
-        const updated: string[] = []
-        const errors: { name: string; message: string }[] = []
-        for (const bp of FRAPPE_WEBHOOK_BLUEPRINTS) {
-            try {
-                const bodyData = {
-                    name: bp.name,
-                    webhook_doctype: bp.webhook_doctype,
-                    webhook_docevent: bp.webhook_docevent,
-                    condition: bp.condition || "",
-                    request_url: `${medusaBase}${bp.request_path}`,
-                    is_dynamic_url: 0,
-                    timeout: 15,
-                    request_method: "POST",
-                    request_structure: "JSON",
-                    enable_security: 1,
-                    webhook_secret: secret,
-                    webhook_json: bp.webhook_json,
-                    // Frappe's `request_structure: "JSON"` only validates the
-                    // template — it doesn't auto-set Content-Type on the
-                    // outgoing POST. Without an explicit header, Python
-                    // requests sends `Content-Type: <none>` (or text/plain
-                    // for string bodies), which makes Express's JSON body
-                    // parser skip parsing — req.body lands as `{}` and the
-                    // receiver's HMAC ends up signing the empty fallback
-                    // `{}` instead of the actual bytes Frappe sent. Pinning
-                    // Content-Type: application/json here fixes both the
-                    // body parsing AND HMAC validation in one shot.
-                    webhook_headers: [
-                        { key: "Content-Type", value: "application/json" },
-                    ],
-                    enabled: 1,
-                }
-                // Exists?
-                const lookup = await fetch(
-                    `${cfg.erpnext_url}/api/resource/Webhook/${encodeURIComponent(bp.name)}`,
-                    { method: "GET", headers },
-                )
-                if (lookup.ok) {
-                    // UPSERT: PUT to refresh the row in place so blueprint
-                    // edits (template tweaks, secret rotation) actually
-                    // propagate. Previously skipped existing rows — that
-                    // made "Reseed" useless after the first run.
-                    const put = await fetch(
-                        `${cfg.erpnext_url}/api/resource/Webhook/${encodeURIComponent(bp.name)}`,
-                        {
-                            method: "PUT",
-                            headers,
-                            body: JSON.stringify({ data: bodyData }),
-                        },
-                    )
-                    if (!put.ok) {
-                        const text = await put.text().catch(() => "")
-                        errors.push({
-                            name: bp.name,
-                            message: `PUT HTTP ${put.status}: ${text.slice(0, 300)}`,
-                        })
-                        continue
-                    }
-                    updated.push(bp.name)
-                    continue
-                }
-                const create = await fetch(
-                    `${cfg.erpnext_url}/api/resource/Webhook`,
-                    {
-                        method: "POST",
-                        headers,
-                        body: JSON.stringify({ data: bodyData }),
-                    },
-                )
-                if (!create.ok) {
-                    const text = await create.text().catch(() => "")
-                    errors.push({
-                        name: bp.name,
-                        message: `POST HTTP ${create.status}: ${text.slice(0, 300)}`,
-                    })
-                    continue
-                }
-                seeded.push(bp.name)
-            } catch (e: any) {
-                errors.push({
-                    name: bp.name,
-                    message: String(e?.message || e),
-                })
-            }
-        }
-        return { seeded, updated, skipped: [], errors }
-    }
 
     /**
      * Lookup helper for the admin Mapping editor's "Suggest field
@@ -3728,7 +3867,7 @@ class ErpnextModuleService extends MedusaService({
         //
         // Two pairs CAN legitimately share a column when they run in
         // opposite directions (Product↔Security maps `handle` on pull
-        // and `metadata.isin` on push into the same `isin` field).
+        // and a metadata path on push into the same ERPNext field).
         // Two pairs sharing a column in the SAME direction is a
         // fallback chain written the long way — historically used to
         // survive a metadata rename, relying on empty values being
@@ -3816,9 +3955,277 @@ class ErpnextModuleService extends MedusaService({
      * the same payload that the push subscriber would send to Frappe,
      * WITHOUT hitting the network. Useful for the admin "Test" button.
      */
+    /**
+     * A record of this entity to reason about.
+     *
+     * A real one when the store has any: only a real record shows the
+     * shapes an operator will actually meet, empty fields included. One
+     * built from the entity's own declared paths otherwise, because a
+     * brand-new mapping is exactly when a sample is most useful and
+     * exactly when there may be nothing to sample.
+     */
+    async sampleFor(
+        entityKey: string,
+        container: any,
+        recordId?: string | null,
+    ): Promise<{ entity: string; id: string | null; from_record: boolean; data: any }> {
+        const entity = getMedusaEntity(entityKey)
+        if (!entity) {
+            throw new Error(`no registry entry for entity '${entityKey}'`)
+        }
+        const id = recordId ?? null
+        if (id) {
+            const record = await entity.fetchById(container, id).catch(() => null)
+            if (record) {
+                return { entity: entityKey, id, from_record: true, data: record }
+            }
+        }
+        // Built from what the entity says about itself. Typed placeholders
+        // rather than empty strings, so a mapping that expects a number
+        // gets a number and a transform that parses a date gets a date.
+        const data: Record<string, any> = {}
+        for (const p of entity.paths ?? []) {
+            setByPath(data, p.path, placeholderFor(p))
+        }
+        return { entity: entityKey, id: null, from_record: false, data }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Hard reset, the Medusa half
+    //
+    // Neither system can reset itself and neither can reset the other.
+    // Each generates a secret, shows it once, and has to be handed the
+    // other's. Only a side holding both proofs resets. See ./reset.ts for
+    // the four rules that make the secret worth anything, and
+    // medusync/reset.py for the mirror.
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Start a reset and return its secret, once.
+     *
+     * The plaintext is in the return value and nowhere else. Any previous
+     * live request is retired first: two live secrets would mean an
+     * operator holding two slips of paper they cannot tell apart.
+     */
+    async requestReset(siteId?: string | null): Promise<any> {
+        const live = await this.listErpnextResetRequests({ status: "pending" } as any, { take: 50 })
+        if (live.length) {
+            await this.updateErpnextResetRequests(
+                live.map((r: any) => ({ id: r.id, status: "cancelled" })),
+            )
+        }
+        const secret = resetRules.newSecret()
+        const [row] = await this.createErpnextResetRequests([
+            {
+                site_id: siteId ?? DEFAULT_SITE_ID,
+                status: "pending",
+                secret_hash: resetRules.hashSecret(secret),
+                expires_at: resetRules.expiresAt(),
+            } as any,
+        ])
+        return {
+            id: row.id,
+            site_id: row.site_id,
+            secret,
+            expires_at: row.expires_at,
+            window_seconds: resetRules.WINDOW_SECONDS,
+        }
+    }
+
+    /**
+     * ERPNext is claiming to hold the secret we generated.
+     *
+     * A wrong secret deliberately does not spend the request: a typo, or
+     * anyone who can reach the endpoint, must not cost the operator the
+     * three minutes and the trip.
+     */
+    async verifyResetSecret(secret: string): Promise<any> {
+        if (!secret) return { ok: false, reason: "no secret offered" }
+        const candidates = await this.listErpnextResetRequests(
+            { status: ["pending", "verified"] as any },
+            { take: 20, order: { created_at: "DESC" } },
+        )
+        for (const row of candidates as any[]) {
+            if (!resetRules.secretMatches(secret, row.secret_hash)) continue
+            const verdict = resetRules.canVerify(row, secret)
+            if (!verdict.ok) return verdict
+            const now = new Date()
+            await this.updateErpnextResetRequests([
+                { id: row.id, used_at: now, local_verified_at: now, status: "verified" },
+            ])
+            return { ok: true, id: row.id }
+        }
+        return { ok: false, reason: "no live reset request matches that secret" }
+    }
+
+    /**
+     * Prove to ERPNext that we hold the secret IT generated.
+     *
+     * The operator carries it here from the ERPNext screen. We send it
+     * back over the ordinary signed channel and only ERPNext's answer
+     * counts.
+     */
+    async confirmRemoteReset(id: string, secret: string): Promise<any> {
+        const [row] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        if (!row) return { ok: false, reason: "no such reset request" }
+        if (resetRules.secondsLeft(row as any) <= 0) {
+            await this.updateErpnextResetRequests([{ id, status: "expired" }])
+            return { ok: false, reason: "this request has expired" }
+        }
+        const answer = await this.forwardResetVerify(secret)
+        if (!answer.ok) return answer
+        await this.updateErpnextResetRequests([{ id, remote_confirmed_at: new Date() }])
+        const [fresh] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        return { ok: true, id, ready: resetRules.isReady(fresh as any) }
+    }
+
+    /**
+     * POST one `reset.verify` to ERPNext.
+     *
+     * Deliberately not through the ordinary forward path: that one writes
+     * an audit row carrying the request body, which is the one thing this
+     * message must not leave behind.
+     */
+    async forwardResetVerify(secret: string): Promise<any> {
+        const cfg = await this.getActiveConfig()
+        const row = await this.findSettingsRow()
+        const base = String(cfg.erpnext_url ?? "").replace(/\/+$/, "")
+        const outboundSecret =
+            (row as any)?.webhook_secret ?? process.env.ERPNEXT_WEBHOOK_SECRET ?? null
+        if (!base || !outboundSecret) {
+            return { ok: false, reason: "ERPNext URL or webhook secret is not configured" }
+        }
+        const eventId = `reset:medusa:${crypto.randomBytes(8).toString("hex")}`
+        const body = Buffer.from(
+            JSON.stringify(
+                envelope.build({
+                    event: resetRules.VERIFY_EVENT,
+                    event_id: eventId,
+                    site_id: (row as any)?.site_id ?? DEFAULT_SITE_ID,
+                    data: { secret },
+                }),
+            ),
+            "utf8",
+        )
+        const signature = crypto
+            .createHmac("sha256", outboundSecret)
+            .update(body)
+            .digest("base64")
+        try {
+            const res = await fetch(`${base}/api/method/medusync.api.receive`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-Medusa-Signature": signature,
+                    "X-Medusa-Event-Id": eventId,
+                },
+                body,
+            })
+            if (!res.ok) return { ok: false, reason: `ERPNext answered ${res.status}` }
+            const answer: any = await res.json().catch(() => ({}))
+            const result = answer?.result ?? answer
+            if (result?.ok || answer?.status === "success") return { ok: true }
+            return { ok: false, reason: result?.reason ?? "ERPNext refused that secret" }
+        } catch (err: any) {
+            // The message may quote the URL. Never the body.
+            return { ok: false, reason: `could not reach ERPNext: ${err?.message ?? err}` }
+        }
+    }
+
+    async resetStatus(id: string): Promise<any> {
+        const [row] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        if (!row) return { ok: false, reason: "no such reset request" }
+        return {
+            ok: true,
+            id: row.id,
+            status: (row as any).status,
+            local_verified_at: (row as any).local_verified_at,
+            remote_confirmed_at: (row as any).remote_confirmed_at,
+            completed_at: (row as any).completed_at,
+            seconds_left: resetRules.secondsLeft(row as any),
+            ready: resetRules.isReady(row as any),
+        }
+    }
+
+    /**
+     * Do it. Refuses unless both sides proved themselves.
+     *
+     * What it clears: the sync event log, in full. What it switches off:
+     * every mapping. What it keeps: every product, customer and order, and
+     * every ERPNext id recorded on them — a reset that took those with it
+     * would leave both systems holding the same records and no longer
+     * knowing it, which is worse than any configuration mistake.
+     *
+     * This side has no shipped mapping set of its own to restore. Mappings
+     * here are the far side's copies, and ERPNext restores its defaults and
+     * pushes them over when somebody enables one. So "restore defaults"
+     * on this side is exactly "switch everything off and wait".
+     */
+    async performReset(id: string): Promise<any> {
+        const [row] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        if (!row) throw new Error("no such reset request")
+        if (!resetRules.isReady(row as any)) {
+            throw new Error(
+                "this reset is not verified by both sides yet: each system generates a secret and has to be handed the other's",
+            )
+        }
+        const report: Record<string, any> = {
+            kept: [
+                "every product, customer and order",
+                "every ERPNext id recorded on them",
+                "the connection settings and both secrets",
+            ],
+            cleared: {},
+        }
+
+        const mappings = await this.listErpnextMappings({}, { take: 1000 })
+        const enabled = (mappings as any[]).filter((m) => m.enabled)
+        if (enabled.length) {
+            await this.updateErpnextMappings(enabled.map((m: any) => ({ id: m.id, enabled: false })))
+        }
+        report.disabled = enabled.map((m: any) => m.name ?? m.id)
+
+        let cleared = 0
+        for (let batch = 0; batch < 200; batch += 1) {
+            const rows = await this.listErpnextSyncEvents({}, { take: 500, select: ["id"] } as any)
+            if (!rows.length) break
+            await this.deleteErpnextSyncEvents(rows.map((r: any) => r.id))
+            cleared += rows.length
+            if (rows.length < 500) break
+        }
+        report.cleared.erpnext_sync_event = cleared
+
+        await this.updateErpnextResetRequests([
+            { id, status: "completed", completed_at: new Date(), report },
+        ])
+        return report
+    }
+
+    /**
+     * Remember that this exact mapping was rehearsed.
+     *
+     * The gate reads `tested_signature`, so recording a pass is what makes
+     * a mapping switchable-on. Written straight to the row: a rehearsal is
+     * not an edit, and going through saveMapping would bump the version
+     * and re-run the very gate this is satisfying.
+     */
+    async recordMappingTest(mappingId: string, passed: boolean, report?: any): Promise<any> {
+        const [row] = await this.listErpnextMappings({ id: mappingId } as any, { take: 1 })
+        if (!row) return { ok: false, reason: "no such mapping" }
+        await this.updateErpnextMappings({
+            id: mappingId,
+            tested_signature: passed ? signatureOf(row as any) : null,
+            last_test_at: new Date(),
+            last_test_status: passed ? "passed" : "failed",
+            last_test_report: report ?? null,
+        } as any)
+        return { ok: true, id: mappingId, passed }
+    }
+
     async dryRunPush(args: {
         mapping_id: string
-        record_id: string
+        /** Omit to rehearse against a sample instead of a real record. */
+        record_id?: string | null
         container: any
     }): Promise<{
         ok: boolean
@@ -3826,6 +4233,9 @@ class ErpnextModuleService extends MedusaService({
         key_value?: string
         skipped_fields?: string[]
         message?: string
+        /** Reasons this rehearsal did not count as a pass. Empty is a pass. */
+        warnings?: string[]
+        rehearsal_passed?: boolean
     }> {
         const mapping = await this.getMapping(args.mapping_id)
         if (!mapping) return { ok: false, message: "mapping not found" }
@@ -3836,7 +4246,12 @@ class ErpnextModuleService extends MedusaService({
                 message: `medusa entity '${mapping.medusa_entity}' has no registry entry`,
             }
         }
-        const record = await entity.fetchById(args.container, args.record_id)
+        // A brand-new mapping usually has nothing to point at yet, and
+        // that is when rehearsing it matters most. Fall back to a sample
+        // built from the entity's own declared paths.
+        const record = args.record_id
+            ? await entity.fetchById(args.container, args.record_id)
+            : (await this.sampleFor(mapping.medusa_entity, args.container)).data
         if (!record) {
             return { ok: false, message: `no ${mapping.medusa_entity} with id ${args.record_id}` }
         }
@@ -3858,11 +4273,38 @@ class ErpnextModuleService extends MedusaService({
                   getByPath(record, mapping.key_medusa_field) ?? "",
               )
             : ""
+        // A rehearsal that produced an empty payload, or no key to
+        // correlate on, has not shown that the mapping works -- it has
+        // shown that it would send nothing. Recording that as a pass would
+        // satisfy the enable gate without proving anything, which is worse
+        // than having no gate: it looks like a check.
+        const fieldCount = Object.keys(result.payload ?? {}).length
+        const warnings: string[] = []
+        if (!fieldCount) {
+            warnings.push(
+                "The mapping carried nothing from this record. Check the Medusa paths against " +
+                    "the Sample.",
+            )
+        }
+        if (!keyValue) {
+            warnings.push(
+                `No value at the key path '${mapping.key_medusa_field}', so ERPNext would have ` +
+                    "nothing to correlate on.",
+            )
+        }
+        await this.recordMappingTest(args.mapping_id, warnings.length === 0, {
+            payload: result.payload,
+            key_value: keyValue,
+            skipped_fields: result.skippedFields,
+            warnings,
+        })
         return {
             ok: true,
             payload: result.payload,
             key_value: keyValue,
             skipped_fields: result.skippedFields,
+            warnings,
+            rehearsal_passed: warnings.length === 0,
         }
     }
 
@@ -3908,6 +4350,31 @@ class ErpnextModuleService extends MedusaService({
             )
             return { ok: true, status: "skipped", reason: "not-configured" }
         }
+        // ERPNext owns the catalogue. A product invented in the storefront
+        // must not quietly become an Item with no cost, stock or purchase
+        // history behind it; the operator says whether it may create one,
+        // must be attached to an existing one first, or must not travel.
+        if (args.mapping.medusa_entity === "product") {
+            const verdict = decideProductPush({
+                policy: cfg.medusa_product_policy,
+                event: args.event,
+                linked: isLinked(args.record),
+            })
+            if (verdict.allow === false) {
+                const reason = verdict.reason
+                await this.upsertEventRow(
+                    { event: args.event, event_id: args.event_id, data: args.record },
+                    {
+                        status: "skipped",
+                        last_error: reason,
+                        target_url: null,
+                        mapping_id: args.mapping.id,
+                    },
+                )
+                return { ok: true, status: "skipped", reason }
+            }
+        }
+
         // Does this RECORD qualify? `events` decided the event was a
         // candidate; the trigger decides whether this particular record
         // should be in ERPNext at all yet. Used to be a hard-coded KYC
@@ -4015,6 +4482,9 @@ class ErpnextModuleService extends MedusaService({
                     mapping_id: args.mapping.id,
                     payload_hash: payloadHash,
                     status: "success",
+                    // A test run must never be the reason a genuine change
+                    // is dropped as a duplicate.
+                    is_test: false,
                 },
                 { take: 1 },
             )
@@ -4076,23 +4546,36 @@ class ErpnextModuleService extends MedusaService({
             ),
             args.record,
         )
-        const body = JSON.stringify({
-            event: args.event,
-            id: args.event_id,
-            mapping_id: args.mapping.id,
-            mapping_name: args.mapping.name,
-            doctype: args.mapping.doctype,
-            key_field: effKeyField,
-            key_value: effKeyValue,
-            payload: outPayload,
-            ts: nowTs(),
-            // The far side decides create-vs-update from whether the key
-            // matches an existing doc; these say what it is ALLOWED to
-            // do once it knows. Sent every time so an older receiver
-            // that ignores them simply behaves as it always has.
-            allow_create: args.mapping.allow_create !== false,
-            allow_update: args.mapping.allow_update !== false,
-        })
+        // Was this record just written BY ERPNext? Then what we are about
+        // to send is ERPNext's own change coming home; tag it so the far
+        // side drops it instead of applying it again and bouncing it back.
+        // This is what stops a loop once the round trip has crossed a
+        // worker, where no in-request guard survives.
+        const cause = await this.echoCauseFor(
+            `${args.mapping.medusa_entity}:${args.record?.id ?? ""}`,
+        )
+        const body = JSON.stringify(
+            envelope.build({
+                event: args.event,
+                event_id: args.event_id,
+                site_id: cfg.site_id,
+                kind: envelope.KIND_MAPPED,
+                mapping_id: args.mapping.id,
+                mapping_name: args.mapping.name,
+                doctype: args.mapping.doctype,
+                key_field: effKeyField,
+                key_value: effKeyValue,
+                payload: outPayload,
+                correlation_id: cause?.correlation_id ?? null,
+                echo_of: cause?.origin ?? null,
+                // The far side decides create-vs-update from whether the key
+                // matches an existing doc; these say what it is ALLOWED to
+                // do once it knows. Sent every time so an older receiver
+                // that ignores them simply behaves as it always has.
+                allow_create: args.mapping.allow_create !== false,
+                allow_update: args.mapping.allow_update !== false,
+            }),
+        )
         const signature = crypto
             .createHmac("sha256", cfg.webhook_secret)
             .update(body)

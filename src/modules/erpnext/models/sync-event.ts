@@ -32,6 +32,32 @@ import { model } from "@medusajs/framework/utils"
 export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
     id: model.id().primaryKey(),
 
+    /**
+     * Who caused this row: `<system>:<site_id>`, e.g. "erpnext:default".
+     * On an inbound row it is the sender; on an outbound row it is empty
+     * unless the push was itself caused by an inbound write.
+     */
+    origin: model.text().nullable(),
+
+    /** Carried unchanged through a causal chain, so one customer edit can
+     *  be followed across both systems in the logs. */
+    correlation_id: model.text().nullable(),
+
+    /**
+     * `<entity>:<id>` of the Medusa record an INBOUND write touched.
+     *
+     * This is the breadcrumb that stops a sync loop. An inbound write
+     * lands as an ordinary module write; the event it triggers reaches the
+     * forward subscriber moments later, in another request, where no
+     * in-memory flag survives. Finding a recent inbound row for the same
+     * entity tells the push it is an echo, and it is stamped so the far
+     * side drops it.
+     */
+    entity_ref: model.text().nullable(),
+
+    /** Which site this row belongs to. */
+    site_id: model.text().nullable(),
+
     /** Medusa event name, e.g. "customer.created", "order.placed". */
     event: model.text().index(),
 
@@ -75,11 +101,10 @@ export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
     mapping_id: model.text().nullable(),
 
     /**
-     * Sync direction. "outbound" = Medusa→Frappe (the only kind that
-     * existed pre-F1); "inbound" = Frappe→Medusa POSTed by a standard
-     * Frappe Webhook row (created via the seeder). The retry +
-     * reconciliation crons scan by (status, direction) so this column
-     * is indexed in the migration.
+     * Sync direction. "outbound" = Medusa→Frappe; "inbound" =
+     * Frappe→Medusa, POSTed by medusync (or by any signed sender). The
+     * retry and reconciliation crons scan by (status, direction), so
+     * this column is indexed in the migration.
      */
     direction: model.text().default("outbound"),
 
@@ -99,4 +124,15 @@ export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
      * mapping_id because that is how the lookup queries it.
      */
     payload_hash: model.text().nullable(),
+
+    /**
+     * This row is a rehearsal from the mapping studio, not real traffic.
+     *
+     * Everything that reads this table skips marked rows. The retry job
+     * would otherwise send a fabricated payload for real; the
+     * `skip_unchanged` guard would let a rehearsed success suppress a
+     * genuine push as a duplicate; and both failures are invisible from
+     * either end, which is the worst kind.
+     */
+    is_test: model.boolean().default(false),
 })

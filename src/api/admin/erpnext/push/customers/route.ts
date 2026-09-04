@@ -69,6 +69,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
     const customerPush = await erpnext.bulkPush({
         event: "customer.synced",
+        entity: "customer",
         items: rows.map((c) => ({ id: c.id, payload: c })),
     })
 
@@ -76,6 +77,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     if (include_kyc) {
         kycPush = await erpnext.bulkPush({
             event: "customer.kyc.synced",
+            // Deliberately NOT routed through the customer mapping: the KYC
+            // payload is its own shape, and mapping it as a customer would
+            // write a customer document mostly full of nulls.
             items: rows.map((c) => ({
                 id: c.id,
                 payload: buildKycPayload(c),

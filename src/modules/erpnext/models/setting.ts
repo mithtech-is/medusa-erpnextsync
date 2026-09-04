@@ -3,7 +3,7 @@ import { model } from "@medusajs/framework/utils"
 /**
  * `erpnext_setting` — singleton row for the Medusa-side ERPNext sync.
  *
- * Mirrors the `cashfree_setting` / `gamification_setting` / `ovo_setting`
+ * Mirrors the shape a Medusa project's own `*_setting`
  * pattern: a single row keyed by `singleton_key = "default"` so the
  * admin UI is one GET / one POST, with no list/pagination concerns.
  *
@@ -18,7 +18,7 @@ import { model } from "@medusajs/framework/utils"
  *     settings page.
  *
  * Secret handling:
- *   - Stored as plaintext (same as `cashfree_setting.client_secret` /
+ *   - Stored as plaintext (the same choice other settings models make /
  *     `webhook_secret`). The admin GET response masks them to a
  *     3-char prefix + 3-char suffix preview so a screenshot can't
  *     leak the value. Treat the DB + backups as sensitive.
@@ -37,10 +37,55 @@ import { model } from "@medusajs/framework/utils"
  *   row.webhook_secret unset   → fall back to ERPNEXT_WEBHOOK_SECRET.
  */
 export const ErpnextSetting = model.define("erpnext_setting", {
+    /**
+     * Consecutive failed pushes to ERPNext. Reset to zero the moment one
+     * succeeds. See ../breaker.ts for why it is consecutive and not total.
+     */
+    consecutive_failures: model.number().default(0),
+
+    /**
+     * Set when the failures above reached `trip_after`. While it is set,
+     * pushes are skipped rather than attempted and the retry job lets one
+     * through per run to find out whether ERPNext has come back.
+     */
+    tripped_at: model.dateTime().nullable(),
+
+    /** Consecutive failures before we stop trying. Ten by default. */
+    trip_after: model.number().default(10),
+
     id: model.id().primaryKey(),
     /** Always "default" — enforces single-row semantics. The unique
      *  index on this column lives in the migration. */
     singleton_key: model.text().default("default"),
+
+    /**
+     * This Medusa instance's identity on the wire.
+     *
+     * One ERPNext can serve several Medusa stores; every envelope names
+     * its site so the far side can tell them apart, keep their logs
+     * separate, and recognise its own change coming home. Must equal the
+     * Site ID of the matching Medusync Site record. Empty falls back to
+     * "default", which is what a single-store install gets.
+     */
+    site_id: model.text().nullable(),
+
+    /**
+     * Which ERPNext DocType holds the catalogue, as ERPNext reports it.
+     *
+     * Not an opinion this side gets to have: ERPNext owns the catalogue
+     * and announces the DocType, so "link this product to an existing
+     * one" searches the right place even on a project that keeps its
+     * products somewhere other than Item.
+     */
+    products_doctype: model.text().nullable(),
+
+    /**
+     * What may happen when a product is created in Medusa: "off",
+     * "link" (attach to an existing Item only, the default) or "create".
+     * See ./product-policy.ts for why this is the one catalogue decision
+     * that belongs on this side.
+     */
+    medusa_product_policy: model.text().default("link"),
 
     // ── Master toggle ────────────────────────────────────────────────
     /** Kill switch. When false, `forwardEvent` short-circuits and
@@ -126,7 +171,7 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      *
      * Entries are newline- or comma-separated and matched
      * case-insensitively against the record's `id`, `email`, `handle`,
-     * `display_id` and `metadata.isin`.
+     * `display_id` and `external_id`.
      *
      * Why this exists: pointing a production Medusa at a non-production
      * ERPNext is a normal thing to want while integrating, but it would

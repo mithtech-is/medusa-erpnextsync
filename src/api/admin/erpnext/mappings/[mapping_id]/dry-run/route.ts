@@ -16,7 +16,7 @@ import { ERPNEXT_MODULE } from "../../../../../../modules/erpnext"
  * returns 404. Discovered while smoke-testing customer push from
  * /app/erpnext.
  *
- * Body: { record_id: string }
+ * Body: { record_id?: string }   omit to rehearse against a sample
  *
  * Response (success):
  *   {
@@ -33,14 +33,14 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const erpnext: any = req.scope.resolve(ERPNEXT_MODULE)
     const { mapping_id } = req.params as { mapping_id: string }
     const body = (req.body ?? {}) as { record_id?: string }
-    if (!body.record_id) {
-        res.status(400).json({ ok: false, message: "record_id is required" })
-        return
-    }
+    // record_id is optional now. Without one the rehearsal runs against a
+    // sample built from the entity's own declared paths, which is what a
+    // brand-new mapping needs: there is usually nothing to point at yet,
+    // and that is exactly when trying it matters.
     try {
         const result = await erpnext.dryRunPush({
             mapping_id,
-            record_id: body.record_id,
+            record_id: body.record_id ?? null,
             container: req.scope,
         })
         if (!result.ok) {

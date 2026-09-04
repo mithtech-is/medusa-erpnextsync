@@ -19,7 +19,7 @@ import { ERPNEXT_MODULE } from "../../../../modules/erpnext"
  *                                         show "using env" vs "using
  *                                         saved value")
  *
- * POST contract for secret-typed fields (matches cashfree-settings):
+ * POST contract for secret-typed fields:
  *   - field absent / empty string → leave as-is
  *   - null                        → clear
  *   - other                       → update
@@ -38,6 +38,13 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
 
 const SaveSchema = z.object({
     enable_sync: z.boolean().optional(),
+    /** This instance's name on the wire; must match the Medusync Site
+     *  record on the ERPNext side. */
+    site_id: z.string().nullable().optional(),
+    /** Normally set by ERPNext announcing it; here for a manual fix. */
+    products_doctype: z.string().nullable().optional(),
+    /** What may happen when a product is created in Medusa. */
+    medusa_product_policy: z.enum(["off", "link", "create"]).nullable().optional(),
     erpnext_url: z.string().nullable().optional(),
     // Whitelisted Frappe method receiving pushes (e.g. medusync.api.receive).
     frappe_receive_method: z.string().nullable().optional(),
@@ -53,7 +60,7 @@ const SaveSchema = z.object({
     auto_retry_min_interval_minutes: z.number().int().optional(),
     last_full_resync_at: z.string().nullable().optional(),
     /** Outbound safety valve — newline/comma separated record ids,
-     *  emails, handles or ISINs. Empty = no restriction. */
+     *  emails or handles. Empty = no restriction. */
     push_allowlist: z.string().nullable().optional(),
     /** Days to keep erpnext_sync_event rows. 0 = keep forever. */
     log_retention_days: z.number().int().min(0).max(1825).optional(),

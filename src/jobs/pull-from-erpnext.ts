@@ -67,6 +67,33 @@ export default async function pullFromErpnext(container: MedusaContainer) {
                 `updated=${totalUpdated} errors=${totalErrors}`,
         )
     }
+
+    await checkDrift(erpnext)
+}
+
+
+/**
+ * While we are here and talking to ERPNext anyway: does every enabled
+ * mapping still name fields that exist? A field that has been renamed or
+ * removed makes a mapping fail silently, and this is the one job that
+ * already has the connection open to ask.
+ *
+ * Deliberately after the pull and deliberately swallowed: a drift check
+ * that broke the pull would be a worse problem than the drift.
+ */
+async function checkDrift(erpnext: any) {
+    try {
+        const report = await erpnext.checkMappingDrift()
+        if (report?.flagged?.length) {
+            console.warn(
+                `[erpnext-pull] ${report.flagged.length} mapping(s) name an ERPNext field that ` +
+                    `no longer exists and have been switched off: ` +
+                    report.flagged.map((f: any) => f.name).join(", "),
+            )
+        }
+    } catch (err: any) {
+        console.warn("[erpnext-pull] drift check failed:", err?.message ?? err)
+    }
 }
 
 export const config = {

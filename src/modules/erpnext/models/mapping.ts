@@ -61,6 +61,31 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
     /** Operator label, free text. */
     name: model.text(),
 
+    /**
+     * The id this mapping has in BOTH systems.
+     *
+     * The same mapping exists as a Medusync Mapping on the ERPNext side.
+     * Edits can start from either, so the two copies are paired by this
+     * uid and ordered by `version`: the higher version wins, and on a tie
+     * ERPNext wins, because ERPNext owns which documents may sync at all.
+     */
+    mapping_uid: model.text().nullable(),
+
+    /** Increments on every local save. Compared against the incoming
+     *  version to decide whose copy is newer. */
+    version: model.number().default(1),
+
+    /** Which Medusa site this mapping belongs to. Empty means it applies
+     *  wherever this instance is pointed. */
+    site_id: model.text().nullable(),
+
+    /** Which side wins when the same record changed on both. */
+    source_of_truth: model.text().default("ERPNext"),
+
+    /** Last time this mapping's CONFIGURATION was reconciled with the
+     *  other side, not the last time a record synced through it. */
+    last_synced_at: model.dateTime().nullable(),
+
     /** Optional notes for ops — "owned by accounting", "do not touch",
      *  upstream ticket links, etc. */
     description: model.text().nullable(),
@@ -164,4 +189,38 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
 
     /** User id of the admin who last saved this row. */
     updated_by_user_id: model.text().nullable(),
+
+    /**
+     * Something about this mapping needs a person.
+     *
+     * "Mapping Required" — ERPNext enabled it and this side has not
+     * rehearsed it, so it was left switched off. "Field Missing" — it
+     * names an ERPNext field the DocType no longer has, so it cannot do
+     * what it says and has been switched off.
+     *
+     * Empty when nothing is outstanding. Never part of the mapping's
+     * signature: it is local state, like the rehearsal result.
+     */
+    attention: model.text().nullable(),
+    attention_detail: model.text().nullable(),
+
+    /**
+     * Fingerprint of what this mapping did when it was last rehearsed.
+     * The enable gate compares it with the mapping as it stands now, so a
+     * pass survives being switched on and does not survive somebody
+     * adding a field afterwards. See ../signature.ts.
+     */
+    tested_signature: model.text().nullable(),
+
+    /**
+     * Fingerprint of a shipped default as it was written, so an upgrade
+     * can tell an untouched one from an edited one. Null for a mapping
+     * somebody wrote.
+     */
+    shipped_signature: model.text().nullable(),
+
+    last_test_at: model.dateTime().nullable(),
+    /** "" | "passed" | "failed" */
+    last_test_status: model.text().nullable(),
+    last_test_report: model.json().nullable(),
 })

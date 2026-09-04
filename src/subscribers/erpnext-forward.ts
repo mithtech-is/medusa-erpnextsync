@@ -43,17 +43,7 @@ export default async function erpnextForwardHandler({
     const eventName = event?.name as string | undefined
     if (!eventName) return
 
-    // Bank/demat verification events carry `{id, customer_id}` —
-    // we want to enrich/push the CUSTOMER, not the bank/demat row.
-    // For those events the entityId is `customer_id`; for everything
-    // else it's `data.id` as before.
-    const isBankOrDematEvent =
-        eventName.startsWith("bank_account.") ||
-        eventName.startsWith("demat_account.")
-    const entityId = isBankOrDematEvent
-        ? ((event?.data?.customer_id as string | undefined) ??
-            (event?.data?.id as string | undefined))
-        : (event?.data?.id as string | undefined)
+    const entityId = event?.data?.id as string | undefined
     // Idempotency key for the far side. Medusa's event envelope does not
     // reliably carry a top-level `id` (workflow-emitted events often omit
     // it), so fall back to a synthesised, per-emission id rather than
@@ -140,7 +130,7 @@ export default async function erpnextForwardHandler({
 
     // No mapping matched this event → nothing to sync. The connector is
     // mapping-driven: an operator enables a doctype by creating a mapping
-    // row for it. (The old Polemarch-era "legacy full-payload forward" for
+    // row for it. (The old pre-mapping "legacy full-payload forward" for
     // unmapped customer.*/order.* events was removed — it pushed to the
     // domain-specific `receive` handler pack and produced noisy failures for
     // events like `customer.synced` that were never meant to sync.)

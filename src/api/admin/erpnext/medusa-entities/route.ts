@@ -6,7 +6,7 @@ import { listMedusaEntities } from "../../../../modules/erpnext/registry"
  *
  * Return the registry of Medusa entities the mapping UI can target,
  * filtered by which underlying modules are actually installed on
- * this deployment. Custom modules (cashfree_wallet, calcula,
+ * this deployment. A project's own modules (
  * watchlist, share_transfer, etc.) only appear when their module is
  * registered in medusa-config.ts — Medusa builds without one stay
  * out of the picker so operators don't configure mappings against

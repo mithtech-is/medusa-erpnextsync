@@ -6,6 +6,7 @@ import { ERPNEXT_MODULE } from "../../../../modules/erpnext"
  *
  * List rows from `erpnext_sync_event`. Supports:
  *   ?status=pending|success|failed|skipped   (default: all)
+ *   ?is_test=1|0                             (default: both)
  *   ?event=customer.created                  (exact match on event name)
  *   ?limit=50  (default 50, max 500)
  *   ?offset=0
@@ -17,6 +18,7 @@ import { ERPNEXT_MODULE } from "../../../../modules/erpnext"
 export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     const q = req.query as {
         status?: string
+        is_test?: string
         event?: string
         limit?: string
         offset?: string
@@ -27,6 +29,14 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     const filters: Record<string, any> = {}
     if (q.status && ["pending", "success", "failed", "skipped"].includes(q.status)) {
         filters.status = q.status
+    }
+    // Rehearsals look exactly like real traffic in this list, which is the
+    // point of marking them. `?is_test=1` shows only those, `0` hides
+    // them, and no parameter shows everything as it always did.
+    if (q.is_test === "1" || q.is_test === "true") {
+        filters.is_test = true
+    } else if (q.is_test === "0" || q.is_test === "false") {
+        filters.is_test = false
     }
     if (q.event) {
         filters.event = q.event

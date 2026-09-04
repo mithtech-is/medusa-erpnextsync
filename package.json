@@ -20,8 +20,10 @@
   "scripts": {
     "build": "medusa plugin:build",
     "dev": "medusa plugin:develop",
-    "typecheck": "tsc --noEmit",
-    "prepare": "medusa plugin:build || true"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "prepare": "medusa plugin:build || true",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "exports": {
     "./package.json": "./package.json",
@@ -40,12 +42,12 @@
     "zod": "^3.22.0"
   },
   "devDependencies": {
-    "@medusajs/admin-sdk": "^2.14.2",
-    "@medusajs/cli": "^2.14.2",
-    "@medusajs/framework": "^2.14.2",
-    "@medusajs/icons": "^2.14.2",
-    "@medusajs/medusa": "^2.14.2",
-    "@medusajs/test-utils": "^2.14.2",
+    "@medusajs/admin-sdk": "^2.19.0",
+    "@medusajs/cli": "^2.19.0",
+    "@medusajs/framework": "^2.19.0",
+    "@medusajs/icons": "^2.19.0",
+    "@medusajs/medusa": "^2.19.0",
+    "@medusajs/test-utils": "^2.19.0",
     "@medusajs/ui": "^4.0.4",
     "@swc/core": "^1.5.7",
     "@types/node": "^20.11.30",
@@ -53,14 +55,16 @@
     "@types/react-dom": "^18.3.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.9",
+    "yalc": "^1.0.0-pre.53"
   },
   "peerDependencies": {
-    "@medusajs/admin-sdk": "^2.14.2",
-    "@medusajs/cli": "^2.14.2",
-    "@medusajs/framework": "^2.14.2",
-    "@medusajs/icons": "^2.14.2",
-    "@medusajs/medusa": "^2.14.2",
+    "@medusajs/admin-sdk": "^2.19.0",
+    "@medusajs/cli": "^2.19.0",
+    "@medusajs/framework": "^2.19.0",
+    "@medusajs/icons": "^2.19.0",
+    "@medusajs/medusa": "^2.19.0",
     "@medusajs/ui": "^4.0.4",
     "react": ">=18",
     "react-dom": ">=18",

@@ -78,7 +78,7 @@ export type EntityDescriptor = {
     /** Source module name. Built-in modules use the `Modules.X`
      *  constant string (e.g. "customer"); custom modules use their
      *  literal name as registered in medusa-config.ts (e.g.
-     *  "cashfree_wallet"). The `availableInContainer` adapter uses
+     *  a project's own module). The `availableInContainer` adapter uses
      *  this to confirm the module is registered. */
     moduleName: string
     /** Whether this is a custom module that may or may not be
@@ -329,6 +329,11 @@ const orderEntity: EntityDescriptor = {
         { path: "shipping_address.country_code", label: "Shipping country (ISO)", type: "string", suggested_transform: "uppercase" },
         { path: "items", label: "Line items (array)", type: "array", suggested_transform: "json" },
         { path: "created_at", label: "Created at", type: "datetime", suggested_transform: "date_iso" },
+        // Which channel the order arrived through. ERPNext keeps this on
+        // Sales Order so the storefront can say "placed online" or "placed
+        // by our sales team" instead of guessing from the order alone.
+        { path: "source", label: "Order source (sales channel)", type: "string" },
+        { path: "sales_channel_id", label: "Sales channel id", type: "id" },
     ],
     async fetchById(container, id) {
         // Use query.graph (RemoteQuery), NOT orderModule.listOrders with deep
@@ -371,6 +376,8 @@ const orderEntity: EntityDescriptor = {
                 "billing_address.*",
                 "payment_collections.id",
                 "payment_collections.status",
+                "sales_channel_id",
+                "sales_channel.name",
             ],
             filters: { id },
         })
@@ -388,6 +395,10 @@ const orderEntity: EntityDescriptor = {
             order.summary?.current_order_total ??
             order.summary?.original_order_total ??
             0
+        // Flatten the channel to a name a mapping can carry straight into
+        // Sales Order.medusa_order_source. A store with no channels at all
+        // still came from the web, which is truer than an empty string.
+        order.source = order.sales_channel?.name || "web"
         return order
     },
     async upsertByKey() {
@@ -401,7 +412,11 @@ const productEntity: EntityDescriptor = {
     moduleName: Modules.PRODUCT,
     isCustomModule: false,
     events: ["product.created", "product.updated", "product.deleted"],
-    default_key_path: "metadata.isin",
+    // Every Medusa product has a handle, and upsertByKey has the careful
+    // path for it — keeps the row published and its SKU in step. A store
+    // that identifies products by something of its own points the mapping
+    // at that instead; this is only what the picker suggests first.
+    default_key_path: "handle",
     paths: [
         { path: "id", label: "Medusa id", type: "id" },
         { path: "title", label: "Title", type: "string" },
@@ -410,11 +425,10 @@ const productEntity: EntityDescriptor = {
         { path: "description", label: "Description", type: "string" },
         { path: "status", label: "Status (draft/published)", type: "string" },
         { path: "thumbnail", label: "Thumbnail URL", type: "string" },
-        { path: "metadata.isin", label: "ISIN (metadata)", type: "string", suggested_transform: "uppercase" },
-        { path: "metadata.search_aliases", label: "Search aliases (metadata, csv)", type: "string" },
-        { path: "metadata.sector", label: "Sector (metadata)", type: "string" },
-        { path: "metadata.industry", label: "Industry (metadata)", type: "string" },
-        { path: "metadata.face_value", label: "Face value (metadata)", type: "string" },
+        { path: "external_id", label: "External id", type: "string" },
+        // A store's own metadata keys are reached by typing the path;
+        // listing anybody's here would only be a guess about their
+        // catalogue. The whole blob is offered for a wholesale copy.
         { path: "metadata", label: "Whole metadata blob", type: "json", suggested_transform: "json" },
         { path: "variants.0.sku", label: "First variant SKU", type: "string" },
         { path: "created_at", label: "Created at", type: "datetime", suggested_transform: "date_iso" },
@@ -437,18 +451,18 @@ const productEntity: EntityDescriptor = {
         }
         // When deduping on a metadata path, GUARANTEE the persisted row
         // carries the key. A pull whose field_mappings don't project the
-        // key into its payload (e.g. metadata.isin is push-only on the
-        // Product ↔ Security mapping) would otherwise create a fresh row
-        // every run — the dedup filter never matches what was written.
+        // key into its payload (a metadata key that is push-only on the
+        // mapping) would otherwise create a fresh row every run — the
+        // dedup filter never matches what was written.
         const keyMeta = isMetaKey ? { [metaKeyName as string]: key_value } : {}
         const existing = await m.listProducts(filter, { select: ["id", "metadata"], take: 1 })
         if (existing?.length) {
             const mergedMeta = { ...(existing[0].metadata || {}), ...(payload.metadata || {}), ...keyMeta }
             const patch: any = { id: existing[0].id, ...payload, metadata: mergedMeta }
             // Never rename an existing product's handle when the dedup
-            // key is something else (e.g. metadata.isin): a canonical
-            // product lives under a human slug and a pull that also maps
-            // handle←isin would otherwise clobber its storefront URL.
+            // key is something else: the product lives under a human slug
+            // and a pull that also maps handle←key would clobber its
+            // storefront URL.
             if (key_field !== "handle") delete patch.handle
             // Catalog products (keyed by handle) must stay sellable — keep them
             // published and ensure a variant whose sku == handle exists (a
@@ -803,7 +817,12 @@ const REGISTRY: Record<string, EntityDescriptor> = {
     api_key: apiKeyEntity,
     payment_collection: paymentCollectionEntity,
     fulfillment: fulfillmentEntity,
-    wallet_settlement: walletSettlementEntity,
+    // A wallet_settlement entity used to sit here. Both ends of it are
+    // gone — the Medusa module was a sandbox demo and the ERPNext doctype
+    // belonged to a custom app that was uninstalled — so offering it in
+    // the picker only let an operator build a mapping that could never
+    // succeed. The wallet contract this connector wants is in
+    // pending_work, waiting on the applications being written for it.
 }
 
 /**
