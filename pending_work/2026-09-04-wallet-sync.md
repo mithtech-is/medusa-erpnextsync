@@ -1,74 +1,67 @@
-# Wallet / store-credit sync (Medusa side) — deferred 2026-09-04
+# Wallet / store-credit sync
 
-**Requirement.** Wallet transactions sync bidirectionally by default: ERPNext
-wallet changes → Medusa, Medusa wallet changes → ERPNext. Fields: Customer,
-Wallet ID, Currency, Balance, Transaction Type, Amount, Reference Type/ID,
-Notes, Timestamp. Events: Deposit/Credit, Withdrawal/Debit, Payment, Refund,
-Reversal.
+**Status:** waiting on an application to exist on both sides
+**Belongs to:** whenever the wallet apps are built
+**Side:** both. The other repo keeps the same file.
 
-**Why deferred.** The local sandbox has no wallet of its own any more: the
-demo `wallet_settlement` module was removed from `risitex-mainb2b` and the
-matching ERPNext doctype (`RISITEX Wallet Settlement`, from the uninstalled
-`risitex_erp` app) is gone. Building the generic contract against nothing
-real would only produce untested code.
+## What is happening
 
-**What exists today (keep as reference, do not ship as-is).**
-- `src/modules/erpnext/registry.ts` still declares a `wallet_settlement`
-  entity (RISITEX-specific; remove in the Phase 1 generic cleanup).
-- `dispatchInbound` in `src/modules/erpnext/index.ts` carries Polemarch
-  wallet handlers (`wallet.deposit.received`, `wallet.withdrawal.posted`,
-  `wallet.*.canceled`) that resolve a `cashfree_wallet` module without
-  guarding for its absence.
-- `backend/` (in this repo) holds the sandbox `wallet_settlement` module,
-  admin page, routes and seed that mirrored `RISITEX Wallet Settlement`
-  two-way. `docs/WALLET_SETTLEMENT_SYNC_DESIGN.md` documents that design.
+You are building the wallet applications yourself — one for ERPNext, one
+for Medusa — and these will be linked to the connector afterwards. That
+supersedes the earlier plan, which was for the connector to define a
+generic `wallet_transaction` contract and have each project implement it.
 
-**Target design (Phase 3 slot).**
-- A generic, opt-in `wallet_transaction` registry entity with a small
-  adapter interface (`list`, `fetchById`, `apply`) that a project implements
-  for its own wallet module; the plugin ships no concrete wallet.
-- Mapping rows decide direction per site and per field like every other
-  entity; amounts in minor units with an explicit currency.
-- Idempotency on the wallet transaction id; reversals reference the original.
+Nothing here should be built before those applications exist. A contract
+written against an imagined schema is a contract that gets rewritten, and
+the earlier attempt at one is exactly why the demo module was removed.
 
-**Dependencies.** Phase 1 (envelope v2, mapping model v2, handler packs as
-opt-in plugins). A sandbox wallet implementation to test against.
+## Where things stand today
 
-## What was cleared away on 2026-09-05
+**ERPNext.** No wallet DocType at all. `RISITEX Wallet Settlement` went
+with the `risitex_erp` uninstall on 2026-09-04. `Customer.wallet_balance_paise`
+survives with nothing writing to it — see Q3.
 
-Auditing this before Phase 6 turned up three pieces of debris, because the
-removal in Phase 0 took the module and left everything pointing at it:
+**Medusa.** A real `cashfree_wallet` module is installed on the sandbox and
+holds data: 22 wallets, 11 transactions, 4 settlements. It belongs to the
+Polemarch securities domain rather than to generic commerce, so it is a
+reasonable thing to test transport against and the wrong thing to model a
+contract on.
 
-- **The registry no longer offers `wallet_settlement`.** The entity was
-  still in the picker, so an operator could build a mapping that could
-  only ever fail — the Medusa module folder is gone and the ERPNext
-  doctype went with the `risitex_erp` uninstall.
-- **The dead mapping is switched off.** "Wallet Settlement ↔ RISITEX
-  Wallet Settlement" was enabled on the sandbox and pointed at nothing in
-  either direction.
-- **The `cashfree_wallet` handlers no longer assume the module exists.**
-  Six call sites did a bare `scope.resolve`, which on any Medusa without
-  that custom module is an exception thrown inside an inbound webhook, and
-  therefore a sender retrying forever. They now answer "this Medusa has no
-  cashfree_wallet module" and skip.
+**The connector.** Cleaned of the debris on 2026-09-05: the registry no
+longer offers a `wallet_settlement` entity, the dead mapping is switched
+off, and the six `cashfree_wallet` handlers answer "not installed" rather
+than throwing on a Medusa that has no such module.
 
-What is left, and is deliberately left: the sandbox's `cashfree_wallet`
-module is real and holds data (22 wallets, 11 transactions), and
-`Customer.wallet_balance_paise` still exists on the ERPNext side with
-nothing writing to it. Neither is debris exactly — they are the shape of
-the wallet this connector would sync if the contract below existed. The
-ERPNext field is the obvious landing place for a balance.
+## What the connector will need from your applications
 
-## Questions this is waiting on
+Not requests — the things it cannot work around, worth knowing while the
+schema is still soft.
+
+- **A stable id on each side, and a field to record the other's.** The
+  connector correlates by id pairs and everything in it already works this
+  way. A wallet with no place to keep its counterpart's id can only be
+  matched by heuristics.
+- **One document per movement, not a balance somebody edits.** Two systems
+  both writing a number cannot be ordered; two systems each appending
+  transactions can. The balance should be derived.
+- **Amounts in minor units with an explicit currency.**
+- **An idempotency key per transaction.** The connector retries, and a
+  retried credit that credits twice is the worst bug this project could
+  ship.
+- **A reversal that references what it reverses**, rather than a second
+  entry with the opposite sign and no link.
+- **Somewhere to carry which side originated a movement**, or loop
+  prevention has nothing to hold on to.
+
+## What is not decided
 
 See `00-QUESTIONS-ANSWER-THESE-FIRST.md`.
 
-- **Q1** — which ERPNext DocType holds the wallet. Nothing can be built
-  until there is one to map, and the answer decides whether medusync ships
-  a DocType, names one per site, or does neither.
-- **Q2** — which side owns the balance. It decides whether Medusa's figure
-  is authoritative, cached, or reconciled, and a reconciled balance needs a
-  tie-break rule that has to come from you.
-- **Q3** — whether `Customer.wallet_balance_paise` stays.
+- **Q1** — the shape of the ERPNext side, once it exists.
+- **Q2** — which side owns the balance.
+- **Q3** — whether `Customer.wallet_balance_paise` stays or goes.
+- **Q3b** — whether wallet and credit line are one entity to the connector
+  or two. See `2026-09-07-credit-line.md`.
 
-Q1 is the blocking one. Q2 changes the design; Q3 is tidying.
+Q3b is worth answering before either application is finished, because it
+decides whether they share a contract.
