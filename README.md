@@ -201,6 +201,50 @@ from either end. They are pruned after a day whatever retention says.
 `pending_work/` records what is still missing on this side: the enable
 gate, which ERPNext already has.
 
+## Hard reset
+
+A reset throws away configuration somebody spent a week getting right, so
+the question worth answering is not what it does but who may ask. Nobody,
+alone: each system generates a secret and shows it once, and each has to
+be handed the other's.
+
+```
+POST /admin/erpnext/reset/request        { "site_id": "default" }   -> the secret, once
+POST /admin/erpnext/reset/confirm        { "id": "...", "secret": "<ERPNext's>" }
+GET  /admin/erpnext/reset/{id}                                       -> where it stands
+POST /admin/erpnext/reset/{id}/perform                               -> only when both proved
+```
+
+The secret is 32 random bytes, lives three minutes, works once, and is
+stored only as a SHA-256. `reset.verify` arriving from ERPNext is answered
+before anything else looks at it, and its audit row is written with the
+body redacted whatever the payload-logging setting says. A secret that
+reaches a log has a much longer life than three minutes.
+
+A wrong secret does not spend the request: a typo, or anyone who can reach
+the endpoint, must not cost the operator the three minutes and the trip.
+A refusal answers 200, because it is a fact about the secret rather than a
+transport failure, and telling the sender to retry would hand an attacker
+unlimited attempts inside the window.
+
+| | |
+|---|---|
+| **Keeps** | every product, customer and order, and every ERPNext id on them |
+| | the connection settings and both secrets |
+| **Switches off** | every mapping |
+| **Clears** | `erpnext_sync_event`, in full |
+
+This side has no shipped mapping set of its own. Mappings here are the far
+side's copies, and ERPNext restores its defaults and pushes them over when
+somebody enables one — so "restore defaults" here is exactly "switch
+everything off and wait", which is what the reset does.
+
+The four rules that make the secret worth anything — long enough,
+short-lived, single use, compared without leaking how far the comparison
+got — live in `src/modules/erpnext/reset.ts` with no database in sight, so
+they can be tested exactly. `medusync/reset.py` is the mirror; the hash
+has to agree or no handshake can complete.
+
 ## Develop
 
 ```bash

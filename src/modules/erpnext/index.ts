@@ -10,6 +10,8 @@ import { ErpnextMapping } from "./models/mapping"
 import { applyMapping, getByPath, isTemplatePath, type MappingDirection, type MappingFieldPair } from "./mapping-engine"
 import { listMedusaEntities, getMedusaEntity } from "./registry"
 import { TOTAL_KEY, mergeReceipt, receiptFrom } from "./order-payments"
+import { ErpnextResetRequest } from "./models/reset-request"
+import * as resetRules from "./reset"
 import {
     buildAutofill,
     type AutofillResult,
@@ -349,6 +351,7 @@ class ErpnextModuleService extends MedusaService({
     ErpnextSyncEvent,
     ErpnextSetting,
     ErpnextMapping,
+    ErpnextResetRequest,
 }) {
     // ─────────────────────────────────────────────────────────────────
     // Sync-event surface
@@ -734,6 +737,37 @@ class ErpnextModuleService extends MedusaService({
             env.origin_system && env.origin_site_id
                 ? envelope.originRef(env.origin_system, env.origin_site_id)
                 : "erpnext:" + DEFAULT_SITE_ID
+
+        // ERPNext proving it holds the secret this side generated. A
+        // control message, not business data: it never reaches a mapping,
+        // and the audit row is written with the body redacted whatever the
+        // payload-logging setting says. A secret that reaches a log has a
+        // much longer life than three minutes.
+        if (event === resetRules.VERIFY_EVENT) {
+            const offered = String((data as any)?.secret ?? "")
+            const verdict = await this.verifyResetSecret(offered)
+            await this.upsertInboundEventRow(
+                { event, event_id, data: resetRules.redacted() },
+                {
+                    status: verdict.ok ? "success" : "skipped",
+                    last_error: null,
+                    origin,
+                    correlation_id: env.correlation_id,
+                    site_id: env.origin_site_id,
+                    action: verdict.ok ? "updated" : "skipped",
+                },
+            )
+            // 200 either way. A refusal is a fact about the secret, not a
+            // transport failure, and telling the sender to retry would hand
+            // an attacker unlimited attempts inside the window.
+            return {
+                ok: true,
+                status: verdict.ok ? "success" : "skipped",
+                event,
+                event_id,
+                result: verdict,
+            }
+        }
 
         // A rehearsal from the other side. It has already passed the
         // signature check, the replay window and the echo test, so a green
@@ -4685,6 +4719,217 @@ class ErpnextModuleService extends MedusaService({
             setByPath(data, p.path, placeholderFor(p))
         }
         return { entity: entityKey, id: null, from_record: false, data }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Hard reset, the Medusa half
+    //
+    // Neither system can reset itself and neither can reset the other.
+    // Each generates a secret, shows it once, and has to be handed the
+    // other's. Only a side holding both proofs resets. See ./reset.ts for
+    // the four rules that make the secret worth anything, and
+    // medusync/reset.py for the mirror.
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Start a reset and return its secret, once.
+     *
+     * The plaintext is in the return value and nowhere else. Any previous
+     * live request is retired first: two live secrets would mean an
+     * operator holding two slips of paper they cannot tell apart.
+     */
+    async requestReset(siteId?: string | null): Promise<any> {
+        const live = await this.listErpnextResetRequests({ status: "pending" } as any, { take: 50 })
+        if (live.length) {
+            await this.updateErpnextResetRequests(
+                live.map((r: any) => ({ id: r.id, status: "cancelled" })),
+            )
+        }
+        const secret = resetRules.newSecret()
+        const [row] = await this.createErpnextResetRequests([
+            {
+                site_id: siteId ?? DEFAULT_SITE_ID,
+                status: "pending",
+                secret_hash: resetRules.hashSecret(secret),
+                expires_at: resetRules.expiresAt(),
+            } as any,
+        ])
+        return {
+            id: row.id,
+            site_id: row.site_id,
+            secret,
+            expires_at: row.expires_at,
+            window_seconds: resetRules.WINDOW_SECONDS,
+        }
+    }
+
+    /**
+     * ERPNext is claiming to hold the secret we generated.
+     *
+     * A wrong secret deliberately does not spend the request: a typo, or
+     * anyone who can reach the endpoint, must not cost the operator the
+     * three minutes and the trip.
+     */
+    async verifyResetSecret(secret: string): Promise<any> {
+        if (!secret) return { ok: false, reason: "no secret offered" }
+        const candidates = await this.listErpnextResetRequests(
+            { status: ["pending", "verified"] as any },
+            { take: 20, order: { created_at: "DESC" } },
+        )
+        for (const row of candidates as any[]) {
+            if (!resetRules.secretMatches(secret, row.secret_hash)) continue
+            const verdict = resetRules.canVerify(row, secret)
+            if (!verdict.ok) return verdict
+            const now = new Date()
+            await this.updateErpnextResetRequests([
+                { id: row.id, used_at: now, local_verified_at: now, status: "verified" },
+            ])
+            return { ok: true, id: row.id }
+        }
+        return { ok: false, reason: "no live reset request matches that secret" }
+    }
+
+    /**
+     * Prove to ERPNext that we hold the secret IT generated.
+     *
+     * The operator carries it here from the ERPNext screen. We send it
+     * back over the ordinary signed channel and only ERPNext's answer
+     * counts.
+     */
+    async confirmRemoteReset(id: string, secret: string): Promise<any> {
+        const [row] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        if (!row) return { ok: false, reason: "no such reset request" }
+        if (resetRules.secondsLeft(row as any) <= 0) {
+            await this.updateErpnextResetRequests([{ id, status: "expired" }])
+            return { ok: false, reason: "this request has expired" }
+        }
+        const answer = await this.forwardResetVerify(secret)
+        if (!answer.ok) return answer
+        await this.updateErpnextResetRequests([{ id, remote_confirmed_at: new Date() }])
+        const [fresh] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        return { ok: true, id, ready: resetRules.isReady(fresh as any) }
+    }
+
+    /**
+     * POST one `reset.verify` to ERPNext.
+     *
+     * Deliberately not through the ordinary forward path: that one writes
+     * an audit row carrying the request body, which is the one thing this
+     * message must not leave behind.
+     */
+    async forwardResetVerify(secret: string): Promise<any> {
+        const cfg = await this.getActiveConfig()
+        const row = await this.findSettingsRow()
+        const base = String(cfg.erpnext_url ?? "").replace(/\/+$/, "")
+        const outboundSecret =
+            (row as any)?.webhook_secret ?? process.env.ERPNEXT_WEBHOOK_SECRET ?? null
+        if (!base || !outboundSecret) {
+            return { ok: false, reason: "ERPNext URL or webhook secret is not configured" }
+        }
+        const eventId = `reset:medusa:${crypto.randomBytes(8).toString("hex")}`
+        const body = Buffer.from(
+            JSON.stringify(
+                envelope.build({
+                    event: resetRules.VERIFY_EVENT,
+                    event_id: eventId,
+                    site_id: (row as any)?.site_id ?? DEFAULT_SITE_ID,
+                    data: { secret },
+                }),
+            ),
+            "utf8",
+        )
+        const signature = crypto
+            .createHmac("sha256", outboundSecret)
+            .update(body)
+            .digest("base64")
+        try {
+            const res = await fetch(`${base}/api/method/medusync.api.receive`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-Medusa-Signature": signature,
+                    "X-Medusa-Event-Id": eventId,
+                },
+                body,
+            })
+            if (!res.ok) return { ok: false, reason: `ERPNext answered ${res.status}` }
+            const answer: any = await res.json().catch(() => ({}))
+            const result = answer?.result ?? answer
+            if (result?.ok || answer?.status === "success") return { ok: true }
+            return { ok: false, reason: result?.reason ?? "ERPNext refused that secret" }
+        } catch (err: any) {
+            // The message may quote the URL. Never the body.
+            return { ok: false, reason: `could not reach ERPNext: ${err?.message ?? err}` }
+        }
+    }
+
+    async resetStatus(id: string): Promise<any> {
+        const [row] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        if (!row) return { ok: false, reason: "no such reset request" }
+        return {
+            ok: true,
+            id: row.id,
+            status: (row as any).status,
+            local_verified_at: (row as any).local_verified_at,
+            remote_confirmed_at: (row as any).remote_confirmed_at,
+            completed_at: (row as any).completed_at,
+            seconds_left: resetRules.secondsLeft(row as any),
+            ready: resetRules.isReady(row as any),
+        }
+    }
+
+    /**
+     * Do it. Refuses unless both sides proved themselves.
+     *
+     * What it clears: the sync event log, in full. What it switches off:
+     * every mapping. What it keeps: every product, customer and order, and
+     * every ERPNext id recorded on them — a reset that took those with it
+     * would leave both systems holding the same records and no longer
+     * knowing it, which is worse than any configuration mistake.
+     *
+     * This side has no shipped mapping set of its own to restore. Mappings
+     * here are the far side's copies, and ERPNext restores its defaults and
+     * pushes them over when somebody enables one. So "restore defaults"
+     * on this side is exactly "switch everything off and wait".
+     */
+    async performReset(id: string): Promise<any> {
+        const [row] = await this.listErpnextResetRequests({ id } as any, { take: 1 })
+        if (!row) throw new Error("no such reset request")
+        if (!resetRules.isReady(row as any)) {
+            throw new Error(
+                "this reset is not verified by both sides yet: each system generates a secret and has to be handed the other's",
+            )
+        }
+        const report: Record<string, any> = {
+            kept: [
+                "every product, customer and order",
+                "every ERPNext id recorded on them",
+                "the connection settings and both secrets",
+            ],
+            cleared: {},
+        }
+
+        const mappings = await this.listErpnextMappings({}, { take: 1000 })
+        const enabled = (mappings as any[]).filter((m) => m.enabled)
+        if (enabled.length) {
+            await this.updateErpnextMappings(enabled.map((m: any) => ({ id: m.id, enabled: false })))
+        }
+        report.disabled = enabled.map((m: any) => m.name ?? m.id)
+
+        let cleared = 0
+        for (let batch = 0; batch < 200; batch += 1) {
+            const rows = await this.listErpnextSyncEvents({}, { take: 500, select: ["id"] } as any)
+            if (!rows.length) break
+            await this.deleteErpnextSyncEvents(rows.map((r: any) => r.id))
+            cleared += rows.length
+            if (rows.length < 500) break
+        }
+        report.cleared.erpnext_sync_event = cleared
+
+        await this.updateErpnextResetRequests([
+            { id, status: "completed", completed_at: new Date(), report },
+        ])
+        return report
     }
 
     async dryRunPush(args: {
