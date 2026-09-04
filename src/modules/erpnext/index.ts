@@ -33,6 +33,42 @@ import {
     LINK_KEY,
 } from "./product-policy"
 
+/** Write a dotted path into a plain object, creating what it passes through. */
+function setByPath(target: Record<string, any>, dotted: string, value: any): void {
+    const parts = String(dotted || "").split(".").filter(Boolean)
+    if (!parts.length) return
+    let cursor = target
+    for (const key of parts.slice(0, -1)) {
+        if (typeof cursor[key] !== "object" || cursor[key] === null) cursor[key] = {}
+        cursor = cursor[key]
+    }
+    cursor[parts[parts.length - 1]] = value
+}
+
+/**
+ * A plausible value for one declared path.
+ *
+ * Plausible matters more than pretty: a mapping that parses a date or
+ * multiplies a number should meet a date and a number here, not the
+ * string "sample", or the rehearsal passes and the real push does not.
+ */
+function placeholderFor(p: { path: string; type?: string; label?: string }): any {
+    switch (p.type) {
+        case "number":
+            return 1
+        case "boolean":
+            return false
+        case "datetime":
+            return new Date().toISOString()
+        case "array":
+            return []
+        case "id":
+            return `sample_${String(p.path).replace(/[^a-z0-9]+/gi, "_")}`
+        default:
+            return `Sample ${p.label ?? p.path}`
+    }
+}
+
 export const ERPNEXT_MODULE = "erpnext"
 
 // Whitelisted Frappe method that receives Medusa→Frappe pushes. The
@@ -699,6 +735,27 @@ class ErpnextModuleService extends MedusaService({
                 ? envelope.originRef(env.origin_system, env.origin_site_id)
                 : "erpnext:" + DEFAULT_SITE_ID
 
+        // A rehearsal from the other side. It has already passed the
+        // signature check, the replay window and the echo test, so a green
+        // answer proves everything except the write — and the write is the
+        // only part a dry run must not do.
+        if (env.dry_run) {
+            const plan = await this.planInbound(event, data)
+            await this.upsertInboundEventRow(
+                { event, event_id, data },
+                {
+                    status: "skipped",
+                    last_error: null,
+                    origin,
+                    correlation_id: env.correlation_id,
+                    site_id: env.origin_site_id,
+                    is_test: true,
+                    action: "skipped",
+                },
+            )
+            return { ok: true, status: "skipped", event, event_id, result: { dry_run: true, ...plan } }
+        }
+
         // Log the row as pending FIRST so a crashing handler still
         // leaves an audit trail.
         const eventRow = await this.upsertInboundEventRow(
@@ -950,6 +1007,106 @@ class ErpnextModuleService extends MedusaService({
      * Returns `{ matched: false }` when no mapping applies, so the caller
      * falls through to the legacy switch.
      */
+    /**
+     * Which enabled mappings would take this inbound event, and is it a
+     * delete. Shared with `planInbound` on purpose: a rehearsal that
+     * reasons independently is worse than none, because it is believed —
+     * the two would agree for a fortnight and then quietly stop.
+     */
+    private _inboundCandidates(
+        event: string,
+        data: any,
+        mappings: any[],
+    ): { candidates: any[]; isDelete: boolean } {
+        const doctype = String(data?.doctype ?? "").trim()
+        const lower = event.toLowerCase()
+        const isDelete =
+            lower.endsWith(".deleted") ||
+            lower.endsWith(".canceled") ||
+            lower.endsWith(".cancelled") ||
+            lower.endsWith(".trashed")
+        const candidates = mappings.filter(
+            (m: any) =>
+                (doctype && m.doctype === doctype) ||
+                (Array.isArray(m.events) && m.events.includes(event)),
+        )
+        return { candidates, isDelete }
+    }
+
+    /**
+     * What would this inbound event do? Reads; writes nothing.
+     *
+     * Reports per mapping: which entity it would land on, the key it
+     * would look up, the payload it would write, and the fields the
+     * mapping dropped because the source had no value for them. Enough to
+     * see a wrong field name before it becomes a wrong record.
+     */
+    async planInbound(event: string, data: any): Promise<any> {
+        let mappings: any[] = []
+        try {
+            mappings = await this.listEnabledPullMappings()
+        } catch {
+            mappings = []
+        }
+        const { candidates, isDelete } = this._inboundCandidates(event, data, mappings)
+        if (!candidates.length) {
+            return {
+                action: "skipped",
+                reason: `no enabled inbound mapping matches '${event}'`,
+                would_fall_through_to: "a built-in handler, if one owns this event",
+            }
+        }
+        const plans = candidates.map((mapping: any) => {
+            const entity = getMedusaEntity(mapping.medusa_entity)
+            if (!entity) {
+                return {
+                    mapping: mapping.name,
+                    action: "error",
+                    reason: `no registry entry for '${mapping.medusa_entity}'`,
+                }
+            }
+            const transform = applyMapping({
+                direction: "pull",
+                fields: mapping.field_mappings as MappingFieldPair[],
+                mappingDirection: mapping.direction as MappingDirection,
+                source: data,
+            })
+            if (transform.ok === false) {
+                return { mapping: mapping.name, action: "skipped", reason: transform.reason }
+            }
+            const mappedKey = (transform.payload as any)?.[mapping.key_medusa_field]
+            const rawKey =
+                data?.[mapping.key_erpnext_field] != null
+                    ? String(data[mapping.key_erpnext_field])
+                    : null
+            const effKey = mappedKey != null && mappedKey !== "" ? String(mappedKey) : rawKey
+            if (!effKey) {
+                return {
+                    mapping: mapping.name,
+                    action: "skipped",
+                    reason: `no value for key field '${mapping.key_erpnext_field}'`,
+                }
+            }
+            if (isDelete && !entity.disableByKey) {
+                return {
+                    mapping: mapping.name,
+                    action: "skipped",
+                    reason: `inbound delete not supported for entity '${mapping.medusa_entity}'`,
+                }
+            }
+            return {
+                mapping: mapping.name,
+                entity: mapping.medusa_entity,
+                action: isDelete ? "disabled" : "upserted",
+                key_field: mapping.key_medusa_field,
+                key_value: effKey,
+                payload: transform.payload,
+                skipped_fields: transform.skippedFields,
+            }
+        })
+        return { action: "planned", mappings: plans }
+    }
+
     private async _applyInboundViaMappings(
         event: string,
         data: any,
@@ -964,19 +1121,7 @@ class ErpnextModuleService extends MedusaService({
         }
         if (!mappings.length) return { matched: false }
 
-        const doctype = String(data?.doctype ?? "").trim()
-        const lower = event.toLowerCase()
-        const isDelete =
-            lower.endsWith(".deleted") ||
-            lower.endsWith(".canceled") ||
-            lower.endsWith(".cancelled") ||
-            lower.endsWith(".trashed")
-
-        const candidates = mappings.filter(
-            (m: any) =>
-                (doctype && m.doctype === doctype) ||
-                (Array.isArray(m.events) && m.events.includes(event)),
-        )
+        const { candidates, isDelete } = this._inboundCandidates(event, data, mappings)
         if (!candidates.length) return { matched: false }
 
         const results: any[] = []
@@ -2196,6 +2341,9 @@ class ErpnextModuleService extends MedusaService({
             correlation_id?: string | null
             entity_ref?: string | null
             site_id?: string | null
+            /** A rehearsal, not real traffic. See the model. */
+            is_test?: boolean
+            action?: string | null
         },
     ) {
         const [existing] = await this.listErpnextSyncEvents(
@@ -2306,7 +2454,10 @@ class ErpnextModuleService extends MedusaService({
      */
     async listFailedForRetry(limit = 50) {
         return this.listErpnextSyncEvents(
-            { status: ["failed", "skipped"] as any },
+            // A rehearsal that failed is information, not a delivery owed
+            // to anyone. Retrying one would send a fabricated payload for
+            // real, which is the opposite of what a dry run is for.
+            { status: ["failed", "skipped"] as any, is_test: false } as any,
             { take: limit, order: { last_attempt_at: "ASC" } },
         )
     }
@@ -4011,6 +4162,25 @@ class ErpnextModuleService extends MedusaService({
         retention_days: number
         cutoff: string | null
     }> {
+        // Rehearsals go first and go regardless of the retention
+        // setting. They are not evidence of anything, they are the
+        // noisiest rows in the table while somebody is building a
+        // mapping, and a site that turned retention off should not
+        // accumulate them forever.
+        const TEST_EVENT_RETENTION_DAYS = 1
+        const testCutoff = new Date(
+            Date.now() - TEST_EVENT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+        )
+        for (let batch = 0; batch < 20; batch += 1) {
+            const rehearsals = await this.listErpnextSyncEvents(
+                { is_test: true, created_at: { $lt: testCutoff } } as any,
+                { take: 500, select: ["id"] } as any,
+            )
+            if (!rehearsals.length) break
+            await this.deleteErpnextSyncEvents(rehearsals.map((r: any) => r.id))
+            if (rehearsals.length < 500) break
+        }
+
         const row = await this.findSettingsRow()
         const retentionDays = Number(row?.log_retention_days ?? 180)
         if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
@@ -4482,9 +4652,45 @@ class ErpnextModuleService extends MedusaService({
      * the same payload that the push subscriber would send to Frappe,
      * WITHOUT hitting the network. Useful for the admin "Test" button.
      */
+    /**
+     * A record of this entity to reason about.
+     *
+     * A real one when the store has any: only a real record shows the
+     * shapes an operator will actually meet, empty fields included. One
+     * built from the entity's own declared paths otherwise, because a
+     * brand-new mapping is exactly when a sample is most useful and
+     * exactly when there may be nothing to sample.
+     */
+    async sampleFor(
+        entityKey: string,
+        container: any,
+        recordId?: string | null,
+    ): Promise<{ entity: string; id: string | null; from_record: boolean; data: any }> {
+        const entity = getMedusaEntity(entityKey)
+        if (!entity) {
+            throw new Error(`no registry entry for entity '${entityKey}'`)
+        }
+        const id = recordId ?? null
+        if (id) {
+            const record = await entity.fetchById(container, id).catch(() => null)
+            if (record) {
+                return { entity: entityKey, id, from_record: true, data: record }
+            }
+        }
+        // Built from what the entity says about itself. Typed placeholders
+        // rather than empty strings, so a mapping that expects a number
+        // gets a number and a transform that parses a date gets a date.
+        const data: Record<string, any> = {}
+        for (const p of entity.paths ?? []) {
+            setByPath(data, p.path, placeholderFor(p))
+        }
+        return { entity: entityKey, id: null, from_record: false, data }
+    }
+
     async dryRunPush(args: {
         mapping_id: string
-        record_id: string
+        /** Omit to rehearse against a sample instead of a real record. */
+        record_id?: string | null
         container: any
     }): Promise<{
         ok: boolean
@@ -4502,7 +4708,12 @@ class ErpnextModuleService extends MedusaService({
                 message: `medusa entity '${mapping.medusa_entity}' has no registry entry`,
             }
         }
-        const record = await entity.fetchById(args.container, args.record_id)
+        // A brand-new mapping usually has nothing to point at yet, and
+        // that is when rehearsing it matters most. Fall back to a sample
+        // built from the entity's own declared paths.
+        const record = args.record_id
+            ? await entity.fetchById(args.container, args.record_id)
+            : (await this.sampleFor(mapping.medusa_entity, args.container)).data
         if (!record) {
             return { ok: false, message: `no ${mapping.medusa_entity} with id ${args.record_id}` }
         }
@@ -4706,6 +4917,9 @@ class ErpnextModuleService extends MedusaService({
                     mapping_id: args.mapping.id,
                     payload_hash: payloadHash,
                     status: "success",
+                    // A test run must never be the reason a genuine change
+                    // is dropped as a duplicate.
+                    is_test: false,
                 },
                 { take: 1 },
             )

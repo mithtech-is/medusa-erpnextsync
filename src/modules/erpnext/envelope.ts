@@ -58,6 +58,8 @@ export type BuildArgs = {
     correlation_id?: string | null
     echo_of?: string | null
     ts?: number
+    /** A rehearsal: the receiver checks everything and writes nothing. */
+    dry_run?: boolean
     // kind=event
     data?: any
     // kind=mapped
@@ -94,6 +96,11 @@ export function build(args: BuildArgs): Record<string, any> {
     if (args.echo_of) {
         env.origin.echo_of = args.echo_of
     }
+    if (args.dry_run) {
+        // Only present when true, so a receiver that predates the flag
+        // sees exactly the body it has always seen.
+        env.dry_run = true
+    }
     if (kind === KIND_MAPPED) {
         env.doctype = args.doctype
         env.key_field = args.key_field
@@ -121,6 +128,7 @@ export type ParsedEnvelope = {
     origin_site_id: string | null
     correlation_id: string | null
     echo_of: string | null
+    dry_run: boolean
     data: any
     doctype: string | null
     key_field: string | null
@@ -157,6 +165,7 @@ export function parse(raw: Record<string, any> | null | undefined): ParsedEnvelo
         origin_site_id: origin.site_id ?? null,
         correlation_id: origin.correlation_id ?? null,
         echo_of: origin.echo_of ?? null,
+        dry_run: body.dry_run === true,
         data: body.data !== undefined ? body.data : body.doc,
         doctype: (body.doctype && String(body.doctype).trim()) || null,
         key_field: (body.key_field && String(body.key_field).trim()) || null,

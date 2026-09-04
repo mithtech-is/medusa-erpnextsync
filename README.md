@@ -160,6 +160,47 @@ For the order's own provenance, the `order` entity now exposes
 `source` (its sales channel name, or `web`), so a mapping can carry it
 into `Sales Order.medusa_order_source` and ERPNext can report it back.
 
+## Rehearsing a mapping
+
+A mapping is a small program somebody wrote in a form. These answer what
+it would do, without doing it:
+
+```
+GET  /admin/erpnext/studio/sample?entity=product[&id=prod_123]
+POST /admin/erpnext/mappings/{id}/dry-run     { "record_id": "prod_123" }   # optional
+POST /admin/erpnext/studio/plan-inbound       { "event": "...", "data": {} }
+```
+
+The sample is a real record when you name one, and one built from the
+entity's own declared paths when you do not — which is what a brand-new
+mapping needs, since there is usually nothing to point at yet. `dry-run`
+no longer requires `record_id`: without it the push is rehearsed against
+that sample. `plan-inbound` reports which enabled mapping would take an
+ERPNext event, the entity and key it would land on, the payload it would
+write, and the fields the mapping dropped for want of a source value.
+
+Everything here asks the same code the real paths ask. The inbound plan
+and the real inbound apply share their candidate selection and their
+transform, so a rehearsal cannot quietly drift from what actually happens.
+
+### Test traffic
+
+ERPNext can send a real signed request carrying `dry_run`. It passes the
+signature check, the replay window and the echo test exactly as any
+request does, and then stops before the write: the response is the plan.
+That is the only check that proves the shared secret, the network and this
+side's own verdict at once, which between them are most of the reasons a
+sync fails in practice.
+
+The `erpnext_sync_event` row it leaves is marked `is_test`, and everything
+that reads the table skips marked rows. Otherwise the retry job would
+re-send a fabricated payload for real, and a rehearsed success would let
+`skip_unchanged` suppress a genuine push as a duplicate — both invisible
+from either end. They are pruned after a day whatever retention says.
+
+`pending_work/` records what is still missing on this side: the enable
+gate, which ERPNext already has.
+
 ## Develop
 
 ```bash

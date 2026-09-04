@@ -135,3 +135,44 @@ describe("envelope v2", () => {
         expect(isEcho(env, ["site-a"])).toBe(false)
     })
 })
+
+describe("a rehearsal on the wire", () => {
+    it("is absent from an ordinary envelope", () => {
+        // Absent rather than false, so a receiver that predates the flag
+        // sees exactly the body it has always seen.
+        const body = build({ event: "x.y", event_id: "e", site_id: "s" })
+        expect("dry_run" in body).toBe(false)
+        expect(parse(body).dry_run).toBe(false)
+    })
+
+    it("is stamped when asked for, and survives the round trip", () => {
+        const body = build({ event: "x.y", event_id: "e", site_id: "s", dry_run: true })
+        expect(body.dry_run).toBe(true)
+        expect(parse(body).dry_run).toBe(true)
+    })
+
+    it("only a literal true counts", () => {
+        // A truthy string on the wire is not a decision anyone made, and
+        // the whole point of the flag is that the receiver does not write.
+        expect(parse({ event: "x.y", event_id: "e", dry_run: "yes" }).dry_run).toBe(false)
+        expect(parse({ event: "x.y", event_id: "e", dry_run: 1 }).dry_run).toBe(false)
+        expect(parse({ event: "x.y", event_id: "e" }).dry_run).toBe(false)
+    })
+
+    it("rides along with a mapped push", () => {
+        const body = build({
+            event: "product.updated",
+            event_id: "e",
+            site_id: "s",
+            kind: KIND_MAPPED,
+            doctype: "Item",
+            key_field: "item_code",
+            key_value: "ABC",
+            payload: { title: "x" },
+            dry_run: true,
+        })
+        const parsed = parse(body)
+        expect(parsed.dry_run).toBe(true)
+        expect(parsed.kind).toBe(KIND_MAPPED)
+    })
+})

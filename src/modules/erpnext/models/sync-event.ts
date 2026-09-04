@@ -125,4 +125,15 @@ export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
      * mapping_id because that is how the lookup queries it.
      */
     payload_hash: model.text().nullable(),
+
+    /**
+     * This row is a rehearsal from the mapping studio, not real traffic.
+     *
+     * Everything that reads this table skips marked rows. The retry job
+     * would otherwise send a fabricated payload for real; the
+     * `skip_unchanged` guard would let a rehearsed success suppress a
+     * genuine push as a duplicate; and both failures are invisible from
+     * either end, which is the worst kind.
+     */
+    is_test: model.boolean().default(false),
 })
