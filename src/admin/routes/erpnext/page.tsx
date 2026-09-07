@@ -341,7 +341,14 @@ const SettingsTab: React.FC<{
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <div>
               <div className="flex items-center justify-between">
-                <Label>Medusa → Frappe secret</Label>
+                <div className="flex items-center gap-2">
+                  <Label>Medusa → Frappe secret</Label>
+                  {view.webhook_secret_masked ? (
+                    <StatusBadge color="green">set</StatusBadge>
+                  ) : (
+                    <StatusBadge color="grey">not set</StatusBadge>
+                  )}
+                </div>
                 <Button
                   size="small"
                   variant="transparent"
@@ -352,7 +359,9 @@ const SettingsTab: React.FC<{
               </div>
               <Input
                 type="password"
-                placeholder={view.webhook_secret_masked ?? "(unset)"}
+                placeholder={
+                  view.webhook_secret_masked ?? "Not set — click Generate"
+                }
                 value={webhookSecret}
                 onChange={(e) => setWebhookSecret(e.target.value)}
               />
@@ -366,7 +375,14 @@ const SettingsTab: React.FC<{
             </div>
             <div>
               <div className="flex items-center justify-between">
-                <Label>Frappe → Medusa secret</Label>
+                <div className="flex items-center gap-2">
+                  <Label>Frappe → Medusa secret</Label>
+                  {view.frappe_to_medusa_secret_masked ? (
+                    <StatusBadge color="green">set</StatusBadge>
+                  ) : (
+                    <StatusBadge color="grey">not set</StatusBadge>
+                  )}
+                </div>
                 <Button
                   size="small"
                   variant="transparent"
@@ -378,7 +394,8 @@ const SettingsTab: React.FC<{
               <Input
                 type="password"
                 placeholder={
-                  view.frappe_to_medusa_secret_masked ?? "(unset)"
+                  view.frappe_to_medusa_secret_masked ??
+                  "Not set — click Generate"
                 }
                 value={frappeToMedusaSecret}
                 onChange={(e) => setFrappeToMedusaSecret(e.target.value)}
@@ -390,16 +407,30 @@ const SettingsTab: React.FC<{
               </Text>
             </div>
             <div>
-              <Label>API key</Label>
+              <div className="flex items-center gap-2">
+                <Label>API key</Label>
+                {view.erpnext_api_key_masked ? (
+                  <StatusBadge color="green">set</StatusBadge>
+                ) : (
+                  <StatusBadge color="grey">not set</StatusBadge>
+                )}
+              </div>
               <Input
-                placeholder={view.erpnext_api_key_masked ?? "(unset)"}
+                placeholder={view.erpnext_api_key_masked ?? "Not set"}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
               />
-              <Label className="mt-2">API secret</Label>
+              <div className="mt-2 flex items-center gap-2">
+                <Label>API secret</Label>
+                {view.erpnext_api_secret_masked ? (
+                  <StatusBadge color="green">set</StatusBadge>
+                ) : (
+                  <StatusBadge color="grey">not set</StatusBadge>
+                )}
+              </div>
               <Input
                 type="password"
-                placeholder={view.erpnext_api_secret_masked ?? "(unset)"}
+                placeholder={view.erpnext_api_secret_masked ?? "Not set"}
                 value={apiSecret}
                 onChange={(e) => setApiSecret(e.target.value)}
               />
@@ -1054,6 +1085,285 @@ type MedusaEntity = {
   }>
 }
 
+/**
+ * The pull filter, as rows instead of hand-written JSON.
+ *
+ * It is stored as Frappe's own filter syntax — `[[field, op, value], ...]`
+ * ANDed together — and it used to be typed that way, into a textarea, with
+ * the fieldnames remembered rather than offered. A misplaced bracket left
+ * the filter silently unset, and a wrong fieldname produced an empty pull
+ * that looked like "nothing changed".
+ *
+ * The stored shape is unchanged; only the way it is written is.
+ */
+const FILTER_OPS: Array<{ value: string; label: string; noValue?: boolean }> = [
+  { value: "=", label: "is" },
+  { value: "!=", label: "is not" },
+  { value: "like", label: "contains" },
+  { value: "not like", label: "does not contain" },
+  { value: ">", label: "is after / greater than" },
+  { value: "<", label: "is before / less than" },
+  { value: ">=", label: "is at least" },
+  { value: "<=", label: "is at most" },
+  { value: "in", label: "is one of (comma separated)" },
+  { value: "not in", label: "is none of (comma separated)" },
+  { value: "is", label: "is set / not set" },
+]
+
+const PullFilterBuilder: React.FC<{
+  value: any[] | null
+  fields: DoctypeField[]
+  onChange: (next: any[] | null) => void
+}> = ({ value, fields, onChange }) => {
+  const rows: any[] = Array.isArray(value) ? value : []
+
+  const write = (next: any[]) => onChange(next.length ? next : null)
+  const setCell = (i: number, pos: 0 | 1 | 2, v: any) => {
+    const next = rows.map((r, j) => (j === i ? [...r] : r))
+    next[i][pos] = v
+    write(next)
+  }
+
+  return (
+    <div className="space-y-2">
+      {rows.map((r, i) => {
+        const op = String(r?.[1] ?? "=")
+        const isSetOp = op === "is"
+        return (
+          <div key={i} className="flex items-center gap-2">
+            <div className="flex-1">
+              <Select value={String(r?.[0] ?? "")} onValueChange={(v) => setCell(i, 0, v)}>
+                <Select.Trigger>
+                  <Select.Value placeholder="Field" />
+                </Select.Trigger>
+                <Select.Content>
+                  {fields.map((f) => (
+                    <Select.Item key={f.fieldname} value={f.fieldname}>
+                      {f.label || f.fieldname} · {f.fieldname}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select>
+            </div>
+            <div className="w-56">
+              <Select value={op} onValueChange={(v) => setCell(i, 1, v)}>
+                <Select.Trigger>
+                  <Select.Value placeholder="is" />
+                </Select.Trigger>
+                <Select.Content>
+                  {FILTER_OPS.map((o) => (
+                    <Select.Item key={o.value} value={o.value}>
+                      {o.label}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select>
+            </div>
+            <div className="flex-1">
+              {isSetOp ? (
+                <Select value={String(r?.[2] ?? "set")} onValueChange={(v) => setCell(i, 2, v)}>
+                  <Select.Trigger>
+                    <Select.Value placeholder="set" />
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="set">set</Select.Item>
+                    <Select.Item value="not set">not set</Select.Item>
+                  </Select.Content>
+                </Select>
+              ) : (
+                <Input
+                  placeholder="Value"
+                  value={String(r?.[2] ?? "")}
+                  onChange={(e) => setCell(i, 2, e.target.value)}
+                />
+              )}
+            </div>
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={() => write(rows.filter((_, j) => j !== i))}
+            >
+              Remove
+            </Button>
+          </div>
+        )
+      })}
+      <Button
+        variant="secondary"
+        size="small"
+        onClick={() => write([...rows, ["", "=", ""]])}
+      >
+        Add a condition
+      </Button>
+    </div>
+  )
+}
+
+/** One field as `/medusa-entities/:key/fields` reports it. */
+type DiscoveredField = {
+  path: string
+  label: string
+  type: string
+  required?: boolean
+  suggested_transform?: string
+  description?: string
+  /** The record this field belongs to ("Billing address"); "" for the entity's own. */
+  group?: string
+  /** Bookkeeping, a related record's foreign keys, or a second name for
+   *  something the list already offers — hidden until asked for. */
+  advanced?: boolean
+}
+
+type RequiredRow = { name: string; label: string; covered: boolean }
+
+/**
+ * Which mandatory fields on the receiving side this mapping fills. A field
+ * counts when a pair writes it in that direction and has something to
+ * write: a source path or a fixed value. The rehearsal's `unmetRequired`
+ * in modules/erpnext/mapping-engine.ts is the authority; this is the same
+ * rule, kept here because the admin bundle cannot import from the server.
+ */
+function requiredCoverage(
+  direction: "push" | "pull",
+  pairs: FieldPair[],
+  mappingDirection: Direction,
+  required: Array<{ name: string; label: string }>,
+): RequiredRow[] {
+  const covered = new Set<string>()
+  for (const p of pairs ?? []) {
+    const effective = String(p.direction ?? mappingDirection)
+    if (!(effective === "both" || effective === direction)) continue
+    const hasSource =
+      p.constant !== undefined ||
+      Boolean(direction === "push" ? p.medusa_path : p.erpnext_field)
+    if (!hasSource) continue
+    const target = direction === "push" ? p.erpnext_field : p.medusa_path
+    if (target) covered.add(target)
+  }
+  return required.map((f) => ({ ...f, covered: covered.has(f.name) }))
+}
+
+/**
+ * One box per side that receives data: what it insists on, and whether
+ * this mapping fills it. Shown only for the direction the mapping moves —
+ * a sync that only pulls from ERPNext has nothing to fill there.
+ */
+const RequiredBoxes: React.FC<{
+  direction: Direction
+  pairs: FieldPair[]
+  erpRequired: Array<{ name: string; label: string }>
+  medusaRequired: Array<{ name: string; label: string }>
+  storeKnown: boolean
+  doctype: string
+  onAddErp: (names: string[]) => void
+  onAddMedusa: (paths: string[]) => void
+}> = ({ direction, pairs, erpRequired, medusaRequired, storeKnown, doctype, onAddErp, onAddMedusa }) => {
+  const toErp = direction === "push" || direction === "both"
+  const toMedusa = direction === "pull" || direction === "both"
+  if (!toErp && !toMedusa) return null
+  const box = (
+    title: string,
+    rows: RequiredRow[],
+    emptyNote: string,
+    onAdd: (names: string[]) => void,
+  ) => {
+    const missing = rows.filter((r) => !r.covered)
+    return (
+      <div className="rounded border border-ui-border-base p-3">
+        <div className="mb-1 flex items-center justify-between">
+          <Text weight="plus">{title}</Text>
+          <Text className="text-xs text-ui-fg-subtle">
+            {rows.length === 0 ? "" : missing.length ? `${missing.length} missing` : "all covered"}
+          </Text>
+        </div>
+        {rows.length === 0 ? (
+          <Text className="text-xs text-ui-fg-subtle">{emptyNote}</Text>
+        ) : (
+          rows.map((r) =>
+            r.covered ? (
+              <div key={r.name} className="flex gap-2 text-sm text-ui-fg-base">
+                <span>✓</span>
+                <span>
+                  {r.label} <span className="text-ui-fg-subtle">· {r.name}</span>
+                </span>
+              </div>
+            ) : (
+              // A missing field is a button: one click adds that one pair.
+              <button
+                key={r.name}
+                type="button"
+                title="Add this field to the mapping"
+                onClick={() => onAdd([r.name])}
+                className="my-0.5 flex w-full gap-2 rounded border border-dashed border-ui-border-base px-2 py-0.5 text-left text-sm text-ui-fg-error hover:border-solid hover:bg-ui-bg-base-hover"
+              >
+                <span>＋</span>
+                <span>
+                  {r.label} <span className="text-ui-fg-subtle">· {r.name}</span>
+                </span>
+              </button>
+            ),
+          )
+        )}
+        {missing.length > 1 && (
+          <Button
+            size="small"
+            variant="secondary"
+            className="mt-2"
+            onClick={() => onAdd(missing.map((m) => m.name))}
+          >
+            Add all {missing.length}
+          </Button>
+        )}
+      </div>
+    )
+  }
+  return (
+    <div className="mt-6 grid gap-3 md:grid-cols-2">
+      {toErp &&
+        box(
+          "Required in ERPNext",
+          requiredCoverage("push", pairs, direction, erpRequired),
+          `${doctype || "This doctype"} has no mandatory field this mapping has to fill.`,
+          onAddErp,
+        )}
+      {toMedusa &&
+        box(
+          "Required in Medusa",
+          requiredCoverage("pull", pairs, direction, medusaRequired),
+          storeKnown
+            ? "The store reports no field it cannot create this record without."
+            : "The store's model could not be read, so what it requires is unknown.",
+          onAddMedusa,
+        )}
+    </div>
+  )
+}
+
+/**
+ * The store-field picker's groups: what a record cannot be created
+ * without first, then the entity's own fields, then each related record
+ * under its own heading. Internal fields stay out unless asked for —
+ * except the one this row already uses, which must stay selectable.
+ */
+function groupForPicker(
+  fields: DiscoveredField[],
+  opts: { showAll: boolean; keep?: string; ownLabel: string },
+): Array<{ label: string; fields: DiscoveredField[] }> {
+  const visible = fields.filter((f) => opts.showAll || !f.advanced || f.path === opts.keep)
+  const groups: Array<{ label: string; fields: DiscoveredField[] }> = []
+  const add = (label: string, f: DiscoveredField) => {
+    let g = groups.find((x) => x.label === label)
+    if (!g) {
+      g = { label, fields: [] }
+      groups.push(g)
+    }
+    g.fields.push(f)
+  }
+  for (const f of visible) if (f.required) add("Required", f)
+  for (const f of visible) if (!f.required) add(f.group || opts.ownLabel, f)
+  return groups
+}
+
 type DoctypeField = {
   fieldname: string
   label: string
@@ -1106,6 +1416,8 @@ const CONFIDENCE_META: Record<
 }
 
 type FieldPair = {
+  /** A fixed value sent every time, with no store field behind it. */
+  constant?: unknown
   medusa_path: string
   erpnext_field: string
   direction?: "push" | "pull" | "both"
@@ -1211,6 +1523,19 @@ type WizardField = {
   on: boolean
   /** Advanced/plumbing pairs are collapsed unless the operator expands. */
   advanced?: boolean
+  /**
+   * Present on a fixed-value pair: `erpnext_field` is written with this
+   * exact value and there is no Medusa source. For a mandatory ERPNext
+   * field the store has no counterpart for.
+   *
+   * Starts empty in every preset. The right value is a Link into that
+   * site's own data — its Item Groups, its UOMs — and hard-coding a guess
+   * would fail Link validation on any ERPNext whose setup differs. The
+   * operator supplies it, and the wizard will not continue until they do.
+   */
+  constant?: string
+  /** What the operator should type, shown under the input. */
+  constantHint?: string
 }
 
 type SyncPreset = {
@@ -1235,18 +1560,33 @@ const SYNC_PRESETS: SyncPreset[] = [
     key: "customers",
     emoji: "👤",
     title: "Customers",
-    blurb: "Keep buyer accounts in step — name, email, phone.",
+    blurb: "Keep buyer accounts in step — the name and the link back to your store.",
     doctype: "Customer",
     medusa_entity: "customer",
     events: ["customer.created", "customer.updated", "customer.deleted"],
-    key_medusa_field: "email",
-    key_erpnext_field: "email_id",
+    // Keyed on the link field, not on email. ERPNext keeps `email_id` on
+    // the linked Contact and refills the column from it, so a key built on
+    // email changes underneath the mapping the moment a Contact is set.
+    key_medusa_field: "id",
+    key_erpnext_field: "medusa_customer_id",
     defaultDirection: "both",
     directions: ["both", "push", "pull"],
+    note:
+      "ERPNext does not store a customer's email or phone on the Customer record — " +
+      "they live on a linked Contact, and the columns that look like them are filled " +
+      "from it. This sync keeps the name and the link id. Email and phone need a " +
+      "second mapping onto Contact, or a handler.",
     fields: [
-      { medusa_path: "email", erpnext_field: "email_id", direction: "both", transform: "lowercase", label: "Email", on: true },
-      { medusa_path: "first_name", erpnext_field: "customer_name", direction: "both", label: "Name", on: true },
-      { medusa_path: "phone", erpnext_field: "mobile_no", direction: "both", label: "Phone", on: true },
+      { medusa_path: "{first_name} {last_name}", erpnext_field: "customer_name", direction: "push", label: "Name", on: true },
+      {
+        medusa_path: "",
+        erpnext_field: "customer_type",
+        direction: "push",
+        label: "Customer type",
+        on: true,
+        constant: "",
+        constantHint: "Mandatory on ERPNext, and a store has no equivalent.",
+      },
       { medusa_path: "id", erpnext_field: "medusa_customer_id", direction: "push", label: "Medusa link id", on: true, advanced: true },
     ],
   },
@@ -1262,10 +1602,32 @@ const SYNC_PRESETS: SyncPreset[] = [
     key_erpnext_field: "item_code",
     defaultDirection: "both",
     directions: ["both", "push", "pull"],
+    note:
+      "Item Group and Stock UOM are mandatory on an ERPNext Item and have no " +
+      "counterpart in a store, so they are sent as fixed values. The choices are " +
+      "read from your ERPNext.",
     fields: [
       { medusa_path: "handle", erpnext_field: "item_code", direction: "both", transform: "lowercase", label: "Code (URL handle)", on: true },
       { medusa_path: "title", erpnext_field: "item_name", direction: "both", label: "Name", on: true },
       { medusa_path: "description", erpnext_field: "description", direction: "push", label: "Description", on: true },
+      {
+        medusa_path: "",
+        erpnext_field: "item_group",
+        direction: "push",
+        label: "Item group",
+        on: true,
+        constant: "",
+        constantHint: "Mandatory on an ERPNext Item, and a store has no equivalent.",
+      },
+      {
+        medusa_path: "",
+        erpnext_field: "stock_uom",
+        direction: "push",
+        label: "Stock UOM",
+        on: true,
+        constant: "",
+        constantHint: "Mandatory on an ERPNext Item, and a store has no equivalent.",
+      },
       { medusa_path: "id", erpnext_field: "medusa_product_id", direction: "push", label: "Medusa link id", on: true, advanced: true },
     ],
   },
@@ -1345,6 +1707,12 @@ const AddSyncWizard: React.FC<{
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<{ id: string } | null>(null)
+  /** Which of the three calls the button is on, so it can say so. */
+  const [stage, setStage] = useState<"rehearsing" | "enabling" | null>(null)
+  /** Saved, rehearsal did not pass: the mapping exists but is switched off. */
+  const [savedOff, setSavedOff] = useState<{ id: string; why: string } | null>(null)
+  /** A sync for this pair already existed, so the preset was folded into it. */
+  const [foldedInto, setFoldedInto] = useState<string | null>(null)
 
   const preset = SYNC_PRESETS.find((p) => p.key === presetKey) || null
 
@@ -1357,6 +1725,56 @@ const AddSyncWizard: React.FC<{
     setStep(2)
   }
 
+  /** Fixed-value pairs that are switched on but have nothing to send. */
+  const blankConstants = fields.filter(
+    (f) => f.on && f.constant !== undefined && !f.constant.trim(),
+  )
+
+  /**
+   * What each fixed-value field will accept, read from the connected
+   * ERPNext. Nothing here is shipped: a deployment's Item Groups and UOMs
+   * are its own, and a list this plugin decided on would be one client's
+   * setup handed to every other client.
+   */
+  const [constantOptions, setConstantOptions] = useState<
+    Record<string, { options: string[]; truncated?: boolean; error?: string }>
+  >({})
+
+  useEffect(() => {
+    if (!preset) return
+    const wanted = preset.fields.filter((f) => f.constant !== undefined)
+    if (!wanted.length) return
+    let cancelled = false
+    ;(async () => {
+      for (const f of wanted) {
+        try {
+          const r = await fetch(
+            `/admin/erpnext/doctypes/${encodeURIComponent(preset.doctype)}/options?` +
+              new URLSearchParams({ field: f.erpnext_field }).toString(),
+            { credentials: "include" },
+          )
+          const b = await r.json()
+          if (cancelled) return
+          setConstantOptions((prev) => ({
+            ...prev,
+            [f.erpnext_field]: b?.ok
+              ? { options: b.options ?? [], truncated: b.truncated }
+              : { options: [], error: b?.message ?? "could not read the choices" },
+          }))
+        } catch (e: any) {
+          if (cancelled) return
+          setConstantOptions((prev) => ({
+            ...prev,
+            [f.erpnext_field]: { options: [], error: e?.message ?? "network error" },
+          }))
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [preset?.key])
+
   const save = async () => {
     if (!preset) return
     setBusy(true)
@@ -1364,15 +1782,16 @@ const AddSyncWizard: React.FC<{
     try {
       const field_mappings = fields
         .filter((f) => f.on)
+        .filter((f) => f.constant === undefined || f.constant.trim())
         .map((f) => ({
           medusa_path: f.medusa_path,
           erpnext_field: f.erpnext_field,
           direction: f.direction,
           ...(f.transform ? { transform: f.transform } : {}),
+          ...(f.constant !== undefined ? { constant: f.constant.trim() } : {}),
         }))
       const draft = {
         name: name.trim() || `${preset.title} ↔ ERPNext`,
-        enabled: true,
         medusa_entity: preset.medusa_entity,
         doctype: preset.doctype,
         direction,
@@ -1388,19 +1807,59 @@ const AddSyncWizard: React.FC<{
         key_erpnext_field: preset.key_erpnext_field,
         field_mappings,
       }
+
+      // Save switched OFF first. `mayEnable` refuses to turn on a mapping
+      // that carries no matching rehearsal, and a brand-new one never can —
+      // so asking for `enabled: true` here made the guided path impossible
+      // to finish. The wizard does the rehearsal itself instead, which is
+      // what the advanced editor's Test button does by hand.
       const res = await fetch("/admin/erpnext/mappings", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        body: JSON.stringify({ ...draft, enabled: false, merge_into_pair: true }),
       })
       const body = await res.json()
       if (!res.ok) throw new Error(body.message || "Could not save")
-      setDone({ id: body?.mapping?.id ?? body?.id ?? "" })
+      const id: string = body?.mapping?.id ?? body?.id ?? ""
+      if (!id) throw new Error("Saved, but no mapping id came back")
+      // A sync is its pair: when one already kept these two in step, the
+      // preset's field pairs were folded into it rather than saved beside it.
+      setFoldedInto(body?.mapping?.merged_into ? String(body.mapping.name ?? "") : null)
+
+      setStage("rehearsing")
+      const dryRes = await fetch(`/admin/erpnext/mappings/${id}/dry-run`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      })
+      const dry = await dryRes.json()
+      if (!dry?.ok) {
+        // The mapping exists and is safe — it is just switched off. Say so,
+        // rather than leaving the operator thinking nothing was saved.
+        setSavedOff({ id, why: dry?.message ?? "the rehearsal did not pass" })
+        return
+      }
+
+      setStage("enabling")
+      const onRes = await fetch("/admin/erpnext/mappings", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...draft, id, enabled: true }),
+      })
+      const onBody = await onRes.json()
+      if (!onRes.ok) {
+        setSavedOff({ id, why: onBody?.message ?? "it could not be switched on" })
+        return
+      }
+      setDone({ id })
     } catch (e: any) {
       setError(e?.message ?? "Could not save")
     } finally {
       setBusy(false)
+      setStage(null)
     }
   }
 
@@ -1432,7 +1891,29 @@ const AddSyncWizard: React.FC<{
         <div className="mb-2 text-2xl">✅</div>
         <Heading level="h2" className="mb-1">You're all set</Heading>
         <Text className="mb-4 text-ui-fg-subtle">
-          “{name}” is now syncing. You can fine-tune every detail any time from the mappings list.
+          {foldedInto
+            ? `Added to “${foldedInto}”, which already kept these two in step — one sync per pair, so nothing was created beside it.`
+            : `“${name}” is now syncing.`}{" "}
+          You can fine-tune every detail any time from the mappings list.
+        </Text>
+        <Button variant="primary" onClick={onDone}>Back to syncs</Button>
+      </div>
+    )
+  }
+
+  if (savedOff) {
+    return (
+      <div className="rounded-lg border p-6 text-center">
+        <div className="mb-2 text-2xl">⚠️</div>
+        <Heading level="h2" className="mb-1">Saved, but left switched off</Heading>
+        <Text className="mb-4 text-ui-fg-subtle">
+          {foldedInto ? `The fields were added to “${foldedInto}”` : `“${name}” was created`} and
+          nothing was sent anywhere. The rehearsal did not pass, so it has not
+          been switched on: {savedOff.why}
+        </Text>
+        <Text className="mb-4 text-ui-fg-subtle">
+          Open it in the advanced editor to see what the dry run reported, fix
+          it, then use Test to switch it on.
         </Text>
         <Button variant="primary" onClick={onDone}>Back to syncs</Button>
       </div>
@@ -1503,20 +1984,66 @@ const AddSyncWizard: React.FC<{
             <div className="rounded-lg border divide-y">
               {fields.filter((f) => !f.advanced).map((f, i) => {
                 const realIdx = fields.indexOf(f)
+                const isConstant = f.constant !== undefined
                 return (
-                  <div key={i} className="flex items-center justify-between p-3">
-                    <div className="flex items-center gap-3 text-sm">
-                      <span className="font-medium">{f.label}</span>
-                      <span className="text-ui-fg-subtle">
-                        Medusa <code className="text-xs">{f.medusa_path}</code> ↔ ERPNext <code className="text-xs">{f.erpnext_field}</code>
-                      </span>
+                  <div key={i} className="p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3 text-sm">
+                        <span className="font-medium">{f.label}</span>
+                        <span className="text-ui-fg-subtle">
+                          {isConstant ? (
+                            <>a fixed value → ERPNext <code className="text-xs">{f.erpnext_field}</code></>
+                          ) : (
+                            <>Medusa <code className="text-xs">{f.medusa_path}</code> ↔ ERPNext <code className="text-xs">{f.erpnext_field}</code></>
+                          )}
+                        </span>
+                      </div>
+                      <Switch
+                        checked={f.on}
+                        onCheckedChange={(v) =>
+                          setFields((arr) => arr.map((x, j) => (j === realIdx ? { ...x, on: !!v } : x)))
+                        }
+                      />
                     </div>
-                    <Switch
-                      checked={f.on}
-                      onCheckedChange={(v) =>
-                        setFields((arr) => arr.map((x, j) => (j === realIdx ? { ...x, on: !!v } : x)))
-                      }
-                    />
+                    {isConstant && f.on && (() => {
+                      const meta = constantOptions[f.erpnext_field]
+                      const setConstant = (v: string) =>
+                        setFields((arr) =>
+                          arr.map((x, j) => (j === realIdx ? { ...x, constant: v } : x)),
+                        )
+                      return (
+                        <div className="mt-2">
+                          {meta?.options.length ? (
+                            <Select value={f.constant || ""} onValueChange={setConstant}>
+                              <Select.Trigger>
+                                <Select.Value placeholder={`Choose from this ERPNext`} />
+                              </Select.Trigger>
+                              <Select.Content>
+                                {meta.options.map((o) => (
+                                  <Select.Item key={o} value={o}>{o}</Select.Item>
+                                ))}
+                              </Select.Content>
+                            </Select>
+                          ) : (
+                            <Input
+                              placeholder="Value to send every time"
+                              value={f.constant ?? ""}
+                              onChange={(e) => setConstant(e.target.value)}
+                            />
+                          )}
+                          <Text className="mt-1 text-xs text-ui-fg-subtle">
+                            {f.constantHint}
+                            {meta?.error
+                              ? ` Could not read the choices from ERPNext (${meta.error}) — type the value instead.`
+                              : meta && !meta.options.length
+                                ? " This ERPNext has no records to choose from yet, so it has to be created there first."
+                                : meta?.truncated
+                                  ? " Showing the first 200."
+                                  : ""}
+                          </Text>
+                        </div>
+                      )
+                    })()}
                   </div>
                 )
               })}
@@ -1559,9 +2086,26 @@ const AddSyncWizard: React.FC<{
             </div>
           )}
 
+          {blankConstants.length > 0 && (
+            <div className="rounded-lg border border-ui-border-base bg-ui-bg-subtle p-3">
+              <Text className="text-xs text-ui-fg-subtle">
+                Still needs a value: {blankConstants.map((f) => f.label).join(", ")}. ERPNext
+                requires these and the store has nothing to fill them from, so the sync
+                cannot run until you say what to send. Turn one off if you would rather
+                leave it to ERPNext's own default.
+              </Text>
+            </div>
+          )}
+
           <div className="flex justify-between">
             <Button variant="secondary" onClick={() => setStep(1)}>← Back</Button>
-            <Button variant="primary" onClick={() => setStep(3)}>Review →</Button>
+            <Button
+              variant="primary"
+              onClick={() => setStep(3)}
+              disabled={blankConstants.length > 0}
+            >
+              Review →
+            </Button>
           </div>
         </div>
       )}
@@ -1586,13 +2130,31 @@ const AddSyncWizard: React.FC<{
             </div>
             <div className="text-ui-fg-subtle">
               Keeping in step:{" "}
-              {fields.filter((f) => f.on).map((f) => f.label).join(", ") || "nothing selected"}
+              {fields
+                .filter((f) => f.on && f.constant === undefined)
+                .map((f) => f.label)
+                .join(", ") || "nothing selected"}
             </div>
+            {fields.some((f) => f.on && f.constant) && (
+              <div className="mt-2 text-ui-fg-subtle">
+                Always sending:{" "}
+                {fields
+                  .filter((f) => f.on && f.constant)
+                  .map((f) => `${f.erpnext_field} = ${f.constant}`)
+                  .join(", ")}
+              </div>
+            )}
           </div>
           <div className="flex justify-between">
             <Button variant="secondary" onClick={() => setStep(2)}>← Back</Button>
             <Button variant="primary" onClick={save} disabled={busy}>
-              {busy ? "Turning on…" : "Turn on sync"}
+              {stage === "rehearsing"
+                ? "Rehearsing…"
+                : stage === "enabling"
+                  ? "Turning on…"
+                  : busy
+                    ? "Saving…"
+                    : "Rehearse & turn on"}
             </Button>
           </div>
         </div>
@@ -1688,6 +2250,33 @@ const MappingList: React.FC<{
     refresh()
   }
 
+  // A mapping travels when it is saved and nothing else moves the list,
+  // so an ERPNext connected later reads a shorter list until this runs.
+  const [syncing, setSyncing] = useState(false)
+  const [syncNote, setSyncNote] = useState<string | null>(null)
+  const syncNow = async () => {
+    setSyncing(true)
+    setSyncNote(null)
+    try {
+      const res = await fetch("/admin/erpnext/mappings/sync-now", {
+        method: "POST",
+        credentials: "include",
+      })
+      const body = await res.json()
+      if (!res.ok || body?.ok === false) throw new Error(body?.message || "sync_failed")
+      const failed = (body.failed ?? []) as Array<{ name: string; error: string }>
+      setSyncNote(
+        `${body.pushed} mapping${body.pushed === 1 ? "" : "s"} sent to ERPNext` +
+          (failed.length ? ` · ${failed.length} failed: ${failed.map((f) => f.name).join(", ")}` : ""),
+      )
+      refresh()
+    } catch (e: any) {
+      setSyncNote(friendlyErpError(e?.message ?? "sync_failed"))
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
@@ -1699,8 +2288,12 @@ const MappingList: React.FC<{
           <Button size="small" variant="secondary" onClick={onNew}>
             Advanced editor
           </Button>
+          <Button size="small" variant="secondary" onClick={syncNow} disabled={syncing} title="Send every mapping to ERPNext so both lists read the same">
+            {syncing ? "Sending…" : "Send all to ERPNext"}
+          </Button>
         </div>
       </div>
+      {syncNote && <Text className="mb-3 text-xs text-ui-fg-subtle">{syncNote}</Text>}
       {error && <Text className="text-ui-fg-error mb-3">{error}</Text>}
       {!items && <Text>Loading…</Text>}
       {items && items.length === 0 && (
@@ -1908,6 +2501,40 @@ const MappingEditor: React.FC<{
     () => entities.find((e) => e.key === draft.medusa_entity) ?? null,
     [entities, draft.medusa_entity],
   )
+
+  /**
+   * Every field the entity really has, not just the ones `registry.ts`
+   * curates. The picker here was reading the curated `paths` — the same
+   * short list the ERPNext side used to be stuck with — so a column the
+   * store has but nobody listed could not be chosen, only typed.
+   */
+  const [medusaFields, setMedusaFields] = useState<DiscoveredField[]>([])
+  useEffect(() => {
+    const key = draft.medusa_entity
+    if (!key) {
+      setMedusaFields([])
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(
+          `/admin/erpnext/medusa-entities/${encodeURIComponent(key)}/fields`,
+          { credentials: "include" },
+        )
+        const body = await res.json()
+        if (cancelled) return
+        setMedusaFields(res.ok ? (body.fields ?? []) : [])
+      } catch {
+        // The curated list still comes through `activeEntity`, so the
+        // picker degrades to what it always had rather than emptying.
+        if (!cancelled) setMedusaFields([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [draft.medusa_entity])
 
   // The ERPNext doctype(s) this entity usually pairs with, narrowed to the
   // ones that actually exist on the connected site. Drives the "Recommended"
@@ -2407,36 +3034,16 @@ const MappingEditor: React.FC<{
         </div>
 
         <div className="col-span-2">
-          <Label>Frappe-side pull filter (JSON)</Label>
-          <Textarea
-            rows={3}
-            value={
-              draft.pull_filter
-                ? JSON.stringify(draft.pull_filter, null, 2)
-                : ""
-            }
-            placeholder='[["disabled","=",0]]'
-            onChange={(e) => {
-              const v = e.target.value.trim()
-              if (!v) {
-                setDraft((d) => ({ ...d, pull_filter: null }))
-                return
-              }
-              try {
-                const parsed = JSON.parse(v)
-                if (Array.isArray(parsed)) {
-                  setDraft((d) => ({ ...d, pull_filter: parsed }))
-                }
-              } catch {
-                /* still typing — don't clobber draft */
-              }
-            }}
-          />
-          <Text className="mt-1 text-xs text-ui-fg-subtle">
-            Frappe filter syntax — array of [field, op, value] triples ANDed
-            together with the time-based <code>modified &gt; last_pull_at</code>
-            cursor at pull time.
+          <Label>Which ERPNext records should the pull bring back?</Label>
+          <Text className="mb-2 text-xs text-ui-fg-subtle">
+            Every condition has to hold. Leave it empty to take everything.
+            Only records changed since the last pull are fetched either way.
           </Text>
+          <PullFilterBuilder
+            value={draft.pull_filter}
+            fields={doctypeFields}
+            onChange={(next) => setDraft((d) => ({ ...d, pull_filter: next }))}
+          />
         </div>
 
         {/* ── When does this actually fire? ───────────────────────── */}
@@ -2471,27 +3078,39 @@ const MappingEditor: React.FC<{
           <Text className="mt-1 text-xs text-ui-fg-subtle">
             {TRIGGER_PRESETS.find((p) => p.value === (draft.trigger_preset ?? "always"))?.help}
           </Text>
-          <Input
-            className="mt-2 font-mono text-xs"
-            placeholder="always — no condition"
-            value={draft.trigger_condition ?? ""}
-            onChange={(e) =>
-              setDraft((d) => ({
-                ...d,
-                trigger_condition: e.target.value,
-                trigger_preset: "custom",
-              }))
-            }
-          />
-          <Text className="mt-1 text-xs text-ui-fg-subtle">
-            Supported: <code>is set</code>, <code>is not set</code>,{" "}
-            <code>is empty</code>, <code>== != &gt; &gt;= &lt; &lt;=</code>,{" "}
-            <code>contains</code>, <code>starts with</code>,{" "}
-            <code>and</code> / <code>or</code> / <code>not</code> and brackets.
-            Not JavaScript — it can only read fields off the record. An
-            invalid condition is rejected on save, and would sync nothing
-            rather than everything.
-          </Text>
+          {/* The expression is the escape hatch, not the interface. Showing
+              it beside a preset that already wrote it invited edits that
+              silently switched the preset to custom. */}
+          {(draft.trigger_preset ?? "always") === "custom" && (
+            <>
+              <Input
+                className="mt-2 font-mono text-xs"
+                placeholder="always — no condition"
+                value={draft.trigger_condition ?? ""}
+                onChange={(e) =>
+                  setDraft((d) => ({
+                    ...d,
+                    trigger_condition: e.target.value,
+                    trigger_preset: "custom",
+                  }))
+                }
+              />
+              <Text className="mt-1 text-xs text-ui-fg-subtle">
+                Supported: <code>is set</code>, <code>is not set</code>,{" "}
+                <code>is empty</code>, <code>== != &gt; &gt;= &lt; &lt;=</code>,{" "}
+                <code>contains</code>, <code>starts with</code>,{" "}
+                <code>and</code> / <code>or</code> / <code>not</code> and brackets.
+                Not JavaScript — it can only read fields off the record. An
+                invalid condition is rejected on save, and would sync nothing
+                rather than everything.
+              </Text>
+            </>
+          )}
+          {(draft.trigger_preset ?? "always") !== "custom" && draft.trigger_condition ? (
+            <Text className="mt-1 text-xs text-ui-fg-subtle">
+              Runs when <code>{draft.trigger_condition}</code>.
+            </Text>
+          ) : null}
           <div className="mt-3 flex items-center gap-2">
             <Switch
               checked={Boolean(draft.skip_unchanged)}
@@ -2534,6 +3153,37 @@ const MappingEditor: React.FC<{
           </Text>
         </div>
       </div>
+
+      <RequiredBoxes
+        direction={(draft.direction ?? "both") as Direction}
+        pairs={(draft.field_mappings ?? []) as FieldPair[]}
+        doctype={draft.doctype ?? ""}
+        erpRequired={doctypeFields
+          .filter((f) => f.reqd && !f.fetch_from && !f.default)
+          .map((f) => ({ name: f.fieldname, label: f.label || f.fieldname }))}
+        medusaRequired={medusaFields
+          .filter((f) => f.required)
+          .map((f) => ({ name: f.path, label: f.label || f.path }))}
+        storeKnown={medusaFields.length > 0}
+        onAddErp={(names) =>
+          setDraft((d) => ({
+            ...d,
+            field_mappings: [
+              ...(d.field_mappings ?? []),
+              ...names.map((n) => ({ medusa_path: "", erpnext_field: n })),
+            ],
+          }))
+        }
+        onAddMedusa={(paths) =>
+          setDraft((d) => ({
+            ...d,
+            field_mappings: [
+              ...(d.field_mappings ?? []),
+              ...paths.map((p) => ({ medusa_path: p, erpnext_field: "" })),
+            ],
+          }))
+        }
+      />
 
       {/* Field-pair mapper */}
       <div className="mt-6">
@@ -2684,9 +3334,13 @@ const MappingEditor: React.FC<{
             key={idx}
             pair={pair}
             entity={activeEntity}
+            medusaFields={medusaFields}
             fields={doctypeFields}
             annotation={annotations[pair.erpnext_field]}
             mappingDirection={(draft.direction ?? "both") as Direction}
+            takenErpnextFields={(draft.field_mappings ?? [])
+              .map((p) => p.erpnext_field)
+              .filter(Boolean)}
             onChange={(patch) => setPair(idx, patch)}
             onRemove={() => removePair(idx)}
           />
@@ -2722,138 +3376,248 @@ const MappingEditor: React.FC<{
 
 // ─── One field-pair row ──────────────────────────────────────────────
 
+/**
+ * One field pair, as two dropdowns and an arrow.
+ *
+ * It used to be six controls in a twelve-column grid: a picker AND a raw
+ * text box for each side, a transform select and a direction select, all
+ * always visible. That is a lot of surface for a row whose usual answer is
+ * "this field, that field, both ways", and the raw boxes in particular
+ * invited typing a path that the picker would have offered correctly.
+ *
+ * Now the common answer is the whole row, required fields sort to the top
+ * of each list, and everything else — transforms, a combined `{a} {b}`
+ * source, a fieldname the picker does not know — lives behind the ⋯, still
+ * reachable and no longer in the way.
+ */
 const FieldPairRow: React.FC<{
   pair: FieldPair
   entity: MedusaEntity | null
+  medusaFields: DiscoveredField[]
   fields: DoctypeField[]
   annotation?: AutofillAnnotation
   mappingDirection: Direction
+  takenErpnextFields: string[]
   onChange: (patch: Partial<FieldPair>) => void
   onRemove: () => void
 }> = ({
   pair,
   entity,
+  medusaFields,
   fields,
   annotation,
   mappingDirection,
+  takenErpnextFields,
   onChange,
   onRemove,
 }) => {
-  // A `{slot}` source combines several Medusa fields, so the dropdown
-  // can't represent it — show the raw expression and hide the picker's
-  // "unset" state from confusing the operator.
   const isTemplate = /\{[^{}]+\}/.test(pair.medusa_path ?? "")
   const effectiveDirection = pair.direction ?? mappingDirection
   const conf = annotation ? CONFIDENCE_META[annotation.confidence] : null
+  // Opened when the row already uses something the simple view cannot
+  // express, so nothing is ever hidden that is actually in effect.
+  const [open, setOpen] = useState(
+    Boolean(isTemplate || pair.transform || pair.constant !== undefined),
+  )
+
+  // Discovery is the real list; the curated paths are the fallback for a
+  // store whose model could not be read.
+  const paths: DiscoveredField[] = medusaFields.length
+    ? medusaFields
+    : (entity?.paths ?? []).map((p) => ({
+        path: p.path,
+        label: p.label,
+        type: p.type,
+      }))
+  const [showAll, setShowAll] = useState(false)
+  const hiddenPaths = paths.filter((p) => p.advanced && p.path !== pair.medusa_path).length
+  const pickerGroups = groupForPicker(paths, {
+    showAll,
+    keep: pair.medusa_path,
+    ownLabel: entity?.label ?? "This record",
+  })
+
+  const requiredDocFields = fields.filter((f) => f.reqd)
+  const otherDocFields = fields.filter((f) => !f.reqd)
+
+  const arrow = (value: Direction, glyph: string, title: string) => (
+    <button
+      key={value}
+      type="button"
+      title={title}
+      disabled={isTemplate && value !== "push"}
+      onClick={() => onChange({ direction: value })}
+      className={
+        "h-7 w-8 rounded border text-sm disabled:opacity-40 " +
+        (effectiveDirection === value
+          ? "border-ui-border-interactive bg-ui-bg-base-pressed font-semibold"
+          : "border-ui-border-base bg-ui-bg-base text-ui-fg-subtle")
+      }
+    >
+      {glyph}
+    </button>
+  )
 
   return (
-    <div className="mb-2 grid grid-cols-12 gap-2 rounded border p-2 items-center">
-      <div className="col-span-3">
-        {isTemplate ? (
-          <div className="rounded border border-ui-tag-blue-border bg-ui-tag-blue-bg px-2 py-1.5 text-xs">
-            combines{" "}
-            {(pair.medusa_path.match(/\{([^{}]+)\}/g) ?? [])
-              .map((s) => s.slice(1, -1))
-              .join(" + ")}
-          </div>
-        ) : (
+    <div className="mb-2 rounded border border-ui-border-base p-2">
+      <div className="flex items-center gap-2">
+        <div className="flex-1">
+          {isTemplate ? (
+            <div className="rounded border border-ui-tag-blue-border bg-ui-tag-blue-bg px-2 py-1.5 text-xs">
+              combines{" "}
+              {(pair.medusa_path.match(/\{([^{}]+)\}/g) ?? [])
+                .map((x) => x.slice(1, -1))
+                .join(" + ")}
+            </div>
+          ) : pair.constant !== undefined ? (
+            <Input
+              placeholder="Fixed value, sent every time"
+              value={String(pair.constant ?? "")}
+              onChange={(e) => onChange({ constant: e.target.value } as any)}
+            />
+          ) : (
+            <>
+              <select
+                className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
+                value={pair.medusa_path}
+                onChange={(e) => onChange({ medusa_path: e.target.value })}
+              >
+                <option value="">Pick a store field…</option>
+                {pickerGroups.map((g) => (
+                  <optgroup key={g.label} label={g.label}>
+                    {g.fields.map((p) => (
+                      <option key={p.path} value={p.path} title={p.description ?? p.path}>
+                        {p.label} · {p.path}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              {(hiddenPaths > 0 || showAll) && (
+                <button
+                  type="button"
+                  className="mt-0.5 text-xs text-ui-fg-subtle underline"
+                  onClick={() => setShowAll((v) => !v)}
+                >
+                  {showAll ? "Hide internal fields" : `Show ${hiddenPaths} internal fields`}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="flex shrink-0 gap-1">
+          {arrow("push", "→", "Only out to ERPNext")}
+          {arrow("both", "↔", "Both ways")}
+          {arrow("pull", "←", "Only in from ERPNext")}
+        </div>
+
+        <div className="flex-1">
           <select
             className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
-            value={pair.medusa_path}
-            onChange={(e) => onChange({ medusa_path: e.target.value })}
+            value={pair.erpnext_field}
+            onChange={(e) => onChange({ erpnext_field: e.target.value })}
           >
-            <option value="">— Medusa field —</option>
-            {(entity?.paths ?? []).map((p) => (
-              <option key={p.path} value={p.path}>
-                {p.label} ({p.path})
-              </option>
-            ))}
+            <option value="">Pick a Frappe field…</option>
+            {requiredDocFields.length > 0 && (
+              <optgroup label="Required">
+                {requiredDocFields.map((f) => (
+                  <option
+                    key={f.fieldname}
+                    value={f.fieldname}
+                    disabled={
+                      takenErpnextFields.includes(f.fieldname) &&
+                      f.fieldname !== pair.erpnext_field
+                    }
+                  >
+                    {f.label} · {f.fieldname}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label="──────────">
+              {otherDocFields.map((f) => (
+                <option
+                  key={f.fieldname}
+                  value={f.fieldname}
+                  disabled={
+                    takenErpnextFields.includes(f.fieldname) &&
+                    f.fieldname !== pair.erpnext_field
+                  }
+                >
+                  {f.label} · {f.fieldname}
+                </option>
+              ))}
+            </optgroup>
           </select>
-        )}
-        <Input
-          className="mt-1"
-          placeholder="…dot-path, or {a} {b} to combine"
-          value={pair.medusa_path}
-          onChange={(e) => onChange({ medusa_path: e.target.value })}
-        />
-      </div>
-      <div className="col-span-1 text-center text-ui-fg-subtle">
-        {effectiveDirection === "push"
-          ? "→"
-          : effectiveDirection === "pull"
-            ? "←"
-            : "↔"}
-      </div>
-      <div className="col-span-3">
-        <select
-          className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
-          value={pair.erpnext_field}
-          onChange={(e) => onChange({ erpnext_field: e.target.value })}
+        </div>
+
+        <Button
+          variant="transparent"
+          size="small"
+          onClick={() => setOpen((v) => !v)}
+          title="Transform, a combined source, or a field the picker does not list"
         >
-          <option value="">— Frappe field —</option>
-          {fields.map((f) => (
-            <option key={f.fieldname} value={f.fieldname}>
-              {f.label} ({f.fieldname}, {f.fieldtype})
-              {f.reqd ? " *" : ""}
-            </option>
-          ))}
-        </select>
-        <Input
-          className="mt-1"
-          placeholder="…or custom fieldname"
-          value={pair.erpnext_field}
-          onChange={(e) => onChange({ erpnext_field: e.target.value })}
-        />
-        {(conf || annotation?.reqd) && (
-          <div className="mt-1 flex items-center gap-1">
-            {annotation?.reqd && (
-              <Badge size="2xsmall" color="red">
-                required
-              </Badge>
-            )}
-            {conf && (
-              <Badge size="2xsmall" color={conf.color} title={annotation?.why}>
-                {conf.label}
-              </Badge>
-            )}
-          </div>
-        )}
-      </div>
-      <div className="col-span-2">
-        <select
-          className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
-          value={pair.transform ?? ""}
-          onChange={(e) => onChange({ transform: e.target.value || undefined })}
-        >
-          {TRANSFORM_OPTIONS.map((t) => (
-            <option key={t.value} value={t.value}>
-              {t.label}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="col-span-2">
-        <select
-          className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm disabled:opacity-60"
-          value={effectiveDirection}
-          disabled={isTemplate}
-          title={
-            isTemplate
-              ? "A combined source can only be pushed — a joined value can't be split back into its parts."
-              : "Override the mapping's direction for this one field"
-          }
-          onChange={(e) => onChange({ direction: e.target.value as any })}
-        >
-          <option value="both">two-way</option>
-          <option value="push">→ ERPNext only</option>
-          <option value="pull">← Medusa only</option>
-        </select>
-      </div>
-      <div className="col-span-1 text-right">
+          ⋯
+        </Button>
         <Button variant="transparent" size="small" onClick={onRemove}>
           <Trash />
         </Button>
       </div>
+
+      {(conf || annotation?.reqd) && (
+        <div className="mt-1 flex items-center gap-1">
+          {annotation?.reqd && (
+            <Badge size="2xsmall" color="red">
+              required
+            </Badge>
+          )}
+          {conf && (
+            <Badge size="2xsmall" color={conf.color} title={annotation?.why}>
+              {conf.label}
+            </Badge>
+          )}
+        </div>
+      )}
+
+      {open && (
+        <div className="mt-2 grid grid-cols-3 gap-2 border-t border-ui-border-base pt-2">
+          <div>
+            <Label className="text-xs">Transform</Label>
+            <select
+              className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
+              value={pair.transform ?? ""}
+              onChange={(e) =>
+                onChange({ transform: e.target.value || undefined })
+              }
+            >
+              {TRANSFORM_OPTIONS.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <Label className="text-xs">Store path</Label>
+            <Input
+              className="font-mono text-xs"
+              placeholder="dot-path, or {a} {b} to combine"
+              value={pair.medusa_path}
+              onChange={(e) => onChange({ medusa_path: e.target.value })}
+            />
+          </div>
+          <div>
+            <Label className="text-xs">Frappe fieldname</Label>
+            <Input
+              className="font-mono text-xs"
+              placeholder="a fieldname the picker does not list"
+              value={pair.erpnext_field}
+              onChange={(e) => onChange({ erpnext_field: e.target.value })}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
