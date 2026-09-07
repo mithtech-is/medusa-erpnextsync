@@ -79,6 +79,21 @@ export type MappingFieldPair = {
     /** Fallback value when the source field is missing/empty/null.
      *  Set to a static string/number/boolean or null. */
     default?: unknown
+    /**
+     * A fixed value written to `erpnext_field` on every push, with no
+     * Medusa source at all. `medusa_path` is empty on such a pair.
+     *
+     * Not the same as `default`, which fills in for a mapped source that
+     * happened to be empty. This exists for ERPNext fields that must carry
+     * a value and have no counterpart in the store: `Item.item_group` and
+     * `Item.stock_uom` are mandatory Links with no default, and nothing in
+     * a Medusa product corresponds to either.
+     *
+     * Push-only by construction — a constant is our answer to ERPNext's
+     * requirement, not a fact about the store, so pulling it back would
+     * invent a field on the Medusa record.
+     */
+    constant?: unknown
     /** When true, a missing source value short-circuits the whole
      *  mapping (caller skips with `required_missing` reason). When
      *  false (default), the target field is simply omitted. */
@@ -116,6 +131,22 @@ export function applyMapping(args: ApplyMappingArgs): ApplyMappingResult {
             // direction — leave the target untouched. NOT counted in
             // `skipped` because that's reserved for missing-value
             // skips that ops should see.
+            continue
+        }
+
+        // A fixed value has no source to read, so it is settled before any
+        // of the path handling below — which would otherwise reject it for
+        // having an empty `medusa_path`.
+        if (pair.constant !== undefined) {
+            if (args.direction === "push" && pair.erpnext_field) {
+                payload[pair.erpnext_field] = applyTransform(
+                    pair.constant,
+                    pair.transform,
+                )
+            }
+            // Not added to `skipped` on pull: that list is what an operator
+            // reads to find pairs that moved nothing unexpectedly, and a
+            // constant never moves on pull by design.
             continue
         }
 
@@ -494,4 +525,50 @@ export function applyTransform(value: unknown, code?: string | null): unknown {
     } catch {
         return value
     }
+}
+
+/** A field the receiving side will not accept a record without. */
+export type RequiredField = { name: string; label?: string }
+
+/**
+ * Which mandatory fields on the receiving side has nobody arranged to fill?
+ *
+ * A mapping that leaves one blank still saves, still rehearses in the sense
+ * that it produces a payload, and then fails on the first real record with
+ * the far side rejecting the document — at which point the cause is a log
+ * line rather than a form. Checking it during the rehearsal puts the
+ * failure where somebody can act on it, and the rehearsal is what gates
+ * switching the mapping on.
+ *
+ * A field counts as covered when some pair writes it in the direction being
+ * checked and that pair actually has something to write: a source path, a
+ * fixed value, or a default for when the source is empty.
+ */
+export function unmetRequired(args: {
+    direction: "push" | "pull"
+    fields: MappingFieldPair[]
+    mappingDirection: MappingDirection
+    /** Mandatory fields on whichever side is receiving. */
+    required: RequiredField[]
+}): RequiredField[] {
+    const covered = new Set<string>()
+
+    for (const pair of args.fields ?? []) {
+        const effective = pair.direction ?? args.mappingDirection
+        if (!fieldFlowsInDirection(effective, args.direction)) continue
+
+        const hasSource =
+            pair.constant !== undefined ||
+            pair.default !== undefined ||
+            Boolean(
+                args.direction === "push" ? pair.medusa_path : pair.erpnext_field,
+            )
+        if (!hasSource) continue
+
+        const target =
+            args.direction === "push" ? pair.erpnext_field : pair.medusa_path
+        if (target) covered.add(target)
+    }
+
+    return (args.required ?? []).filter((f) => !covered.has(f.name))
 }

@@ -85,6 +85,10 @@ export type EntityDescriptor = {
      *  installed (vs. a Medusa core module that's always there).
      *  Drives the availability check + a UI badge ("custom module"). */
     isCustomModule: boolean
+    /** Model name singular as the module's ORM knows it ("Customer",
+     *  "Order"). `discovery.ts` looks the entity up by this name to derive
+     *  the field list; without it only the curated `paths` below exist. */
+    modelName: string
     /** Suggested Medusa event names this entity fires. The admin UI
      *  pre-fills the events checkbox group; the operator can still
      *  pick any subset / add custom names. */
@@ -112,7 +116,7 @@ type GenericEntityArgs = {
     label: string
     moduleName: string
     isCustomModule?: boolean
-    /** Model name singular (e.g. "Customer", "Wallet"). The adapter
+    /** Model name singular (e.g. "Customer", "Fulfillment"). The adapter
      *  derives the list/update method names from this — "Customer"
      *  → `listCustomers` + `updateCustomers`. Override `methodSuffix`
      *  if your service breaks the plural convention. */
@@ -128,8 +132,9 @@ type GenericEntityArgs = {
     default_key_path: string
     paths: MedusaFieldDescriptor[]
     /** Override the default upsertByKey — for entities that need
-     *  custom upsert semantics (e.g. wallets that must go through
-     *  the service's credit/debit helpers, or immutable ledgers). */
+     *  custom upsert semantics (e.g. customers, which match on email
+     *  rather than the key path, or read-only ones like currencies
+     *  that reject ERPNext-driven inserts outright). */
     upsertByKey?: EntityUpserter
     /** Optional safe soft-delete for inbound `.deleted` / `.canceled`. */
     disableByKey?: EntityDisabler
@@ -144,6 +149,7 @@ function genericEntity(args: GenericEntityArgs): EntityDescriptor {
         key: args.key,
         label: args.label,
         moduleName: args.moduleName,
+        modelName: args.modelName,
         isCustomModule: args.isCustomModule ?? false,
         events: args.events,
         paths: args.paths,
@@ -309,6 +315,7 @@ const orderEntity: EntityDescriptor = {
     key: "order",
     label: "Order",
     moduleName: Modules.ORDER,
+    modelName: "Order",
     isCustomModule: false,
     events: ["order.placed", "order.payment_captured", "order.fulfillment_created", "order.canceled"],
     default_key_path: "display_id",
@@ -410,6 +417,7 @@ const productEntity: EntityDescriptor = {
     key: "product",
     label: "Product",
     moduleName: Modules.PRODUCT,
+    modelName: "Product",
     isCustomModule: false,
     events: ["product.created", "product.updated", "product.deleted"],
     // Every Medusa product has a handle, and upsertByKey has the careful
@@ -757,45 +765,6 @@ const fulfillmentEntity = genericEntity({
     ],
 })
 
-const walletSettlementEntity = genericEntity({
-    key: "wallet_settlement",
-    label: "Wallet settlement",
-    moduleName: "wallet_settlement",
-    modelName: "WalletSettlement",
-    events: [
-        "wallet_settlement.created",
-        "wallet_settlement.updated",
-        "wallet_settlement.deleted",
-    ],
-    default_key_path: "settlement_batch_id",
-    paths: [
-        { path: "id", label: "Medusa id", type: "id" },
-        { path: "settlement_batch_id", label: "Batch id", type: "string" },
-        { path: "period_from", label: "Period from", type: "string" },
-        { path: "period_to", label: "Period to", type: "string" },
-        { path: "total_credits", label: "Total credits", type: "number" },
-        { path: "total_debits", label: "Total debits", type: "number" },
-        { path: "net_amount", label: "Net amount", type: "number" },
-        { path: "currency", label: "Currency", type: "string" },
-        { path: "status", label: "Status", type: "string" },
-    ],
-    // Safe delete: mark Cancelled by key, never destroy. Uses the selector
-    // form updateWalletSettlements({settlement_batch_id}, {...}) — NOT the
-    // array-with-id form, which trips the mikro-orm bug (see customer
-    // disableByKey).
-    disableByKey: async (container, key_field, key_value) => {
-        const m: any = container.resolve("wallet_settlement")
-        const filter: any = {}
-        filter[key_field] = key_value
-        const [existing] = (await m.listWalletSettlements(filter, { take: 1 })) || []
-        if (!existing) return { ok: true, skipped: true, action: "absent" }
-        // Selector/data form (see customer upsert note) — updating by id
-        // avoids the mikro-orm array-with-id exception-converter bug.
-        await m.updateWalletSettlements({ id: existing.id }, { status: "Cancelled" })
-        return { ok: true, id: existing.id, action: "cancelled" }
-    },
-})
-
 // ─── Registry ─────────────────────────────────────────────────────────
 
 const REGISTRY: Record<string, EntityDescriptor> = {
@@ -817,8 +786,8 @@ const REGISTRY: Record<string, EntityDescriptor> = {
     api_key: apiKeyEntity,
     payment_collection: paymentCollectionEntity,
     fulfillment: fulfillmentEntity,
-    // A wallet_settlement entity used to sit here. Both ends of it are
-    // gone — the Medusa module was a sandbox demo and the ERPNext doctype
+    // No wallet_settlement entry, deliberately. Both ends of it are gone
+    // — the Medusa module was a sandbox demo and the ERPNext doctype
     // belonged to a custom app that was uninstalled — so offering it in
     // the picker only let an operator build a mapping that could never
     // succeed. The wallet contract this connector wants is in

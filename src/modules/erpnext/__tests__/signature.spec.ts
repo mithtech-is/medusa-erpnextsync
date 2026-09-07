@@ -150,3 +150,45 @@ describe("telling an untouched default from an edited one", () => {
         expect(isUntouchedDefault({ shipped_signature: null }, mapping())).toBe(false)
     })
 })
+
+describe("fixed-value fields in the signature", () => {
+    const withConstant = (value: unknown) => ({
+        medusa_entity: "product",
+        doctype: "Item",
+        direction: "push",
+        key_medusa_field: "handle",
+        key_erpnext_field: "item_code",
+        events: ["product.created"],
+        field_mappings: [
+            { medusa_path: "handle", erpnext_field: "item_code" },
+            { medusa_path: "", erpnext_field: "item_group", constant: value },
+        ],
+    })
+
+    it("changes when a constant changes", () => {
+        // The rehearsal proved what "Products" sends. Switching it to
+        // "Raw Material" sends something nobody checked, so the pass that
+        // let the mapping be switched on must stop matching.
+        expect(signatureOf(withConstant("Products") as any)).not.toBe(
+            signatureOf(withConstant("Raw Material") as any),
+        )
+    })
+
+    it("is stable for the same constant", () => {
+        expect(signatureOf(withConstant("Products") as any)).toBe(
+            signatureOf(withConstant("Products") as any),
+        )
+    })
+
+    it("tells a constant apart from a mapped path of the same text", () => {
+        const constant = withConstant("Products")
+        const mapped = {
+            ...constant,
+            field_mappings: [
+                { medusa_path: "handle", erpnext_field: "item_code" },
+                { medusa_path: "Products", erpnext_field: "item_group" },
+            ],
+        }
+        expect(signatureOf(constant as any)).not.toBe(signatureOf(mapped as any))
+    })
+})
