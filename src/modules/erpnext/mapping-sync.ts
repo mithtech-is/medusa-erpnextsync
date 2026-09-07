@@ -1,4 +1,4 @@
-import type { MappingFieldPair } from "./mapping-engine"
+import type { MappingDirection, MappingFieldPair } from "./mapping-engine"
 
 /**
  * A mapping is one configuration that lives in two systems.
@@ -28,11 +28,21 @@ export type CanonicalMapping = {
     key_erpnext_field: string
     source_of_truth?: string
     site_id?: string | null
+    /**
+     * Why it is off — present only when it is off and the sender said
+     * why. The receiver shows it rather than a switch that went off by
+     * itself. "Mapping Required" or "Field Missing".
+     */
+    attention?: string | null
+    attention_detail?: string | null
     fields: Array<{
         medusa_path: string
         erpnext_field: string
         direction: "push" | "pull" | "both" | "none"
         transform?: string | null
+        /** A fixed value written to `erpnext_field`, with no source on the
+         *  other side. Absent on an ordinary pair. */
+        constant?: unknown
     }>
 }
 
@@ -88,10 +98,14 @@ export function toCanonical(row: Record<string, any>): CanonicalMapping {
         key_erpnext_field: row.key_erpnext_field ?? "name",
         source_of_truth: row.source_of_truth ?? "ERPNext",
         site_id: row.site_id ?? null,
+        ...(row.enabled === false && row.attention
+            ? { attention: row.attention, attention_detail: row.attention_detail ?? null }
+            : {}),
         fields: fields.map((f) => ({
             medusa_path: f.medusa_path,
             erpnext_field: f.erpnext_field,
             direction: normalizeFieldDirection(f.direction),
+            ...(f.constant !== undefined ? { constant: f.constant } : {}),
             transform: f.transform ?? null,
         })),
     }
@@ -117,11 +131,116 @@ export function fromCanonical(canon: CanonicalMapping): Record<string, any> {
         key_erpnext_field: canon.key_erpnext_field || "name",
         source_of_truth: canon.source_of_truth ?? "ERPNext",
         site_id: canon.site_id ?? null,
+        // Off over there with a reason: off here, same reason. On over
+        // there: whatever we said is moot, unless our own gate says
+        // otherwise, which applyMappingConfig settles after this.
+        ...(canon.enabled === false && canon.attention
+            ? {
+                  attention: canon.attention === "Field Missing" ? "Field Missing" : "Mapping Required",
+                  attention_detail: canon.attention_detail ?? null,
+              }
+            : canon.enabled !== false
+              ? { attention: null, attention_detail: null }
+              : {}),
         field_mappings: (canon.fields ?? []).map((f) => ({
             medusa_path: f.medusa_path,
             erpnext_field: f.erpnext_field,
             direction: normalizeFieldDirection(f.direction),
+            ...(f.constant !== undefined ? { constant: f.constant } : {}),
             transform: f.transform ?? null,
         })),
     }
+}
+
+// ── Identity: a sync is its pair ─────────────────────────────────────
+
+/** A mapping's identity is derived from what it pairs, so both systems
+ *  agree which mapping is which without asking each other. */
+export const PAIR_PREFIX = "pair:"
+
+/** `Sales Invoice (Return)` → `sales_invoice_return`, the same on both sides. */
+export function scrubDoctype(doctype: string): string {
+    return String(doctype ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+}
+
+/**
+ * One Medusa entity and one DocType, per store, is one mapping. The
+ * Frappe app derives the same string (`mapping_sync.pair_uid`), so a
+ * mapping created on either side lands on the other as itself rather
+ * than as a twin.
+ */
+export function pairUid(entity: string, doctype: string, siteId?: string | null): string {
+    const base = `${PAIR_PREFIX}${String(entity ?? "").trim().toLowerCase()}:${scrubDoctype(doctype)}`
+    return siteId ? `${base}:${siteId}` : base
+}
+
+export function pairUidOf(row: {
+    medusa_entity: string
+    doctype: string
+    site_id?: string | null
+}): string {
+    return pairUid(row.medusa_entity, row.doctype, row.site_id ?? null)
+}
+
+/** Union by Frappe field; the base wins a collision. */
+export function mergeFieldPairs(
+    base: MappingFieldPair[],
+    extra: MappingFieldPair[],
+): MappingFieldPair[] {
+    const taken = new Set((base ?? []).map((p) => p.erpnext_field))
+    return [
+        ...(base ?? []),
+        ...(extra ?? []).filter((p) => p.erpnext_field && !taken.has(p.erpnext_field)),
+    ]
+}
+
+export function mergeEvents(a?: string[] | null, b?: string[] | null): string[] {
+    const out: string[] = []
+    for (const e of [...(a ?? []), ...(b ?? [])]) {
+        if (e && !out.includes(e)) out.push(e)
+    }
+    return out
+}
+
+/**
+ * Which of several mappings for one pair survives a fold: the higher
+ * version, then the one that is switched on, then the older row. Returns
+ * the index into `rows`.
+ */
+export function pickKeeper(
+    rows: Array<{ version?: number | null; enabled?: boolean | null; created_at?: string | Date | null }>,
+): number {
+    const ts = (v: string | Date | null | undefined) => (v ? new Date(v).getTime() : Number.MAX_SAFE_INTEGER)
+    let best = 0
+    for (let i = 1; i < rows.length; i++) {
+        const a = rows[i]
+        const b = rows[best]
+        const av = Number(a.version ?? 1)
+        const bv = Number(b.version ?? 1)
+        if (av !== bv) {
+            if (av > bv) best = i
+            continue
+        }
+        if (Boolean(a.enabled) !== Boolean(b.enabled)) {
+            if (a.enabled) best = i
+            continue
+        }
+        if (ts(a.created_at) < ts(b.created_at)) best = i
+    }
+    return best
+}
+
+/** Two mappings for one pair, folded: the same way stays, a one-way sync
+ *  meeting its opposite becomes two-way. */
+export function mergeDirection(
+    a: MappingDirection | string | null | undefined,
+    b: MappingDirection | string | null | undefined,
+): MappingDirection {
+    const x = normalizeDirection(a)
+    const y = normalizeDirection(b)
+    return x === y ? x : "both"
 }

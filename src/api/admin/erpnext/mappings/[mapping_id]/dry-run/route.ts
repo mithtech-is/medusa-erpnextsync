@@ -38,7 +38,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     // brand-new mapping needs: there is usually nothing to point at yet,
     // and that is exactly when trying it matters.
     try {
-        const result = await erpnext.dryRunPush({
+        // Every direction the mapping uses: a pull-only mapping is asked
+        // the store's question, not ERPNext's.
+        const result = await erpnext.dryRun({
             mapping_id,
             record_id: body.record_id ?? null,
             container: req.scope,

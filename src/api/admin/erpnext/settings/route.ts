@@ -88,6 +88,20 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             ...parsed.data,
             updated_by_user_id: adminUserId,
         })
+        // A connection that was just made, or re-pointed, is told about
+        // every mapping: a mapping travels when it is saved, and an ERPNext
+        // connected later would otherwise never hear of the rest.
+        const reconnected =
+            "erpnext_url" in parsed.data ||
+            "webhook_secret" in parsed.data ||
+            parsed.data.enable_sync === true
+        if (reconnected && view?.enable_sync && view?.erpnext_url) {
+            try {
+                await erpnext.pushAllMappingConfigs()
+            } catch (err: any) {
+                console.warn("[erpnext] mappings not sent after settings save:", err?.message)
+            }
+        }
         res.json(view)
     } catch (err: any) {
         res.status(500).json({

@@ -67,6 +67,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         // fault — 400 so the form can show it inline instead of a
         // generic failure toast.
         const message = err?.message ?? "mapping_save_failed"
+        if (err?.code === "pair_exists") {
+            // A sync is its pair: the one that exists is the answer, so
+            // the form can offer to open it instead of failing.
+            res.status(409).json({ ok: false, message, existing_id: err.existing_id })
+            return
+        }
         res.status(/trigger_condition is invalid/.test(message) ? 400 : 500).json({
             ok: false,
             message,

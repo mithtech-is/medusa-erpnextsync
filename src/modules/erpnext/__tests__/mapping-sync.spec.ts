@@ -77,3 +77,44 @@ describe("canonical form", () => {
         expect(back.key_medusa_field).toBe("email_id")
     })
 })
+
+describe("the off state travels with its reason", () => {
+    const row = {
+        mapping_uid: "pair:probe:todo",
+        version: 2,
+        name: "Probe",
+        enabled: false,
+        medusa_entity: "probe",
+        doctype: "ToDo",
+        direction: "both",
+        key_medusa_field: "title",
+        key_erpnext_field: "name",
+        field_mappings: [],
+        attention: "Field Missing",
+        attention_detail: "ToDo lost a field",
+    }
+
+    it("is carried when the mapping is off and somebody said why", () => {
+        const canon = toCanonical(row)
+        expect(canon.attention).toBe("Field Missing")
+        expect(canon.attention_detail).toBe("ToDo lost a field")
+    })
+
+    it("is not carried for a mapping that is on", () => {
+        const canon = toCanonical({ ...row, enabled: true })
+        expect(canon).not.toHaveProperty("attention")
+    })
+
+    it("lands as the same flag, and an unknown kind lands as Mapping Required", () => {
+        const canon = toCanonical(row)
+        expect(fromCanonical(canon).attention).toBe("Field Missing")
+        expect(fromCanonical({ ...canon, attention: "Something Else" }).attention).toBe("Mapping Required")
+    })
+
+    it("clears the flag when the other side switched it on", () => {
+        const canon = toCanonical({ ...row, enabled: true })
+        const patch = fromCanonical(canon)
+        expect(patch.attention).toBeNull()
+        expect(patch.attention_detail).toBeNull()
+    })
+})

@@ -7,8 +7,9 @@ import crypto from "crypto"
 import { ErpnextSyncEvent } from "./models/sync-event"
 import { ErpnextSetting } from "./models/setting"
 import { ErpnextMapping } from "./models/mapping"
-import { applyMapping, getByPath, isTemplatePath, type MappingDirection, type MappingFieldPair } from "./mapping-engine"
+import { applyMapping, getByPath, isTemplatePath, unmetRequired, type MappingDirection, type MappingFieldPair } from "./mapping-engine"
 import { listMedusaEntities, getMedusaEntity } from "./registry"
+import { discoverEntityFields } from "./discovery-runtime"
 import { TOTAL_KEY, mergeReceipt, receiptFrom } from "./order-payments"
 import { ErpnextResetRequest } from "./models/reset-request"
 import * as resetRules from "./reset"
@@ -27,7 +28,16 @@ import {
 } from "./push-guard"
 import { evaluateTrigger, presetCondition, validateTrigger } from "./trigger"
 import * as envelope from "./envelope"
-import { decideConflict, fromCanonical, toCanonical, type CanonicalMapping } from "./mapping-sync"
+import {
+    decideConflict,
+    fromCanonical,
+    mergeDirection,
+    mergeEvents,
+    mergeFieldPairs,
+    pairUidOf,
+    toCanonical,
+    type CanonicalMapping,
+} from "./mapping-sync"
 import { entityRefOf, isWithinEchoWindow } from "./echo"
 import {
     DEFAULT_PRODUCT_POLICY,
@@ -743,12 +753,17 @@ class ErpnextModuleService extends MedusaService({
                 const detail =
                     `${doctype} no longer has: ${missing.join(", ")}. This mapping is switched ` +
                     `off until it does, or until the field map stops asking for it.`
+                // One version up and announced: off here is off there too,
+                // with the reason, rather than a switch that went off by
+                // itself on one side.
                 await this.updateErpnextMappings({
                     id: mapping.id,
                     enabled: false,
                     attention: "Field Missing",
                     attention_detail: detail,
+                    version: Number(mapping.version ?? 1) + 1,
                 } as any)
+                await this.announceMappingChange(mapping.id)
                 report.flagged.push({ name: mapping.name ?? mapping.id, missing })
             } catch (err: any) {
                 report.errors.push({ mapping: mapping?.name ?? mapping?.id, error: describeError(err) })
@@ -768,6 +783,131 @@ class ErpnextModuleService extends MedusaService({
         } catch {
             return []
         }
+    }
+
+    /**
+     * Does this signature prove the request came from the paired ERPNext?
+     *
+     * The same check `receiveInbound` makes, factored out so a read
+     * endpoint can use it without pretending to be an event. Accepts hex
+     * or base64: medusync signs hex, Frappe's own Webhook framework signs
+     * base64, and both are legitimate senders.
+     */
+    private async frappeSignatureOk(
+        rawBody: Buffer,
+        signatureHeader: string | null,
+    ): Promise<boolean> {
+        const row = await this.findSettingsRow()
+        const secret =
+            row?.frappe_to_medusa_secret ??
+            process.env.ERPNEXT_FRAPPE_TO_MEDUSA_SECRET ??
+            null
+        if (!secret) return false
+        const hmac = (enc: "base64" | "hex") =>
+            crypto.createHmac("sha256", secret).update(rawBody).digest(enc)
+        const provided = (signatureHeader ?? "").trim()
+        if (!provided) return false
+        return safeEq(provided, hmac("base64")) || safeEq(provided, hmac("hex"))
+    }
+
+    /**
+     * The field list ERPNext's mapping editor needs, over the pairing that
+     * already exists.
+     *
+     * ERPNext has never been able to see this side's fields: the only
+     * channel between the two is ERPNext POSTing signed events here, so
+     * its mapping form could offer no Medusa paths at all and every one
+     * had to be typed from memory. This is that channel used the other
+     * way — same secret, same signature, no new credential to store and
+     * nothing exposed without one.
+     *
+     * Deliberately a POST: the body is what is signed, and a GET would
+     * have to move the payload into a query string to sign anything at
+     * all.
+     */
+    async describeForFrappe(args: {
+        rawBody: Buffer
+        signatureHeader: string | null
+        /** Omit to list the entities; give one to get its fields. */
+        entity?: string | null
+        /**
+         * Give a doctype alongside the entity to get suggested pairs as
+         * well. The matcher — the synonym groups, the composite templates,
+         * the confidence ladder — lives here, and ERPNext had no way to
+         * reach it, so its editor could only match names that were already
+         * identical. Rather than grow a second, weaker matcher over there,
+         * the good one answers over the same signed channel.
+         */
+        doctype?: string | null
+        scope?: any
+    }): Promise<{
+        ok: boolean
+        status: "success" | "unauthorized" | "bad_request"
+        message?: string
+        entities?: Array<{ key: string; label: string; doctype_hint?: string }>
+        entity?: string
+        fields?: any[]
+        fields_source?: string
+        suggestions?: any[]
+        suggestion_summary?: Record<string, number>
+    }> {
+        if (!(await this.frappeSignatureOk(args.rawBody, args.signatureHeader))) {
+            return {
+                ok: false,
+                status: "unauthorized",
+                message: "signature missing or invalid",
+            }
+        }
+
+        const container = args.scope ?? (this as any).__container__
+        if (!args.entity) {
+            return {
+                ok: true,
+                status: "success",
+                entities: listMedusaEntities(container).map((e) => ({
+                    key: e.key,
+                    label: e.label,
+                })),
+            }
+        }
+
+        const described = await discoverEntityFields(container, args.entity)
+        if (!described) {
+            return {
+                ok: false,
+                status: "bad_request",
+                message: `no Medusa entity named '${args.entity}'`,
+            }
+        }
+        const out: any = {
+            ok: true,
+            status: "success",
+            entity: described.entity,
+            fields: described.fields,
+            fields_source: described.fields_source,
+        }
+
+        if (args.doctype) {
+            // Best-effort: a matcher that cannot reach Frappe for the
+            // doctype's meta must not take the field list down with it —
+            // the picker is useful on its own, the suggestions are a bonus.
+            try {
+                const auto = await this.autofillMapping({
+                    entity: args.entity,
+                    doctype: args.doctype,
+                    mode: "smart",
+                    container: args.scope,
+                })
+                if ((auto as any).ok) {
+                    out.suggestions = (auto as any).annotations ?? []
+                    out.suggestion_summary = (auto as any).summary ?? {}
+                }
+            } catch {
+                /* leave suggestions absent */
+            }
+        }
+
+        return out
     }
 
     async receiveInbound(args: {
@@ -1057,7 +1197,7 @@ class ErpnextModuleService extends MedusaService({
     private async dispatchMappingConfig(env: envelope.ParsedEnvelope): Promise<any> {
         const canon = (env.mapping ?? {}) as CanonicalMapping
         if (env.event.endsWith(".deleted")) {
-            return { via: "mapping-config", ...(await this.disableMappingConfig(canon.uid)) }
+            return { via: "mapping-config", ...(await this.removeMappingConfig(canon.uid)) }
         }
         return { via: "mapping-config", ...(await this.applyMappingConfig(canon)) }
     }
@@ -2330,15 +2470,29 @@ class ErpnextModuleService extends MedusaService({
     /** Apply a mapping that arrived from ERPNext. Never throws: a refused
      *  mapping is a normal outcome the log records, not a failed request. */
     async applyMappingConfig(canon: CanonicalMapping): Promise<{
-        action: "created" | "updated" | "skipped"
+        action: "created" | "updated" | "skipped" | "declined"
         reason?: string
         id?: string
     }> {
         if (!canon?.uid) return { action: "skipped", reason: "missing_uid" }
-        const [existing] = await this.listErpnextMappings(
-            { mapping_uid: canon.uid },
-            { take: 1 },
-        )
+        // A sync is its pair. The uid on the wire finds the copy ERPNext
+        // meant; failing that, the pair does, so a mapping ERPNext created
+        // under an identity of its own lands on the one here for the same
+        // pair rather than beside it. What is stored is the pair's own.
+        const pair = pairUidOf({
+            medusa_entity: canon.medusa_entity,
+            doctype: canon.doctype,
+            site_id: canon.site_id ?? null,
+        })
+        let [existing] = await this.listErpnextMappings({ mapping_uid: canon.uid }, { take: 1 })
+        if (existing && pairUidOf(existing as any) !== pair) existing = undefined as any
+        if (!existing) {
+            existing = await this.findMappingByPair(
+                canon.medusa_entity,
+                canon.doctype,
+                canon.site_id ?? null,
+            )
+        }
         const decision = decideConflict(
             existing ? Number(existing.version ?? 1) : null,
             Number(canon.version ?? 1),
@@ -2360,9 +2514,11 @@ class ErpnextModuleService extends MedusaService({
             // papered over by making the version rule consider `enabled`.
             const gatedPatch: any = { ...patch }
             const wouldEnable = gatedPatch.enabled === true && !existing.enabled
+            let declined = false
             if (wouldEnable) {
                 const verdict = mayEnable(existing as any, { ...(existing as any), ...gatedPatch })
                 if (verdict.ok === false) {
+                    declined = true
                     gatedPatch.enabled = false
                     gatedPatch.attention = "Mapping Required"
                     gatedPatch.attention_detail =
@@ -2371,13 +2527,27 @@ class ErpnextModuleService extends MedusaService({
                 }
             }
             await this.updateErpnextMappings([
-                { id: existing.id, ...gatedPatch, last_synced_at: new Date() },
+                {
+                    id: existing.id,
+                    ...gatedPatch,
+                    mapping_uid: pair,
+                    last_synced_at: new Date(),
+                    // A declined enable is answered one version up, so the
+                    // side that asked turns it off too rather than believing
+                    // it runs: a mapping runs only when both sides have it on.
+                    ...(declined ? { version: Number(canon.version ?? 1) + 1 } : {}),
+                },
             ])
+            if (declined) {
+                await this.announceMappingChange(existing.id)
+                return { action: "declined", reason: "not_rehearsed_here", id: existing.id }
+            }
             return { action: "updated", id: existing.id }
         }
         const [created] = await this.createErpnextMappings([
             {
                 ...patch,
+                mapping_uid: pair,
                 // A mapping we have never seen arrives switched OFF, whatever
                 // the sender says. First contact between two systems that each
                 // already had mappings would otherwise turn on a rule nobody
@@ -2395,15 +2565,19 @@ class ErpnextModuleService extends MedusaService({
         return { action: "created", id: created?.id, reason: "created_disabled" }
     }
 
-    /** A mapping deleted on the other side is disabled here, not removed:
-     *  records already correlated by it must stay traceable. */
-    async disableMappingConfig(uid: string): Promise<{ action: string; id?: string }> {
+    /**
+     * A mapping deleted on the other side is removed here too. One
+     * configuration living in two systems should not survive in one of
+     * them — a disabled twin is how a single sync came to look like two.
+     * What it correlated is not lost: the link fields on the synced
+     * records and the sync events both outlive it.
+     */
+    async removeMappingConfig(uid: string): Promise<{ action: string; id?: string }> {
         if (!uid) return { action: "skipped" }
         const [existing] = await this.listErpnextMappings({ mapping_uid: uid }, { take: 1 })
-        if (!existing) return { action: "skipped" }
-        if (existing.enabled === false) return { action: "skipped", id: existing.id }
-        await this.updateErpnextMappings([{ id: existing.id, enabled: false }])
-        return { action: "disabled", id: existing.id }
+        if (!existing) return { action: "skipped", reason: "already_absent" } as any
+        await this.deleteErpnextMappings([existing.id])
+        return { action: "deleted", id: existing.id }
     }
 
     /** Tell ERPNext about a mapping edited here. */
@@ -3167,6 +3341,93 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /**
+     * The values one ERPNext field will actually accept.
+     *
+     * A fixed-value pair usually targets a Select or a Link, and the valid
+     * answers are that deployment's own data — its Item Groups, its UOMs,
+     * its Customer Types if somebody has edited the list. Shipping a guess
+     * ("Products", "Nos") would be one client's setup baked into an
+     * application every client installs, and it fails Link validation
+     * anywhere it does not hold.
+     *
+     * Select  → the options on the field itself.
+     * Link    → the records that exist in the linked DocType right now.
+     * Neither → no options, and the UI asks for free text.
+     */
+    async fieldOptions(
+        doctype: string,
+        fieldname: string,
+    ): Promise<{
+        ok: boolean
+        fieldtype?: string
+        /** Empty when the field takes free text. */
+        options?: string[]
+        /** Set when a Link has more records than were fetched, so the UI
+         *  can say the list is a sample rather than the whole truth. */
+        truncated?: boolean
+        message?: string
+    }> {
+        const meta = await this.getDoctypeMeta(doctype)
+        if (!meta.ok) return { ok: false, message: meta.message }
+
+        const field = (meta.fields ?? []).find((f) => f.fieldname === fieldname)
+        if (!field) {
+            return { ok: false, message: `'${fieldname}' is not a field on ${doctype}` }
+        }
+
+        if (field.fieldtype === "Select") {
+            const options = String(field.options ?? "")
+                .split("\n")
+                .map((o) => o.trim())
+                .filter(Boolean)
+            return { ok: true, fieldtype: field.fieldtype, options }
+        }
+
+        if (field.fieldtype !== "Link" || !field.options) {
+            return { ok: true, fieldtype: field.fieldtype, options: [] }
+        }
+
+        const cfg = await this.getActiveConfig()
+        const apiCreds = await this.frappeApiCreds()
+        if (!cfg.erpnext_url || !apiCreds) {
+            return { ok: false, message: "erpnext_url / api credentials not configured" }
+        }
+
+        const LIMIT = 200
+        try {
+            const res = await fetch(
+                `${cfg.erpnext_url}/api/resource/${encodeURIComponent(field.options)}?` +
+                    new URLSearchParams({
+                        fields: JSON.stringify(["name"]),
+                        limit_page_length: String(LIMIT + 1),
+                        order_by: "name asc",
+                    }).toString(),
+                {
+                    method: "GET",
+                    headers: { Authorization: `token ${apiCreds}` },
+                    signal: AbortSignal.timeout(cfg.request_timeout_ms),
+                },
+            )
+            const body: any = await res.json()
+            if (!res.ok) {
+                return {
+                    ok: false,
+                    message: body?.message ?? `could not read ${field.options}`,
+                }
+            }
+            const names = (body?.data ?? []).map((r: any) => String(r.name))
+            return {
+                ok: true,
+                fieldtype: field.fieldtype,
+                options: names.slice(0, LIMIT),
+                truncated: names.length > LIMIT,
+            }
+        } catch (err: any) {
+            return { ok: false, message: describeError(err).slice(0, 300) }
+        }
+    }
+
+    /**
      * Outbound gate, shared by every push path.
      *
      * Reads the allowlist fresh from the settings row rather than
@@ -3487,6 +3748,13 @@ class ErpnextModuleService extends MedusaService({
          * 5xx and a retry loop.
          */
         from_erpnext?: boolean
+        /**
+         * A sync is its pair. When a mapping for this entity and doctype
+         * already exists, fold the new field pairs into it instead of
+         * refusing — what the guided setup wants, since the operator is
+         * describing the same sync, not asking for a second one.
+         */
+        merge_into_pair?: boolean
     }) {
         const validated = validateFieldMappings(input.field_mappings ?? [])
 
@@ -3564,27 +3832,123 @@ class ErpnextModuleService extends MedusaService({
                   }
                 : {}),
         }
+        // A sync is its pair: one Medusa entity and one DocType, per store,
+        // is one mapping, and its identity is derived from that pair so the
+        // ERPNext side arrives at the same one without asking.
+        const pair = pairUidOf({
+            medusa_entity: patch.medusa_entity,
+            doctype: patch.doctype,
+            site_id: existingRow?.site_id ?? null,
+        })
         if (input.id) {
             const [current] = await this.listErpnextMappings({ id: input.id }, { take: 1 })
+            if (current && pairUidOf(current as any) !== pair) {
+                throw new Error(
+                    "A sync is identified by what it pairs. To keep a different doctype or " +
+                        "entity in step, add a new sync instead of changing this one.",
+                )
+            }
             // The same mapping exists on the ERPNext side. Bumping the
             // version here is what lets the two copies be ordered rather
-            // than silently overwriting each other; the uid pairs them.
+            // than silently overwriting each other; the pair uid pairs them.
             const [updated] = await this.updateErpnextMappings([
                 {
                     id: input.id,
                     ...patch,
-                    mapping_uid: current?.mapping_uid || envelope.newCorrelationId(),
+                    mapping_uid: pair,
                     version: Number(current?.version ?? 1) + 1,
+                    // Switched on here, past the gate: whatever was waiting
+                    // on a person is done with. A save that sets attention
+                    // itself (the gate's refusal above) wins by spreading last.
+                    ...(patch.enabled === true && (input as any).attention === undefined
+                        ? { attention: null, attention_detail: null }
+                        : {}),
                 },
             ])
             await this.announceMappingChange(updated?.id)
             return updated
         }
+        const twin = await this.findMappingByPair(patch.medusa_entity, patch.doctype, null)
+        if (twin) {
+            if (!input.merge_into_pair) {
+                const err: any = new Error(
+                    `"${twin.name}" already keeps ${patch.doctype} in step with ${patch.medusa_entity}. ` +
+                        "Edit that sync rather than adding a second one for the same pair.",
+                )
+                err.code = "pair_exists"
+                err.existing_id = twin.id
+                throw err
+            }
+            // Fold: the existing pairs win a collision, the new ones are
+            // appended, both sides' events fire, and a one-way sync meeting
+            // its opposite becomes two-way. Name and switch stay as they are.
+            const [folded] = await this.updateErpnextMappings([
+                {
+                    id: twin.id,
+                    ...patch,
+                    name: twin.name,
+                    enabled: twin.enabled,
+                    direction: mergeDirection(twin.direction, patch.direction),
+                    field_mappings: mergeFieldPairs(
+                        (twin.field_mappings as MappingFieldPair[]) ?? [],
+                        patch.field_mappings,
+                    ),
+                    events: mergeEvents(twin.events as any, patch.events),
+                    mapping_uid: pair,
+                    version: Number(twin.version ?? 1) + 1,
+                },
+            ])
+            await this.announceMappingChange(folded?.id)
+            return { ...folded, merged_into: twin.id }
+        }
         const [created] = await this.createErpnextMappings([
-            { ...patch, mapping_uid: envelope.newCorrelationId(), version: 1 },
+            { ...patch, mapping_uid: pair, version: 1 },
         ])
         await this.announceMappingChange(created?.id)
         return created
+    }
+
+    /**
+     * The mapping that keeps this pair in step, if there is one — by its
+     * pair identity first, then by the pair itself for a row that still
+     * carries an identity from before the rule.
+     */
+    async findMappingByPair(
+        medusa_entity: string,
+        doctype: string,
+        site_id: string | null,
+    ): Promise<any | null> {
+        const pair = pairUidOf({ medusa_entity, doctype, site_id })
+        const [byUid] = await this.listErpnextMappings({ mapping_uid: pair } as any, { take: 1 })
+        if (byUid) return byUid
+        const candidates = await this.listErpnextMappings(
+            { medusa_entity, doctype } as any,
+            { take: 20 },
+        )
+        return (candidates as any[]).find((r) => pairUidOf(r) === pair) ?? null
+    }
+
+    /**
+     * Send every mapping to ERPNext.
+     *
+     * A mapping travels when it is saved, and nothing else ever moved the
+     * list: an ERPNext connected later, or one that lost a mapping, never
+     * heard of the rest. This is that missing step — idempotent, since the
+     * receiver keeps its newer copies — and what "sync now" does.
+     */
+    async pushAllMappingConfigs(): Promise<{
+        pushed: number
+        failed: Array<{ id: string; name: string; error: string }>
+    }> {
+        const rows = await this.listErpnextMappings({}, { take: 1000 })
+        let pushed = 0
+        const failed: Array<{ id: string; name: string; error: string }> = []
+        for (const m of rows as any[]) {
+            const result: any = await this.pushMappingConfig(m.id)
+            if (result?.ok && result.status !== "skipped") pushed += 1
+            else if (!result?.ok) failed.push({ id: m.id, name: m.name, error: String(result?.error ?? result?.status ?? "failed") })
+        }
+        return { pushed, failed }
     }
 
     /**
@@ -3682,9 +4046,10 @@ class ErpnextModuleService extends MedusaService({
     }
 
     async deleteMapping(id: string) {
-        // Announce first: the push reads the row to learn its uid, and a
-        // deleted mapping on one side disables rather than destroys on the
-        // other, so records already correlated by it stay traceable.
+        // Announce first: the push reads the row to learn its uid. The other
+        // side removes its copy too — one configuration should not survive
+        // in one of two systems — and what the mapping correlated stays on
+        // the synced records and in the event log.
         await this.announceMappingChange(id, true)
         await this.deleteErpnextMappings([id])
         return { ok: true, id }
@@ -3706,12 +4071,12 @@ class ErpnextModuleService extends MedusaService({
         errors: { name: string; message: string }[]
     }> {
         const { CANONICAL_MAPPINGS } = await import("./canonical-mappings.js")
-        const existing = await this.listErpnextMappings(
-            { name: CANONICAL_MAPPINGS.map((m) => m.name) },
-            { take: 1000 },
-        )
-        const existingByName = new Map<string, any>(
-            existing.map((r: any) => [r.name, r]),
+        // A sync is its pair, so a shipped default that already exists under
+        // any name — including the one ERPNext ships for the same pair — is
+        // updated rather than seeded beside it.
+        const existing = await this.listErpnextMappings({}, { take: 1000 })
+        const existingByPair = new Map<string, any>(
+            (existing as any[]).map((r) => [pairUidOf(r), r]),
         )
         const seeded: string[] = []
         const updated: string[] = []
@@ -3723,10 +4088,12 @@ class ErpnextModuleService extends MedusaService({
                 // actually propagate. Previously skipped existing
                 // rows — which left manually-empty mappings stuck
                 // forever after the first save.
-                const existingRow = existingByName.get(m.name)
+                const existingRow = existingByPair.get(
+                    pairUidOf({ medusa_entity: m.medusa_entity, doctype: m.doctype, site_id: null }),
+                )
                 await this.saveMapping({
                     id: existingRow?.id,
-                    name: m.name,
+                    name: existingRow?.name ?? m.name,
                     description: m.description,
                     enabled: m.enabled,
                     medusa_entity: m.medusa_entity,
@@ -3904,9 +4271,19 @@ class ErpnextModuleService extends MedusaService({
         const direction =
             args.direction ?? canonicalEntry?.direction ?? "both"
 
+        // Match against every field the entity really has, not only the
+        // curated ones. The curated list covers a fraction of most models
+        // — a Frappe column whose counterpart was never listed could not be
+        // suggested at all, however obvious the pairing. Falls back to the
+        // curated list when there is no container to introspect with.
+        const discovered = args.container
+            ? await discoverEntityFields(args.container, entityKey)
+            : null
+        const entityPaths = discovered?.fields ?? descriptor.paths
+
         const result = buildAutofill({
             doctypeFields: (meta.fields ?? []) as DoctypeFieldMeta[],
-            entityPaths: descriptor.paths,
+            entityPaths,
             direction,
             canonical: canonicalByField,
             mode: args.mode ?? "smart",
@@ -4292,6 +4669,30 @@ class ErpnextModuleService extends MedusaService({
                     "nothing to correlate on.",
             )
         }
+
+        // A mandatory ERPNext field nobody fills does not break here — it
+        // breaks on the first real record, with Frappe rejecting the
+        // document and the reason buried in a log row. The rehearsal is
+        // where that is still cheap to fix, and it is what gates enabling.
+        const targetMeta = await this.getDoctypeMeta(mapping.doctype)
+        if (targetMeta.ok) {
+            const unmet = unmetRequired({
+                direction: "push",
+                fields: mapping.field_mappings as MappingFieldPair[],
+                mappingDirection: mapping.direction as MappingDirection,
+                required: (targetMeta.fields ?? [])
+                    // A field Frappe derives or defaults is not ours to send.
+                    .filter((f) => f.reqd && !f.fetch_from && !f.default)
+                    .map((f) => ({ name: f.fieldname, label: f.label })),
+            })
+            if (unmet.length) {
+                warnings.push(
+                    `${mapping.doctype} will not accept a record without ` +
+                        unmet.map((f) => `'${f.label || f.name}'`).join(", ") +
+                        ". Map each one, or give it a fixed value.",
+                )
+            }
+        }
         await this.recordMappingTest(args.mapping_id, warnings.length === 0, {
             payload: result.payload,
             key_value: keyValue,
@@ -4303,6 +4704,117 @@ class ErpnextModuleService extends MedusaService({
             payload: result.payload,
             key_value: keyValue,
             skipped_fields: result.skippedFields,
+            warnings,
+            rehearsal_passed: warnings.length === 0,
+        }
+    }
+
+    /**
+     * Rehearse the pull half: a Frappe-shaped sample through the mapping,
+     * and whether every field the store cannot create this record without
+     * is covered by a pair that flows this way.
+     *
+     * The push rehearsal has asked ERPNext's question since the gate
+     * existed. A mapping that only pulls was being refused for ERPNext
+     * fields it never writes, and never asked the store's.
+     */
+    async dryRunPull(args: { mapping_id: string; container: any }): Promise<{
+        ok: boolean
+        payload?: Record<string, any>
+        key_value?: string
+        skipped_fields?: string[]
+        message?: string
+        warnings?: string[]
+        rehearsal_passed?: boolean
+    }> {
+        const mapping = await this.getMapping(args.mapping_id)
+        if (!mapping) return { ok: false, message: "mapping not found" }
+        const entity = getMedusaEntity(mapping.medusa_entity)
+        if (!entity) {
+            return { ok: false, message: `medusa entity '${mapping.medusa_entity}' has no registry entry` }
+        }
+        const fields = mapping.field_mappings as MappingFieldPair[]
+        const mappingDirection = mapping.direction as MappingDirection
+
+        // A Frappe row as the pull cron reads it: every field present, keyed
+        // by fieldname. Enough to prove the translation and the coverage.
+        const meta = await this.getDoctypeMeta(mapping.doctype)
+        const sample: Record<string, any> = {}
+        for (const f of meta.ok ? (meta.fields ?? []) : []) sample[f.fieldname] = `sample ${f.fieldname}`
+        for (const p of fields ?? []) {
+            if (p.erpnext_field && !(p.erpnext_field in sample)) sample[p.erpnext_field] = `sample ${p.erpnext_field}`
+        }
+        sample.name = sample.name ?? "sample-key"
+        if (mapping.key_erpnext_field && sample[mapping.key_erpnext_field] === undefined) {
+            sample[mapping.key_erpnext_field] = "sample-key"
+        }
+
+        const result = applyMapping({ direction: "pull", fields, mappingDirection, source: sample })
+        if (result.ok === false) {
+            return { ok: false, message: `${result.reason} (field=${result.field ?? "?"})` }
+        }
+        const keyValue = String(
+            (result.payload as any)?.[mapping.key_medusa_field] ?? sample[mapping.key_erpnext_field] ?? "",
+        )
+        const warnings: string[] = []
+        if (!Object.keys(result.payload ?? {}).length) {
+            warnings.push("The mapping carries nothing into the store. Check the Frappe fieldnames against the doctype.")
+        }
+        if (!keyValue) {
+            warnings.push(`No value for the key '${mapping.key_erpnext_field}', so nothing could be matched in the store.`)
+        }
+        // What the store will not create this record without. Discovery says
+        // which; the curated fallback has no opinion, and that is reported
+        // rather than passed in silence.
+        const described = await discoverEntityFields(args.container, mapping.medusa_entity)
+        const required = (described.fields ?? [])
+            .filter((f: any) => f.required)
+            .map((f: any) => ({ name: f.path, label: f.label }))
+        if (required.length) {
+            const unmet = unmetRequired({ direction: "pull", fields, mappingDirection, required })
+            if (unmet.length) {
+                warnings.push(
+                    `The store will not create a ${entity.label ?? mapping.medusa_entity} without ` +
+                        unmet.map((f) => `'${f.label || f.name}'`).join(", ") +
+                        ". Map each one from a Frappe field.",
+                )
+            }
+        }
+        await this.recordMappingTest(args.mapping_id, warnings.length === 0, {
+            direction: "pull",
+            payload: result.payload,
+            key_value: keyValue,
+            skipped_fields: result.skippedFields,
+            warnings,
+        })
+        return {
+            ok: true,
+            payload: result.payload,
+            key_value: keyValue,
+            skipped_fields: result.skippedFields,
+            warnings,
+            rehearsal_passed: warnings.length === 0,
+        }
+    }
+
+    /** Rehearse every direction this mapping actually uses. */
+    async dryRun(args: { mapping_id: string; record_id?: string | null; container: any }): Promise<any> {
+        const mapping = await this.getMapping(args.mapping_id)
+        if (!mapping) return { ok: false, message: "mapping not found" }
+        if (mapping.direction === "pull") return this.dryRunPull(args)
+        if (mapping.direction === "push") return this.dryRunPush(args)
+        const push = await this.dryRunPush(args)
+        if (!push.ok) return push
+        const pull = await this.dryRunPull(args)
+        if (!pull.ok) return pull
+        const warnings = [...(push.warnings ?? []), ...(pull.warnings ?? [])]
+        await this.recordMappingTest(args.mapping_id, warnings.length === 0, { push, pull, warnings })
+        return {
+            ok: true,
+            payload: push.payload,
+            pull_payload: pull.payload,
+            key_value: push.key_value,
+            skipped_fields: [...(push.skipped_fields ?? []), ...(pull.skipped_fields ?? [])],
             warnings,
             rehearsal_passed: warnings.length === 0,
         }
@@ -4956,10 +5468,17 @@ function validateFieldMappings(raw: any[]): MappingFieldPair[] {
         if (!r || typeof r !== "object") continue
         const medusa_path = String(r.medusa_path ?? "").trim()
         const erpnext_field = String(r.erpnext_field ?? "").trim()
-        if (!medusa_path || !erpnext_field) continue
+        if (!erpnext_field) continue
+        // A fixed-value pair carries no Medusa path by design; every other
+        // pair still needs one, or it would silently write nothing.
+        const hasConstant = r.constant !== undefined
+        if (!medusa_path && !hasConstant) continue
         const pair: MappingFieldPair = {
             medusa_path,
             erpnext_field,
+        }
+        if (hasConstant) {
+            pair.constant = r.constant
         }
         if (r.direction && ["push", "pull", "both"].includes(r.direction)) {
             pair.direction = r.direction
