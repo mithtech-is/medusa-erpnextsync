@@ -19,6 +19,14 @@ import crypto from "crypto"
  * v1 keys are still emitted (`id` alongside `event_id`, `data` for the
  * event shape) so a receiver that has not been upgraded keeps working
  * through a rolling deploy.
+ *
+ * Key convention: a message is translated once, and `kind` says by whom.
+ * An "event" body (`data`) is keyed by the SENDER's own fieldnames and the
+ * receiver applies the field map — which is why the inbound webhook and
+ * the pull cron share one `applyMapping` call. A "mapped" body (`payload`)
+ * is keyed by the RECEIVER's fieldnames and is applied as it is. A sender
+ * that renames an event's keys makes the receiver's lookup miss, and the
+ * field is dropped in silence.
  */
 
 export const ENVELOPE_VERSION = 2
