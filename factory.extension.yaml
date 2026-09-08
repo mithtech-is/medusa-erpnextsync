@@ -1,0 +1,28 @@
+schemaVersion: 1
+id: erpnext
+kind: plugin
+title: ERPNext two-way sync
+summary: Products, customers, orders and stock synchronised with an ERPNext site; ERPNext is source of truth for stock and price.
+provides: [erp-sync, erp-catalogue-pull, erp-order-push, erp-customer-push]
+requires: []
+optional: []
+conflictsWith: []
+exclusiveGroup: erp
+medusaRange: "^2.19.0"
+installPhase: integration
+config:
+  target: plugins
+  options: {}
+env:
+  - { key: ERPNEXT_URL, hint: "fallback; primary config is the admin ERPNext settings page" }
+  - { key: ERPNEXT_WEBHOOK_SECRET, hint: "Medusa -> Frappe HMAC" }
+  - { key: ERPNEXT_FRAPPE_TO_MEDUSA_SECRET, hint: "Frappe -> Medusa HMAC" }
+  - { key: ERPNEXT_API_KEY }
+  - { key: ERPNEXT_API_SECRET }
+  - { key: ERPNEXT_RECEIVE_METHOD }
+  - { key: ERPNEXT_SITE_ID }
+  - { key: INVENTORY_LOCATION_ID }
+storefront: none
+verify:
+  - { http: "GET /admin/erpnext/settings", expect: 401 }
+brokenExports: []

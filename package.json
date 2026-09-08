@@ -1,5 +1,5 @@
 {
-  "name": "medusa-plugin-erpnext",
+  "name": "@mithtech-medusa/plugin-erpnext",
   "version": "0.1.0",
   "description": "ERPNext (Frappe) bidirectional sync as a Medusa v2 plugin. Push customers / orders / products / custom events via the live event bus + admin replay; pull a read-only Frappe REST proxy for previewing remote doctypes. Mapping engine with configurable doctype field mappings, triggers, and an admin console. Frappe endpoint is configurable per deployment.",
   "license": "UNLICENSED",
@@ -15,7 +15,8 @@
   "files": [
     ".medusa/server",
     "package.json",
-    "README.md"
+    "README.md",
+    "factory.extension.yaml"
   ],
   "scripts": {
     "build": "medusa plugin:build",
@@ -27,10 +28,8 @@
   },
   "exports": {
     "./package.json": "./package.json",
-    "./workflows": "./.medusa/server/src/workflows/index.js",
     "./.medusa/server/src/modules/*": "./.medusa/server/src/modules/*/index.js",
     "./modules/*": "./.medusa/server/src/modules/*/index.js",
-    "./providers/*": "./.medusa/server/src/providers/*/index.js",
     "./admin": {
       "import": "./.medusa/server/src/admin/index.mjs",
       "require": "./.medusa/server/src/admin/index.js",
@@ -69,5 +68,8 @@
     "react": ">=18",
     "react-dom": ">=18",
     "typescript": ">=5"
+  },
+  "publishConfig": {
+    "registry": "https://npm.po5.in/"
   }
 }
