@@ -285,6 +285,7 @@ async function recoverMissingCustomersOnFrappe(
                 event: "customer.updated",
                 event_id: `reconciliation:customer:${c.id}:${Date.now()}`,
                 record: hydrated,
+                container,
             })
             if (r?.ok && r.status === "success") {
                 repushed += 1

@@ -65,6 +65,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     const result = await erpnext.bulkPush({
+        container: req.scope,
         event: "order.synced",
         entity: "order",
         items: rows.map((o) => ({ id: o.id, payload: o })),

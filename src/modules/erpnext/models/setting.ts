@@ -196,6 +196,37 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      */
     log_retention_days: model.number().default(180),
 
+    // ── Orders and invoices (sent by ERPNext, see medusync.invoicing) ─
+    /** "Sales Order" | "Sales Invoice" | "Sales Order and Sales Invoice". */
+    order_document: model.text().nullable(),
+
+    /**
+     * "erpnext": ERPNext numbers every invoice and sends it here.
+     * "store": this store numbers its own, as `store_invoice_prefix` and a
+     * running number, and ERPNext sends nothing back.
+     */
+    invoice_numbering: model.text().default("erpnext"),
+    store_invoice_prefix: model.text().nullable(),
+    /** The next running number. Advanced in one UPDATE so two orders
+     *  placed together never share one. */
+    store_invoice_next: model.number().default(1),
+    send_invoice_to_store: model.boolean().default(false),
+    record_payments: model.boolean().default(false),
+
+    // ── Where invoice PDFs are kept (this store's choice) ────────────
+    /** "local": a private directory, never under the public static dir.
+     *  "s3": an S3-compatible bucket, read only through the store route. */
+    invoice_storage: model.text().default("local"),
+    invoice_local_dir: model.text().nullable(),
+    s3_bucket: model.text().nullable(),
+    s3_region: model.text().nullable(),
+    /** For S3-compatible services (R2, MinIO, Hetzner). Empty for AWS. */
+    s3_endpoint: model.text().nullable(),
+    s3_prefix: model.text().nullable(),
+    s3_force_path_style: model.boolean().default(false),
+    s3_access_key_id: model.text().nullable(),
+    s3_secret_access_key: model.text().nullable(),
+
     /** Free-text ops notes — escalation contacts, known quirks, etc. */
     notes: model.text().nullable(),
 

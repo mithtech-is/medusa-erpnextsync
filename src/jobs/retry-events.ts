@@ -113,7 +113,7 @@ export default async function retryEvents(container: MedusaContainer) {
             } else {
                 // Tell forwardEvent this is the knock, so the breaker
                 // lets it past itself.
-                const result = await erpnext.retryEvent(row.event_id, undefined, {
+                const result = await erpnext.retryEvent(row.event_id, container, {
                     probe: !breakerOpen,
                 })
                 if (result?.ok) recovered += 1

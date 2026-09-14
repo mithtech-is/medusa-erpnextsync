@@ -21,7 +21,7 @@ import { Migration } from "@mikro-orm/migrations"
  * `entity_ref` is indexed together with the timestamp because the lookup
  * runs on every outbound push and only ever asks for the recent past.
  */
-export class Migration20260904120000 extends Migration {
+export class Migration20260904120001 extends Migration {
     async up(): Promise<void> {
         this.addSql(`
             ALTER TABLE "erpnext_setting"

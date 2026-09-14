@@ -12,6 +12,9 @@ import { listMedusaEntities, getMedusaEntity } from "./registry"
 import { discoverEntityFields } from "./discovery-runtime"
 import { TOTAL_KEY, mergeReceipt, receiptFrom } from "./order-payments"
 import { ErpnextResetRequest } from "./models/reset-request"
+import { ErpnextInvoice } from "./models/invoice"
+import { formatInvoiceNumber, receivesErpInvoices, storeNumbers } from "./invoice-number"
+import { invoiceKey, storageFor } from "./invoice-storage"
 import * as resetRules from "./reset"
 import * as breakerRules from "./breaker"
 import { mayEnable, signatureOf } from "./signature"
@@ -309,6 +312,23 @@ type ForwardResult =
 
 type SaveSettingsInput = {
     enable_sync?: boolean
+    /** Sent by ERPNext (medusync.invoicing.announce); see models/setting.ts. */
+    order_document?: string | null
+    invoice_numbering?: "erpnext" | "store" | null
+    store_invoice_prefix?: string | null
+    send_invoice_to_store?: boolean
+    record_payments?: boolean
+    /** This store's own choice of where invoice PDFs are kept. */
+    invoice_storage?: "local" | "s3" | null
+    invoice_local_dir?: string | null
+    s3_bucket?: string | null
+    s3_region?: string | null
+    s3_endpoint?: string | null
+    s3_prefix?: string | null
+    s3_force_path_style?: boolean
+    /** Secrets: empty string = unchanged, null = clear. */
+    s3_access_key_id?: string | null
+    s3_secret_access_key?: string | null
     /** This instance's name on the wire. Must match the Site ID of the
      *  matching Medusync Site record on the ERPNext side. */
     site_id?: string | null
@@ -387,6 +407,7 @@ class ErpnextModuleService extends MedusaService({
     ErpnextSetting,
     ErpnextMapping,
     ErpnextResetRequest,
+    ErpnextInvoice,
 }) {
     // ─────────────────────────────────────────────────────────────────
     // Sync-event surface
@@ -1178,14 +1199,21 @@ class ErpnextModuleService extends MedusaService({
      * stays this side's decision.
      */
     async applyRemoteSettings(data: any): Promise<any> {
+        const patch: SaveSettingsInput = {}
         const doctype = String(data?.products_doctype ?? "").trim()
-        if (!doctype) return { skipped: "nothing-to-apply" }
-        const row = await this.findSettingsRow()
-        if (row?.products_doctype === doctype) {
-            return { via: "settings", products_doctype: doctype, action: "unchanged" }
+        if (doctype) patch.products_doctype = doctype
+        // ERPNext's choices about orders and invoices. Storage stays this
+        // store's own decision and is never taken from the wire.
+        if (data && "invoice_numbering" in data) {
+            patch.order_document = data.order_document ?? null
+            patch.invoice_numbering = data.invoice_numbering === "store" ? "store" : "erpnext"
+            patch.store_invoice_prefix = data.store_invoice_prefix ?? null
+            patch.send_invoice_to_store = Boolean(data.send_invoice_to_store)
+            patch.record_payments = Boolean(data.record_payments)
         }
-        await this.saveSettings({ products_doctype: doctype })
-        return { via: "settings", products_doctype: doctype, action: "updated" }
+        if (!Object.keys(patch).length) return { skipped: "nothing-to-apply" }
+        await this.saveSettings(patch)
+        return { via: "settings", applied: Object.keys(patch) }
     }
 
     /**
@@ -1263,14 +1291,17 @@ class ErpnextModuleService extends MedusaService({
                     status: data?.tracking_status ?? null,
                     delivered: !!data?.delivered,
                 })
-            case "order.invoiced":
-                return this._mergeOrderMeta(scope, data?.medusa_order_id, "invoice", {
+            case "order.invoiced": {
+                const merged = await this._mergeOrderMeta(scope, data?.medusa_order_id, "invoice", {
                     number: data?.invoice_number ?? null,
                     date: data?.invoice_date ?? null,
                     total: data?.grand_total ?? null,
                     currency: data?.currency ?? null,
                     status: data?.status ?? null,
                 })
+                if (!merged?.ok) return merged
+                return { ...merged, invoice: await this.receiveErpInvoice(scope, data) }
+            }
             case "order.returned":
                 return this._mergeOrderMeta(scope, data?.medusa_order_id, "return", {
                     status: data?.status ?? null,
@@ -1585,6 +1616,161 @@ class ErpnextModuleService extends MedusaService({
         const metadata = { ...(order.metadata || {}), [key]: value }
         await orderSvc.updateOrders([{ id, metadata }])
         return { ok: true, order_id: id, key }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Invoices customers can download
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * The store's own number for an order's invoice, when this store
+     * numbers invoices itself. Idempotent per order: a retried push must
+     * carry the number the first attempt took, not burn another.
+     *
+     * The running number is taken in one UPDATE … RETURNING, so two
+     * orders placed in the same instant can never share a number.
+     *
+     * The read below cannot settle it alone: a subscriber and the retry
+     * job can both find no row and both go on to allocate, and since each
+     * takes a distinct number the unique index on `number` would not
+     * notice. UQ_erpnext_invoice_store_order — one store invoice per
+     * order — is what actually decides the winner, and the loser adopts
+     * the number that won rather than issuing a second invoice. That
+     * leaves the loser's number unused, a gap in the series being the
+     * cheaper fault of the two.
+     */
+    async allocateStoreInvoiceNumber(scope: any, orderId: string, customerId?: string | null): Promise<string | null> {
+        const row = await this.findSettingsRow()
+        if (!storeNumbers(row)) return null
+        const [existing] = await this.listErpnextInvoices({ order_id: orderId, source: "store" }, { take: 1 })
+        if (existing) return existing.number
+        if (!row?.store_invoice_prefix) {
+            throw new Error("this store numbers its invoices but has no invoice prefix; save the Medusync Site in ERPNext")
+        }
+        const pg: any = scope.resolve("__pg_connection__")
+        const result = await pg.raw(
+            `UPDATE "erpnext_setting" SET store_invoice_next = store_invoice_next + 1
+              WHERE singleton_key = ? RETURNING store_invoice_next - 1 AS n`,
+            [SINGLETON_KEY],
+        )
+        const n = Number(result?.rows?.[0]?.n)
+        const number = formatInvoiceNumber(row.store_invoice_prefix, n)
+        try {
+            await this.createErpnextInvoices([
+                { order_id: orderId, customer_id: customerId ?? null, number, source: "store", status: "issued" },
+            ])
+        } catch (e: any) {
+            if (!isUniqueViolation(e)) throw e
+            const [won] = await this.listErpnextInvoices({ order_id: orderId, source: "store" }, { take: 1 })
+            if (!won) throw e
+            return won.number
+        }
+        return number
+    }
+
+    /**
+     * ERPNext issued an invoice for an order. Record it, and when this
+     * store takes ERPNext's invoices, fetch the PDF into private storage.
+     * A failed fetch is recorded on the row rather than failing the event:
+     * the invoice facts are already correct, and the PDF can be fetched
+     * again from the admin.
+     */
+    async receiveErpInvoice(scope: any, data: any): Promise<any> {
+        const orderId = String(data?.medusa_order_id ?? "").trim()
+        const number = String(data?.invoice_number ?? "").trim()
+        if (!orderId || !number) return { skipped: "missing order or invoice number" }
+        const settings = await this.findSettingsRow()
+        const orderSvc: any = scope.resolve("order")
+        const [order] = await orderSvc.listOrders({ id: orderId }, { take: 1, select: ["id", "customer_id"] })
+        const facts = {
+            order_id: orderId,
+            customer_id: order?.customer_id ?? null,
+            number,
+            source: "erpnext",
+            invoice_date: data?.invoice_date ?? null,
+            total: data?.grand_total != null ? Number(data.grand_total) : null,
+            currency: data?.currency ?? null,
+            status: data?.status ?? null,
+        }
+        const [existing] = await this.listErpnextInvoices({ number }, { take: 1 })
+        const invoice = existing
+            ? (await this.updateErpnextInvoices([{ id: existing.id, ...facts }]))[0]
+            : (await this.createErpnextInvoices([facts]))[0]
+
+        if (!data?.pdf || !receivesErpInvoices(settings)) return { id: invoice.id, pdf: "not requested" }
+        return { id: invoice.id, pdf: await this.fetchInvoicePdf(invoice.id, data.pdf) }
+    }
+
+    /** Pull one invoice PDF from ERPNext and keep it privately. */
+    async fetchInvoicePdf(invoiceId: string, pdf?: { doctype?: string; name?: string; print_format?: string | null }) {
+        const [invoice] = await this.listErpnextInvoices({ id: invoiceId }, { take: 1 })
+        if (!invoice) return { ok: false, error: "no such invoice" }
+        const cfg = await this.getActiveConfig()
+        const creds = await this.getApiCredentials()
+        const settings = await this.findSettingsRow()
+        try {
+            if (!cfg.erpnext_url || !creds.api_key || !creds.api_secret) {
+                throw new Error("ERPNext URL or API credentials are not configured")
+            }
+            const params = new URLSearchParams({
+                doctype: pdf?.doctype || "Sales Invoice",
+                name: pdf?.name || invoice.number,
+            })
+            if (pdf?.print_format) params.set("format", pdf.print_format)
+            const res = await fetch(
+                `${cfg.erpnext_url}/api/method/frappe.utils.print_format.download_pdf?${params}`,
+                {
+                    headers: { Authorization: `token ${creds.api_key}:${creds.api_secret}` },
+                    signal: AbortSignal.timeout(Math.max(cfg.request_timeout_ms, 30_000)),
+                },
+            )
+            if (!res.ok) throw new Error(`ERPNext answered HTTP ${res.status} for the invoice PDF`)
+            const bytes = Buffer.from(await res.arrayBuffer())
+            if (bytes.subarray(0, 4).toString() !== "%PDF") throw new Error("ERPNext did not return a PDF")
+            const storage = storageFor(settings ?? {})
+            const key = invoiceKey(invoice.order_id, invoice.number)
+            await storage.put(key, bytes, "application/pdf")
+            await this.updateErpnextInvoices([
+                {
+                    id: invoice.id,
+                    storage: storage.kind,
+                    object_key: key,
+                    content_type: "application/pdf",
+                    size_bytes: bytes.length,
+                    fetched_at: new Date(),
+                    fetch_error: null,
+                },
+            ])
+            return { ok: true, size_bytes: bytes.length, storage: storage.kind }
+        } catch (e: any) {
+            const error = String(e?.message ?? e).slice(0, ERROR_TRUNCATE)
+            await this.updateErpnextInvoices([{ id: invoice.id, fetch_error: error }])
+            return { ok: false, error }
+        }
+    }
+
+    /** Invoices for one order, newest first, without storage internals. */
+    async invoicesForOrder(orderId: string) {
+        const rows = await this.listErpnextInvoices({ order_id: orderId }, { order: { created_at: "DESC" } })
+        return rows.map((r: any) => ({
+            id: r.id,
+            number: r.number,
+            source: r.source,
+            invoice_date: r.invoice_date,
+            total: r.total,
+            currency: r.currency,
+            status: r.status,
+            downloadable: Boolean(r.object_key),
+        }))
+    }
+
+    /** The stored PDF for one invoice, or null. Callers check ownership. */
+    async openInvoice(invoiceId: string) {
+        const [invoice] = await this.listErpnextInvoices({ id: invoiceId }, { take: 1 })
+        if (!invoice?.object_key) return null
+        const settings = await this.findSettingsRow()
+        const object = await storageFor({ ...(settings ?? {}), invoice_storage: invoice.storage }).get(invoice.object_key)
+        return object ? { invoice, object } : null
     }
 
     /**
@@ -2097,6 +2283,7 @@ class ErpnextModuleService extends MedusaService({
                     event: row.event,
                     event_id: row.event_id,
                     record: row.payload,
+                    container: scope,
                 })
             }
         }
@@ -2213,6 +2400,7 @@ class ErpnextModuleService extends MedusaService({
                 last_full_resync_at: null,
                 push_allowlist: null,
                 log_retention_days: 180,
+                ...invoiceSettingsView(null),
                 notes: null,
                 updated_by_user_id: null,
                 env_fallback: {
@@ -2249,6 +2437,7 @@ class ErpnextModuleService extends MedusaService({
             // the list, so it is returned in full rather than masked.
             push_allowlist: row.push_allowlist ?? null,
             log_retention_days: row.log_retention_days ?? 180,
+            ...invoiceSettingsView(row),
             notes: row.notes,
             updated_by_user_id: row.updated_by_user_id,
             env_fallback: {
@@ -2344,6 +2533,7 @@ class ErpnextModuleService extends MedusaService({
             // can't turn the event table into an unbounded PII archive.
             patch.log_retention_days = clampInt(input.log_retention_days, 0, 1825)
         }
+        applyInvoiceSettings(patch, input)
         if ("notes" in input) patch.notes = input.notes ?? null
         if ("updated_by_user_id" in input) {
             patch.updated_by_user_id = input.updated_by_user_id ?? null
@@ -3001,6 +3191,8 @@ class ErpnextModuleService extends MedusaService({
          *  manual push and an automatic one produce identical documents.
          *  Without it the legacy full-payload path is used. */
         entity?: string
+        /** The app container, for pushes that number a store invoice. */
+        container?: any
     }): Promise<{
         total: number
         success: number
@@ -3044,6 +3236,7 @@ class ErpnextModuleService extends MedusaService({
                             event: args.event,
                             event_id: `${eventId}:${mapping.id}`,
                             record: it.payload,
+                            container: args.container,
                         }),
                     )
                 }
@@ -4845,6 +5038,9 @@ class ErpnextModuleService extends MedusaService({
         event: string
         event_id: string
         record: Record<string, any>
+        /** The app container. Needed to number a store invoice; without it
+         *  a store that numbers its own invoices cannot push an order. */
+        container?: any
     }): Promise<ForwardResult> {
         const cfg = await this.getActiveConfig()
         if (!cfg.enable_sync) {
@@ -5058,6 +5254,20 @@ class ErpnextModuleService extends MedusaService({
             ),
             args.record,
         )
+        if (SALES_DOCTYPES.has(args.mapping.doctype) && !isDeleteEvent && args.record?.id) {
+            outPayload.medusa_payments = Array.isArray(args.record.payments) ? args.record.payments : []
+            const settings = await this.findSettingsRow()
+            if (storeNumbers(settings)) {
+                if (!args.container) {
+                    return { ok: false, status: "failed", error: "store invoice numbering needs the app container" }
+                }
+                outPayload.medusa_invoice_number = await this.allocateStoreInvoiceNumber(
+                    args.container,
+                    String(args.record.id),
+                    args.record.customer_id ?? null,
+                )
+            }
+        }
         // Was this record just written BY ERPNext? Then what we are about
         // to send is ERPNext's own change coming home; tag it so the far
         // side drops it instead of applying it again and bouncing it back.
@@ -5430,10 +5640,58 @@ function maskSecret(s?: string | null) {
     return `${s.slice(0, 3)}…${s.slice(-3)}`
 }
 
+/**
+ * Postgres 23505. The ORM wraps the driver error, so the code can sit on
+ * the error itself or on its cause.
+ */
+function isUniqueViolation(err: any): boolean {
+    return err?.code === "23505" || err?.cause?.code === "23505"
+}
+
 function normaliseUrl(input?: string | null) {
     if (input === null) return null
     if (input === undefined || input === "") return undefined as any
     return input.replace(/\/$/, "")
+}
+
+/** The invoice and storage part of the settings view. Secrets masked. */
+function invoiceSettingsView(row: any) {
+    return {
+        order_document: row?.order_document ?? null,
+        invoice_numbering: row?.invoice_numbering === "store" ? "store" : "erpnext",
+        store_invoice_prefix: row?.store_invoice_prefix ?? null,
+        store_invoice_next: row?.store_invoice_next ?? 1,
+        send_invoice_to_store: Boolean(row?.send_invoice_to_store),
+        record_payments: Boolean(row?.record_payments),
+        invoice_storage: row?.invoice_storage === "s3" ? "s3" : "local",
+        invoice_local_dir: row?.invoice_local_dir ?? null,
+        s3_bucket: row?.s3_bucket ?? null,
+        s3_region: row?.s3_region ?? null,
+        s3_endpoint: row?.s3_endpoint ?? null,
+        s3_prefix: row?.s3_prefix ?? null,
+        s3_force_path_style: Boolean(row?.s3_force_path_style),
+        s3_access_key_id_masked: maskSecret(row?.s3_access_key_id),
+        s3_secret_access_key_masked: maskSecret(row?.s3_secret_access_key),
+    }
+}
+
+function applyInvoiceSettings(patch: Record<string, any>, input: SaveSettingsInput) {
+    const text = (v: string | null | undefined) => (v ?? "").trim() || null
+    if ("order_document" in input) patch.order_document = text(input.order_document)
+    if ("invoice_numbering" in input) {
+        patch.invoice_numbering = input.invoice_numbering === "store" ? "store" : "erpnext"
+    }
+    if ("store_invoice_prefix" in input) patch.store_invoice_prefix = text(input.store_invoice_prefix)
+    if (input.send_invoice_to_store !== undefined) patch.send_invoice_to_store = input.send_invoice_to_store
+    if (input.record_payments !== undefined) patch.record_payments = input.record_payments
+    if ("invoice_storage" in input) patch.invoice_storage = input.invoice_storage === "s3" ? "s3" : "local"
+    if ("invoice_local_dir" in input) patch.invoice_local_dir = text(input.invoice_local_dir)
+    for (const key of ["s3_bucket", "s3_region", "s3_endpoint", "s3_prefix"] as const) {
+        if (key in input) patch[key] = text(input[key])
+    }
+    if (input.s3_force_path_style !== undefined) patch.s3_force_path_style = input.s3_force_path_style
+    applySecret(patch, "s3_access_key_id", input.s3_access_key_id)
+    applySecret(patch, "s3_secret_access_key", input.s3_secret_access_key)
 }
 
 function applySecret(
@@ -5510,15 +5768,26 @@ function validateFieldMappings(raw: any[]): MappingFieldPair[] {
  * field names referenced in the mapping (plus `name`, `modified`, and
  * the chosen key field). Avoids over-fetching when the doctype has 50+
  * columns and we only care about 3.
+ *
+ * Push-only pairs are left out. A pair like `medusa_product_id <- id`
+ * carries an id the store owns; on the ERPNext side that name is a link
+ * key resolved through Medusync Link, not a column, so asking Frappe for
+ * it fails the whole page with `DataError: Field not permitted in query`
+ * — and there would be nothing to read even if it answered.
  */
 function uniqueFrappeFields(pairs: MappingFieldPair[], keyField: string): string[] {
     const set = new Set<string>(["name", "modified"])
     if (keyField) set.add(keyField)
     for (const p of pairs ?? []) {
-        if (p?.erpnext_field) set.add(p.erpnext_field)
+        if (!p?.erpnext_field) continue
+        if (String((p as any).direction ?? "").toLowerCase() === "push") continue
+        set.add(p.erpnext_field)
     }
     return Array.from(set)
 }
+
+/** Internals reachable from the unit tests, which do not boot a container. */
+export const __test__ = { uniqueFrappeFields }
 
 export default Module(ERPNEXT_MODULE, {
     service: ErpnextModuleService,

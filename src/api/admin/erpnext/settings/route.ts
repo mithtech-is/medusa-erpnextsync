@@ -64,6 +64,21 @@ const SaveSchema = z.object({
     push_allowlist: z.string().nullable().optional(),
     /** Days to keep erpnext_sync_event rows. 0 = keep forever. */
     log_retention_days: z.number().int().min(0).max(1825).optional(),
+    /** Normally sent by ERPNext; editable here only to repair a store. */
+    order_document: z.string().nullable().optional(),
+    invoice_numbering: z.enum(["erpnext", "store"]).nullable().optional(),
+    store_invoice_prefix: z.string().nullable().optional(),
+    send_invoice_to_store: z.boolean().optional(),
+    record_payments: z.boolean().optional(),
+    invoice_storage: z.enum(["local", "s3"]).nullable().optional(),
+    invoice_local_dir: z.string().nullable().optional(),
+    s3_bucket: z.string().nullable().optional(),
+    s3_region: z.string().nullable().optional(),
+    s3_endpoint: z.string().nullable().optional(),
+    s3_prefix: z.string().nullable().optional(),
+    s3_force_path_style: z.boolean().optional(),
+    s3_access_key_id: z.string().nullable().optional(),
+    s3_secret_access_key: z.string().nullable().optional(),
     notes: z.string().nullable().optional(),
 })
 

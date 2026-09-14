@@ -16,7 +16,7 @@ import { Migration } from "@mikro-orm/migrations"
  *
  * Defaults to false, so every existing row is real traffic — which it is.
  */
-export class Migration20260905000000 extends Migration {
+export class Migration20260905000001 extends Migration {
     async up(): Promise<void> {
         this.addSql(`
             ALTER TABLE "erpnext_sync_event"

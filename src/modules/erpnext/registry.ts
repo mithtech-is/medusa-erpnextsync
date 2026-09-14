@@ -30,6 +30,41 @@
  */
 
 import { Modules } from "@medusajs/framework/utils"
+import crypto from "crypto"
+
+/**
+ * A Medusa product handle built from a key the other system chose.
+ *
+ * Medusa requires a URL-safe handle, and an ERP item code is not one:
+ * spaces, dots, slashes and brackets are all ordinary in a part number
+ * (`ELE-CAB-ARM-COPPER-2.50 SQMM-3 CORE`). Rejecting those would put
+ * most of a real catalogue out of reach, so the handle is derived and
+ * the exact code is kept on the variant SKU, where it stays searchable.
+ *
+ * The result is a pure function of the input: the same item code always
+ * yields the same handle, which is what lets the upsert find its own
+ * product again instead of creating a second one on every sync.
+ */
+export function handleFromKey(raw: string): string {
+    const slug = String(raw ?? "")
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 120)
+        .replace(/-+$/g, "")
+    // Two different codes can flatten to the same slug ("A/1" and "A-1"),
+    // and an empty one is possible if the code is all punctuation. Both
+    // fall back to a digest of the original so the handle stays unique
+    // and still deterministic.
+    if (!slug) return `item-${digestOf(raw)}`
+    return slug
+}
+
+function digestOf(raw: string): string {
+    return crypto.createHash("sha1").update(String(raw ?? "")).digest("hex").slice(0, 8)
+}
 
 export type MedusaFieldType =
     | "string"
@@ -311,6 +346,56 @@ const customerGroupEntity = genericEntity({
     ],
 })
 
+/**
+ * What the store actually captured for an order, for ERPNext to book.
+ *
+ * Asked of the payment collections on their own: loading payments nested
+ * under the order has crashed the order query before, and an order that
+ * cannot be enriched is an order that never reaches ERPNext. A failure
+ * here leaves the list empty, so ERPNext books no payment rather than
+ * guessing one.
+ */
+async function capturedPayments(query: any, collections: any[]): Promise<any[]> {
+    const ids = (collections ?? []).map((c: any) => c?.id).filter(Boolean)
+    if (!ids.length) return []
+    try {
+        const { data } = await query.graph({
+            entity: "payment_collection",
+            fields: [
+                "id",
+                "payments.id",
+                "payments.amount",
+                "payments.currency_code",
+                "payments.provider_id",
+                "payments.captured_at",
+                "payments.captures.id",
+                "payments.captures.amount",
+            ],
+            filters: { id: ids },
+        })
+        const out: any[] = []
+        for (const collection of data ?? []) {
+            for (const p of collection?.payments ?? []) {
+                const captured = (p?.captures ?? []).reduce((sum: number, c: any) => sum + (Number(c?.amount) || 0), 0)
+                if (!p?.captured_at && !captured) continue
+                out.push({
+                    id: p.id,
+                    // Medusa keeps money in minor units; ERPNext books major.
+                    amount: (captured || Number(p.amount) || 0) / 100,
+                    currency: p.currency_code ?? null,
+                    provider_id: p.provider_id ?? null,
+                    captured_at: p.captured_at ?? new Date().toISOString(),
+                    reference: p.captures?.[0]?.id ?? p.id,
+                })
+            }
+        }
+        return out
+    } catch (err) {
+        console.warn("[erpnext] could not read captured payments", err)
+        return []
+    }
+}
+
 const orderEntity: EntityDescriptor = {
     key: "order",
     label: "Order",
@@ -403,9 +488,10 @@ const orderEntity: EntityDescriptor = {
             order.summary?.original_order_total ??
             0
         // Flatten the channel to a name a mapping can carry straight into
-        // Sales Order.medusa_order_source. A store with no channels at all
-        // still came from the web, which is truer than an empty string.
+        // the order's source. A store with no channels at all still came
+        // from the web, which is truer than an empty string.
         order.source = order.sales_channel?.name || "web"
+        order.payments = await capturedPayments(query, order.payment_collections)
         return order
     },
     async upsertByKey() {
@@ -451,12 +537,20 @@ const productEntity: EntityDescriptor = {
         const m: any = container.resolve(Modules.PRODUCT)
         const isMetaKey = key_field.startsWith("metadata.")
         const metaKeyName = isMetaKey ? key_field.slice("metadata.".length) : null
+        // An ERP item code is rarely URL-safe, and Medusa rejects a handle
+        // that is not. Derive one, and match on the derived value so the
+        // same item finds its own product next time. The exact code still
+        // travels, as the variant SKU.
+        const handleKey = key_field === "handle" ? handleFromKey(String(key_value)) : null
         const filter: any = {}
         if (isMetaKey) {
             filter.metadata = { [metaKeyName as string]: key_value }
+        } else if (handleKey) {
+            filter.handle = handleKey
         } else {
             filter[key_field] = key_value
         }
+        if (handleKey) payload = { ...payload, handle: handleKey }
         // When deduping on a metadata path, GUARANTEE the persisted row
         // carries the key. A pull whose field_mappings don't project the
         // key into its payload (a metadata key that is push-only on the

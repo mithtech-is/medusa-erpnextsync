@@ -1,4 +1,4 @@
-import { defineMiddlewares } from "@medusajs/framework/http"
+import { authenticate, defineMiddlewares } from "@medusajs/framework/http"
 
 /**
  * Plugin-local middlewares.
@@ -21,6 +21,11 @@ export default defineMiddlewares({
             matcher: "/webhooks/*",
             method: ["POST"],
             bodyParser: { preserveRawBody: true },
+        },
+        {
+            // A customer's invoices are theirs alone; no guest access.
+            matcher: "/store/erpnext/*",
+            middlewares: [authenticate("customer", ["session", "bearer"])],
         },
     ],
 })

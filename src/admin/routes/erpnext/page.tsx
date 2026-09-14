@@ -48,6 +48,21 @@ type SettingsView = {
   last_full_resync_at: string | null
   push_allowlist: string | null
   log_retention_days: number
+  order_document: string | null
+  invoice_numbering: "erpnext" | "store"
+  store_invoice_prefix: string | null
+  store_invoice_next: number
+  send_invoice_to_store: boolean
+  record_payments: boolean
+  invoice_storage: "local" | "s3"
+  invoice_local_dir: string | null
+  s3_bucket: string | null
+  s3_region: string | null
+  s3_endpoint: string | null
+  s3_prefix: string | null
+  s3_force_path_style: boolean
+  s3_access_key_id_masked: string | null
+  s3_secret_access_key_masked: string | null
   notes: string | null
   updated_by_user_id: string | null
   env_fallback: {
@@ -205,6 +220,15 @@ const SettingsTab: React.FC<{
     else setFrappeToMedusaSecret(hex)
     setFreshSecret({ field, value: hex })
   }
+  const [invoiceStorage, setInvoiceStorage] = useState<"local" | "s3">(view.invoice_storage ?? "local")
+  const [localDir, setLocalDir] = useState(view.invoice_local_dir ?? "")
+  const [s3Bucket, setS3Bucket] = useState(view.s3_bucket ?? "")
+  const [s3Region, setS3Region] = useState(view.s3_region ?? "")
+  const [s3Endpoint, setS3Endpoint] = useState(view.s3_endpoint ?? "")
+  const [s3Prefix, setS3Prefix] = useState(view.s3_prefix ?? "")
+  const [s3PathStyle, setS3PathStyle] = useState(Boolean(view.s3_force_path_style))
+  const [s3KeyId, setS3KeyId] = useState("")
+  const [s3Secret, setS3Secret] = useState("")
   const [notes, setNotes] = useState(view.notes ?? "")
   const [saving, setSaving] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
@@ -231,6 +255,15 @@ const SettingsTab: React.FC<{
     setRetryInterval(view.auto_retry_min_interval_minutes)
     setPushAllowlist(view.push_allowlist ?? "")
     setLogRetentionDays(view.log_retention_days ?? 180)
+    setInvoiceStorage(view.invoice_storage ?? "local")
+    setLocalDir(view.invoice_local_dir ?? "")
+    setS3Bucket(view.s3_bucket ?? "")
+    setS3Region(view.s3_region ?? "")
+    setS3Endpoint(view.s3_endpoint ?? "")
+    setS3Prefix(view.s3_prefix ?? "")
+    setS3PathStyle(Boolean(view.s3_force_path_style))
+    setS3KeyId("")
+    setS3Secret("")
     setNotes(view.notes ?? "")
   }, [view])
 
@@ -249,8 +282,17 @@ const SettingsTab: React.FC<{
         auto_retry_min_interval_minutes: retryInterval,
         push_allowlist: pushAllowlist.trim() || null,
         log_retention_days: Number(logRetentionDays) || 0,
+        invoice_storage: invoiceStorage,
+        invoice_local_dir: localDir.trim() || null,
+        s3_bucket: s3Bucket.trim() || null,
+        s3_region: s3Region.trim() || null,
+        s3_endpoint: s3Endpoint.trim() || null,
+        s3_prefix: s3Prefix.trim() || null,
+        s3_force_path_style: s3PathStyle,
         notes: notes.trim() || null,
       }
+      if (s3KeyId) body.s3_access_key_id = s3KeyId
+      if (s3Secret) body.s3_secret_access_key = s3Secret
       // Only include secret fields if user typed something — empty
       // string would mean "leave as-is" but the API treats absent the
       // same way, so just don't send them.
@@ -633,6 +675,103 @@ const SettingsTab: React.FC<{
           onChange={(e) => setNotes(e.target.value)}
           placeholder="Anything ops should know about this Frappe instance…"
         />
+      </section>
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Orders and invoices</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          Chosen in ERPNext on this store's Medusync Site and sent here when it is saved.
+        </Text>
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <Text size="small">
+            A store order becomes: <strong>{view.order_document || "Sales Order"}</strong>
+          </Text>
+          <Text size="small">
+            Invoice numbers:{" "}
+            <strong>
+              {view.invoice_numbering === "store"
+                ? `this store, ${view.store_invoice_prefix ?? "(no prefix)"}… next ${view.store_invoice_next}`
+                : "ERPNext"}
+            </strong>
+          </Text>
+          <Text size="small">
+            Customers can download ERPNext invoices:{" "}
+            <strong>{view.invoice_numbering !== "store" && view.send_invoice_to_store ? "yes" : "no"}</strong>
+          </Text>
+          <Text size="small">
+            Store payments booked in ERPNext: <strong>{view.record_payments ? "yes" : "no"}</strong>
+          </Text>
+        </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Invoice storage</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          Invoice PDFs are never public. They are served only to the signed-in customer whose order they belong to.
+        </Text>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div>
+            <Label>Keep invoices in</Label>
+            <Select value={invoiceStorage} onValueChange={(v) => setInvoiceStorage(v as "local" | "s3")}>
+              <Select.Trigger>
+                <Select.Value />
+              </Select.Trigger>
+              <Select.Content>
+                <Select.Item value="local">A private folder on this server</Select.Item>
+                <Select.Item value="s3">S3-compatible bucket</Select.Item>
+              </Select.Content>
+            </Select>
+          </div>
+          {invoiceStorage === "local" ? (
+            <div>
+              <Label>Folder</Label>
+              <Input value={localDir} onChange={(e) => setLocalDir(e.target.value)} placeholder="private/erpnext-invoices" />
+              <Text size="small" className="text-ui-fg-subtle">
+                Must not be inside the public static folder. Blank uses private/erpnext-invoices.
+              </Text>
+            </div>
+          ) : (
+            <>
+              <div>
+                <Label>Bucket</Label>
+                <Input value={s3Bucket} onChange={(e) => setS3Bucket(e.target.value)} />
+              </div>
+              <div>
+                <Label>Region</Label>
+                <Input value={s3Region} onChange={(e) => setS3Region(e.target.value)} placeholder="ap-south-1" />
+              </div>
+              <div>
+                <Label>Endpoint</Label>
+                <Input value={s3Endpoint} onChange={(e) => setS3Endpoint(e.target.value)} placeholder="Blank for AWS" />
+              </div>
+              <div>
+                <Label>Key prefix</Label>
+                <Input value={s3Prefix} onChange={(e) => setS3Prefix(e.target.value)} placeholder="invoices" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <Label>Access key id</Label>
+                  <StatusBadge color={view.s3_access_key_id_masked ? "green" : "grey"}>
+                    {view.s3_access_key_id_masked ? "set" : "not set"}
+                  </StatusBadge>
+                </div>
+                <Input value={s3KeyId} onChange={(e) => setS3KeyId(e.target.value)} placeholder={view.s3_access_key_id_masked ?? "Not set"} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <Label>Secret access key</Label>
+                  <StatusBadge color={view.s3_secret_access_key_masked ? "green" : "grey"}>
+                    {view.s3_secret_access_key_masked ? "set" : "not set"}
+                  </StatusBadge>
+                </div>
+                <Input type="password" value={s3Secret} onChange={(e) => setS3Secret(e.target.value)} placeholder={view.s3_secret_access_key_masked ?? "Not set"} />
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch checked={s3PathStyle} onCheckedChange={setS3PathStyle} />
+                <Label>Path-style addressing (MinIO and some S3-compatible services)</Label>
+              </div>
+            </>
+          )}
+        </div>
       </section>
     </div>
   )
@@ -2565,20 +2704,15 @@ const MappingEditor: React.FC<{
       : wanted
     if (!draft.doctype && liveWanted.length === 1) {
       pickDoctype(liveWanted[0])
-    } else if (draft.doctype) {
-      runAutofill(key, draft.doctype)
     }
   }
 
+  // Picking a doctype loads its fields and nothing more. The grid used to
+  // be filled with guessed pairs at this point, which put fields into a
+  // mapping nobody asked for; "Auto-map fields" does that, on request.
   const pickDoctype = (name: string) => {
     setDraft((d) => ({ ...d, doctype: name }))
     loadDoctypeFields(name)
-    // Build the whole grid for this doctype — mandatory fields plus
-    // every field we can guess a Medusa source for. Canonical pairs are
-    // folded in server-side and win over the heuristics.
-    if (draft.medusa_entity) {
-      runAutofill(draft.medusa_entity, name)
-    }
   }
 
   // ── Generic autofill ───────────────────────────────────────────────

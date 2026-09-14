@@ -118,6 +118,7 @@ export default async function erpnextForwardHandler({
                 event: eventName,
                 event_id: `${eventId}:${m.id}`,
                 record: enriched,
+                container,
             })
             if (!result.ok) {
                 console.error(
