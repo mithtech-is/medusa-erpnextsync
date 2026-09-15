@@ -323,10 +323,12 @@ describe("required fields", () => {
         fields.filter((f) => f.required).map((f) => f.path)
 
     it("is exactly the fields a record cannot be created without", () => {
-        expect(requiredPaths(describeModel(PRODUCT, "Product")).sort()).toEqual([
-            "handle",
-            "title",
-        ])
+        // Not `handle`: the model column is non-nullable, but
+        // ProductModuleService fills it from the title before insert
+        // (`productData.handle ??= toHandle(productData.title)`), so a
+        // caller never supplies one. Listing it sends an operator looking
+        // for an ERP field to map onto a slug the store is about to invent.
+        expect(requiredPaths(describeModel(PRODUCT, "Product")).sort()).toEqual(["title"])
     })
 
     it("does not call a generated primary key required", () => {

@@ -184,12 +184,24 @@ const TO_ONE = new Set(["m:1", "1:1"])
  * What survives on Product is `title` and `handle` — which is exactly what
  * Medusa refuses a product without.
  */
-function isRequired(prop: OrmPropertyMeta, depth: number): boolean {
+/**
+ * Columns Medusa fills itself just before insert, so a caller never has to.
+ *
+ * The model says non-nullable with no default, which is true of the row but
+ * not of the request: ProductModuleService derives `handle` from `title`
+ * (`productData.handle ??= toHandle(productData.title)`) and a category's
+ * from its name. Reporting them as required sends an operator hunting for
+ * an ERP field to map onto a slug the store is about to invent.
+ */
+const DERIVED_ON_CREATE = new Set(["handle"])
+
+function isRequired(prop: OrmPropertyMeta, depth: number, path?: string): boolean {
     if (depth > 0) return false
     if (prop.nullable !== false) return false
     if (prop.primary) return false
     if (prop.default !== undefined || prop.defaultRaw !== undefined) return false
     if (prop.onCreate !== undefined) return false
+    if (DERIVED_ON_CREATE.has(path ?? prop.name)) return false
     return true
 }
 
@@ -278,7 +290,7 @@ export function describeModel(
                 type: mapOrmType(prop),
                 source: "model",
                 nullable: prop.nullable ?? true,
-                ...(isRequired(prop, depth) ? { required: true } : {}),
+                ...(isRequired(prop, depth, path) ? { required: true } : {}),
                 ...(prefix ? { relation: true } : {}),
             })
         }
@@ -435,3 +447,6 @@ export function annotateForPicker(fields: DiscoveredField[]): DiscoveredField[] 
         return { ...f, group, ...(advanced ? { advanced: true } : {}) }
     })
 }
+
+/** Internals reachable from the unit tests. */
+export const __discoveryTest__ = { isRequired }

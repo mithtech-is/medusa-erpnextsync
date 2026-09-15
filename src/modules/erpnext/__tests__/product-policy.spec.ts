@@ -77,3 +77,13 @@ describe("the link a product carries", () => {
         expect(linkedItemCode({ metadata: { erpnext_item_code: "  PIX-001 " } })).toBe("PIX-001")
     })
 })
+
+describe("what the store really refuses a product without", () => {
+    it("does not count handle, which Medusa derives from the title", async () => {
+        const { __discoveryTest__ } = await import("../discovery")
+        const isRequired = (__discoveryTest__ as any).isRequired
+        const nonNullNoDefault = { nullable: false, primary: false } as any
+        expect(isRequired({ ...nonNullNoDefault, name: "title" }, 0)).toBe(true)
+        expect(isRequired({ ...nonNullNoDefault, name: "handle" }, 0)).toBe(false)
+    })
+})

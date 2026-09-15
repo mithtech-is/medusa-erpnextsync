@@ -62,6 +62,32 @@ export function handleFromKey(raw: string): string {
     return slug
 }
 
+/**
+ * A product title built from an ERP description field.
+ *
+ * ERPNext descriptions are spec text, not names: some arrive wrapped in
+ * the rich-text editor's markup (`<div><p>…</p></div>`), and many are hard
+ * -wrapped at a fixed column, so the name breaks across lines mid-phrase
+ * (`12K HOUR KIT FOR GAS\nCOMPRESSOR`). A storefront cannot show either.
+ *
+ * Casing is deliberately left alone. Titling this text would turn `GI`,
+ * `KVA` and `MS` into `Gi`, `Kva` and `Ms` — the abbreviations are the
+ * part of the name a buyer recognises.
+ */
+export function titleFromText(raw: string): string {
+    return String(raw ?? "")
+        .replace(/<br\s*\/?>/gi, " ")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\s+/g, " ")
+        .trim()
+}
+
 function digestOf(raw: string): string {
     return crypto.createHash("sha1").update(String(raw ?? "")).digest("hex").slice(0, 8)
 }
@@ -551,6 +577,15 @@ const productEntity: EntityDescriptor = {
             filter[key_field] = key_value
         }
         if (handleKey) payload = { ...payload, handle: handleKey }
+        // A title carrying editor markup or a hard line break renders as
+        // neither on a storefront; the ERP field it comes from routinely
+        // has both.
+        if (typeof payload.title === "string") {
+            payload = { ...payload, title: titleFromText(payload.title) }
+        }
+        if (typeof payload.description === "string") {
+            payload = { ...payload, description: titleFromText(payload.description) }
+        }
         // When deduping on a metadata path, GUARANTEE the persisted row
         // carries the key. A pull whose field_mappings don't project the
         // key into its payload (a metadata key that is push-only on the
@@ -598,10 +633,38 @@ const productEntity: EntityDescriptor = {
         const createPayload: any = isMetaKey
             ? { ...payload, metadata: { ...(payload.metadata || {}), ...keyMeta } }
             : { ...payload }
-        // Catalog products (keyed by handle): create a real sellable simple
-        // product — one "Default" option + one variant (sku == handle ==
-        // ERPNext item_code) + published. Without this an ERPNext item lands
-        // as a variant-less draft and inventory (keyed by sku) can't match.
+        // A catalogue product is a sellable simple product whatever it is
+        // keyed by: one "Default" option, one variant carrying the key as its
+        // SKU, and published. Keyed by a metadata path — an ERP part number,
+        // say — it would otherwise land as a variant-less draft that cannot
+        // be sold and that inventory, which matches on SKU, cannot find.
+        if (isMetaKey) {
+            if (createPayload.status === undefined) createPayload.status = "published"
+            createPayload.options = createPayload.options ?? [
+                { title: "Default", values: ["Default"] },
+            ]
+            createPayload.variants = createPayload.variants ?? [
+                {
+                    title: "Default",
+                    sku: String(key_value),
+                    manage_inventory: true,
+                    options: { Default: "Default" },
+                },
+            ]
+            // Medusa derives the handle from the title and requires it
+            // unique, but two ERP records routinely share a description —
+            // two fuel-water separators for different engines are both
+            // "SEPARATOR,FUEL WATER". The second one is refused outright, so
+            // the key it is already unique by is folded in.
+            if (!createPayload.handle && typeof createPayload.title === "string") {
+                const base = handleFromKey(createPayload.title)
+                const taken = base
+                    ? await m.listProducts({ handle: base }, { select: ["id"], take: 1 })
+                    : []
+                createPayload.handle =
+                    !base || taken?.length ? `${base ? base + "-" : ""}${handleFromKey(String(key_value))}` : base
+            }
+        }
         if (!isMetaKey && key_field === "handle") {
             if (createPayload.status === undefined) createPayload.status = "published"
             createPayload.options = createPayload.options ?? [
