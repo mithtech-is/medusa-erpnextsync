@@ -8,15 +8,15 @@ import { handleFromKey } from "../registry"
  */
 describe("the handle an item code becomes", () => {
     it("keeps a code that is already url safe recognisable", () => {
-        expect(handleFromKey("ELE-CAB-ARM")).toBe("ele-cab-arm")
+        expect(handleFromKey("BRKT-ASSY")).toBe("brkt-assy")
     })
 
     it("survives the punctuation a real part number carries", () => {
-        expect(handleFromKey("ELE-CAB-ARM-COPPER-2.50 SQMM-3 CORE")).toBe(
-            "ele-cab-arm-copper-2-50-sqmm-3-core",
+        expect(handleFromKey("BRKT-ASSY 12.5 MM/L (ZN)")).toBe(
+            "brkt-assy-12-5-mm-l-zn",
         )
-        expect(handleFromKey("CABLE-TRAYMETAL-100X50(WTCOVER)")).toBe(
-            "cable-traymetal-100x50-wtcover",
+        expect(handleFromKey("TRAY-METAL-100X50(WCOVER)")).toBe(
+            "tray-metal-100x50-wcover",
         )
         expect(handleFromKey("A/1 B")).toBe("a-1-b")
     })
@@ -27,7 +27,7 @@ describe("the handle an item code becomes", () => {
     })
 
     it("gives the same answer every time, or the sync would duplicate products", () => {
-        const code = "ELE-CAB-ARM-COPPER-2.50 SQMM-3 CORE"
+        const code = "BRKT-ASSY 12.5 MM/L (ZN)"
         expect(handleFromKey(code)).toBe(handleFromKey(code))
     })
 

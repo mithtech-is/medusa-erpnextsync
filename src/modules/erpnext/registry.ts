@@ -37,8 +37,8 @@ import crypto from "crypto"
  *
  * Medusa requires a URL-safe handle, and an ERP item code is not one:
  * spaces, dots, slashes and brackets are all ordinary in a part number
- * (`ELE-CAB-ARM-COPPER-2.50 SQMM-3 CORE`). Rejecting those would put
- * most of a real catalogue out of reach, so the handle is derived and
+ * (`BRKT-ASSY 12.5 MM/L (ZN)`). Rejecting those would put most of a
+ * real catalogue out of reach, so the handle is derived and
  * the exact code is kept on the variant SKU, where it stays searchable.
  *
  * The result is a pure function of the input: the same item code always
@@ -68,7 +68,7 @@ export function handleFromKey(raw: string): string {
  * ERPNext descriptions are spec text, not names: some arrive wrapped in
  * the rich-text editor's markup (`<div><p>…</p></div>`), and many are hard
  * -wrapped at a fixed column, so the name breaks across lines mid-phrase
- * (`12K HOUR KIT FOR GAS\nCOMPRESSOR`). A storefront cannot show either.
+ * (`12K HOUR KIT FOR AIR\nCOMPRESSOR`). A storefront cannot show either.
  *
  * Casing is deliberately left alone. Titling this text would turn `GI`,
  * `KVA` and `MS` into `Gi`, `Kva` and `Ms` — the abbreviations are the
@@ -654,7 +654,7 @@ const productEntity: EntityDescriptor = {
             // Medusa derives the handle from the title and requires it
             // unique, but two ERP records routinely share a description —
             // two fuel-water separators for different engines are both
-            // "SEPARATOR,FUEL WATER". The second one is refused outright, so
+            // the same "VALVE,RELIEF". The second one is refused outright, so
             // the key it is already unique by is folded in.
             if (!createPayload.handle && typeof createPayload.title === "string") {
                 const base = handleFromKey(createPayload.title)

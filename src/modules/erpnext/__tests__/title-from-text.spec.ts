@@ -8,14 +8,14 @@ import { titleFromText } from "../registry"
  */
 describe("the title an ERP description becomes", () => {
     it("unwraps the rich-text editor's markup", () => {
-        expect(titleFromText("<div><p>HI- FIVE - 100X50 1.4MM GI PORMO.TREY (WITHCOVER)</p></div>")).toBe(
-            "HI- FIVE - 100X50 1.4MM GI PORMO.TREY (WITHCOVER)",
+        expect(titleFromText("<div><p>TRAY - 100X50 1.4MM GI PERF. (WITHCOVER)</p></div>")).toBe(
+            "TRAY - 100X50 1.4MM GI PERF. (WITHCOVER)",
         )
     })
 
     it("joins a phrase the ERP hard-wrapped across lines", () => {
-        expect(titleFromText("12K HOUR KIT FOR GAS\nCOMPRESSOR (CUMMINS)")).toBe(
-            "12K HOUR KIT FOR GAS COMPRESSOR (CUMMINS)",
+        expect(titleFromText("12K HOUR KIT FOR AIR\nCOMPRESSOR (SERVICE)")).toBe(
+            "12K HOUR KIT FOR AIR COMPRESSOR (SERVICE)",
         )
         expect(titleFromText("SET,PISTON RING")).toBe("SET,PISTON RING")
     })
