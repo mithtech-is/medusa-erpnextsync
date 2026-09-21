@@ -3,7 +3,7 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## Unreleased
+## 0.1.1 — 2026-09-21
 
 - Verified against Medusa 2.21.0 (install, `plugin:build`, test suite, `tsc --noEmit`).
   Dev `@medusajs/*` ranges raised to `^2.21.0` (the version tested against); peer ranges and `medusaRange` stay `^2.19.0` because the
@@ -19,10 +19,7 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   fields.
 - The wizard and the editor share one fixed-value control and one options reader, so a reply for a
   doctype that has since been changed away from is discarded rather than shown under the new one.
-
-## 0.1.1
-
-- Renamed to `@mithtech-medusa/plugin-erpnext`. Not yet published to Verdaccio (`npm.po5.in`).
+- Renamed to `@mithtech-medusa/plugin-erpnext`. 0.1.0 was published under the old name.
 
 ## 0.1.0
 
