@@ -183,6 +183,24 @@ Everything here asks the same code the real paths ask. The inbound plan
 and the real inbound apply share their candidate selection and their
 transform, so a rehearsal cannot quietly drift from what actually happens.
 
+### Fixed values
+
+A pair can send a constant instead of reading a store field — for a field
+ERPNext requires that the store has no equivalent for, `company` being the
+usual one. Use `=` on the row to switch it over, `↩` to switch it back.
+
+The value is chosen from the connected site rather than typed from memory:
+a Link offers that site's records, a Select its options, anything else free
+text. Nothing is shipped in this plugin, because one deployment's Item
+Groups are not another's. A value the site no longer has stays selected and
+says so instead of disappearing from a mapping that has been running on it.
+
+A row switched to a fixed value and left blank is **not** a source. It does
+not count towards required-field coverage, the rehearsal will not pass on
+it, it is dropped when the mapping is saved, and it never reaches the
+payload. Without that it would name a required field, silence the warning
+for it, and then write an empty string over whatever ERPNext held.
+
 ### Test traffic
 
 ERPNext can send a real signed request carrying `dry_run`. It passes the
