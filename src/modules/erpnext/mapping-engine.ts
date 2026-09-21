@@ -139,10 +139,20 @@ export function applyMapping(args: ApplyMappingArgs): ApplyMappingResult {
         // having an empty `medusa_path`.
         if (pair.constant !== undefined) {
             if (args.direction === "push" && pair.erpnext_field) {
-                payload[pair.erpnext_field] = applyTransform(
-                    pair.constant,
-                    pair.transform,
-                )
+                // A row turned into a fixed value but never filled in has
+                // nothing to send. Writing "" would overwrite whatever the
+                // far side holds with a blank, so leave the field out of
+                // the payload entirely and say so: this is exactly the
+                // "moved nothing unexpectedly" the operator reads `skipped`
+                // for.
+                if (constantHasValue(pair.constant)) {
+                    payload[pair.erpnext_field] = applyTransform(
+                        pair.constant,
+                        pair.transform,
+                    )
+                } else {
+                    skipped.push(pair.erpnext_field)
+                }
             }
             // Not added to `skipped` on pull: that list is what an operator
             // reads to find pairs that moved nothing unexpectedly, and a
@@ -220,6 +230,25 @@ function fieldFlowsInDirection(
     if (fieldDir === "none") return false
     if (fieldDir === "both") return true
     return fieldDir === runDir
+}
+
+/**
+ * True when a pair's fixed value is actually something to send.
+ *
+ * `undefined` is "this pair reads a store field"; a blank or whitespace
+ * string is "somebody turned the row into a fixed value and has not said
+ * what the value is yet". Neither is a source, and the difference matters
+ * because a pair that merely *claims* a fixed value would otherwise count
+ * as filling a mandatory field — silencing the very warnings that exist to
+ * catch it (see `unmetRequired`).
+ *
+ * `null` IS a value: it clears the field on the far side, which is a thing
+ * a mapping can legitimately want to do.
+ */
+export function constantHasValue(constant: unknown): boolean {
+    if (constant === undefined) return false
+    if (typeof constant === "string") return constant.trim() !== ""
+    return true
 }
 
 /**
@@ -542,7 +571,9 @@ export type RequiredField = { name: string; label?: string }
  *
  * A field counts as covered when some pair writes it in the direction being
  * checked and that pair actually has something to write: a source path, a
- * fixed value, or a default for when the source is empty.
+ * fixed value that is filled in, or a default for when the source is empty.
+ * A pair switched to "fixed value" and left blank does NOT cover anything —
+ * it is the case this check exists for.
  */
 export function unmetRequired(args: {
     direction: "push" | "pull"
@@ -558,7 +589,7 @@ export function unmetRequired(args: {
         if (!fieldFlowsInDirection(effective, args.direction)) continue
 
         const hasSource =
-            pair.constant !== undefined ||
+            constantHasValue(pair.constant) ||
             pair.default !== undefined ||
             Boolean(
                 args.direction === "push" ? pair.medusa_path : pair.erpnext_field,

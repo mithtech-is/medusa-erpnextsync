@@ -1358,9 +1358,10 @@ type RequiredRow = { name: string; label: string; covered: boolean }
 /**
  * Which mandatory fields on the receiving side this mapping fills. A field
  * counts when a pair writes it in that direction and has something to
- * write: a source path or a fixed value. The rehearsal's `unmetRequired`
- * in modules/erpnext/mapping-engine.ts is the authority; this is the same
- * rule, kept here because the admin bundle cannot import from the server.
+ * write: a source path, or a fixed value that is filled in. The
+ * rehearsal's `unmetRequired` in modules/erpnext/mapping-engine.ts is the
+ * authority; this is the same rule, kept here because the admin bundle
+ * cannot import from the server.
  */
 function requiredCoverage(
   direction: "push" | "pull",
@@ -1373,7 +1374,7 @@ function requiredCoverage(
     const effective = String(p.direction ?? mappingDirection)
     if (!(effective === "both" || effective === direction)) continue
     const hasSource =
-      p.constant !== undefined ||
+      constantHasValue(p.constant) ||
       Boolean(direction === "push" ? p.medusa_path : p.erpnext_field)
     if (!hasSource) continue
     const target = direction === "push" ? p.erpnext_field : p.medusa_path
@@ -1554,14 +1555,201 @@ const CONFIDENCE_META: Record<
   none: { label: "no match", color: "red" },
 }
 
+/** As many records as the options endpoint will return for one Link.
+ *  Mirrors `LIMIT` in modules/erpnext's `fieldOptions`. */
+const CONSTANT_OPTIONS_LIMIT = 200
+
 /** What one ERPNext field will accept, as the connected site answers it.
  *  A Link answers with its records, a Select with its options, anything
  *  else with nothing — which means free text. */
 type ConstantOptionsMeta = {
   options: string[]
+  /** The Frappe fieldtype, so "no options" can be told apart: a Link with
+   *  nothing in it yet is a different message from a Data field that was
+   *  never going to offer a list. */
+  fieldtype?: string
   truncated?: boolean
   error?: string
   loading?: boolean
+}
+
+/**
+ * True when a pair's fixed value is actually something to send. Same rule
+ * as `constantHasValue` in modules/erpnext/mapping-engine.ts, which is the
+ * authority — kept here because the admin bundle cannot import from the
+ * server. A row switched to "fixed value" and left blank is not a source,
+ * and must not count as filling a mandatory field.
+ */
+function constantHasValue(constant: unknown): boolean {
+  if (constant === undefined) return false
+  if (typeof constant === "string") return constant.trim() !== ""
+  return true
+}
+
+/** Ask the connected site what one field accepts. Never throws: an
+ *  unreachable Frappe is an answer the caller renders, not a crash. */
+async function fetchConstantOptions(
+  doctype: string,
+  field: string,
+): Promise<ConstantOptionsMeta> {
+  try {
+    const r = await fetch(
+      `/admin/erpnext/doctypes/${encodeURIComponent(doctype)}/options?` +
+        new URLSearchParams({ field }).toString(),
+      { credentials: "include" },
+    )
+    const b = await r.json()
+    return b?.ok
+      ? {
+          options: b.options ?? [],
+          fieldtype: b.fieldtype,
+          truncated: b.truncated,
+        }
+      : { options: [], error: b?.message ?? "unreachable" }
+  } catch (err: any) {
+    // Not a server fault: usually Frappe unreachable or the api key
+    // lacking permission. Say so and let the operator type a value.
+    return { options: [], error: err?.message ?? "unreachable" }
+  }
+}
+
+/**
+ * What each fixed-value field will accept, read from the connected site.
+ *
+ * Nothing here is shipped: a deployment's Companies and Item Groups are
+ * its own, and a list this plugin decided on would be one client's setup
+ * handed to every other client.
+ *
+ * Answers are cached per field and dropped when the doctype changes —
+ * they belong to that doctype. A reply for a doctype we have since moved
+ * off is discarded rather than written under the new one's key, which a
+ * same-named field on both (`status`, `company`) would otherwise take.
+ *
+ * Shared by the wizard and the editor so a fixed value is chosen the same
+ * way wherever it is made.
+ */
+function useConstantOptions(doctype: string | undefined) {
+  const [options, setOptions] = useState<Record<string, ConstantOptionsMeta>>({})
+  /** Bumped on every doctype change; a reply carrying a stale one is
+   *  dropped. Without it the slower of two in-flight requests wins. */
+  const generation = useRef(0)
+  const asked = useRef<{ doctype: string; fields: Set<string> }>({
+    doctype: "",
+    fields: new Set(),
+  })
+
+  const request = useCallback(
+    (field: string) => {
+      if (!field || !doctype) return
+      if (asked.current.doctype !== doctype) {
+        asked.current = { doctype, fields: new Set() }
+        generation.current += 1
+        setOptions({})
+      }
+      if (asked.current.fields.has(field)) return
+      asked.current.fields.add(field)
+      const mine = generation.current
+      setOptions((prev) => ({ ...prev, [field]: { options: [], loading: true } }))
+      void fetchConstantOptions(doctype, field).then((meta) => {
+        if (generation.current !== mine) return
+        setOptions((prev) => ({ ...prev, [field]: meta }))
+      })
+    },
+    [doctype],
+  )
+
+  return { options, request }
+}
+
+/**
+ * The value side of a fixed-value pair.
+ *
+ * A Link or a Select answers with what it will accept, and then this is a
+ * dropdown of that site's own records — its Companies, its Item Groups.
+ * Anything else answers with nothing, and a typed value is the honest
+ * answer. Mirrors `constantControl` in the Frappe app's mapper so the same
+ * pair looks the same from either end.
+ */
+const ConstantValueControl: React.FC<{
+  value: string
+  meta?: ConstantOptionsMeta
+  /** False in the editor until a Frappe field is picked: there is no
+   *  field yet to ask about. The wizard always has one. */
+  hasField?: boolean
+  /** Preset copy explaining what this particular value is for. */
+  hint?: string
+  placeholder?: string
+  onChange: (v: string) => void
+}> = ({ value, meta, hasField = true, hint, placeholder, onChange }) => {
+  if (!hasField) {
+    return (
+      <div className="rounded border border-ui-border-base px-2 py-1.5 text-xs text-ui-fg-subtle">
+        Pick the ERPNext field first — the values on offer are that field's.
+      </div>
+    )
+  }
+
+  const options = meta?.options ?? []
+  // A value that is no longer on the site stays selectable rather than
+  // being dropped from a mapping that has already been running with it.
+  const orphan = Boolean(value) && options.length > 0 && !options.includes(value)
+  // A Link or Select that answered with nothing has nothing to choose
+  // from *yet* — the record has to be made in ERPNext first. Any other
+  // fieldtype was never going to offer a list.
+  const listed = meta?.fieldtype === "Link" || meta?.fieldtype === "Select"
+
+  if (options.length) {
+    return (
+      <>
+        <Select value={value} onValueChange={onChange}>
+          <Select.Trigger>
+            <Select.Value placeholder="Choose from this ERPNext" />
+          </Select.Trigger>
+          <Select.Content>
+            {orphan && (
+              <Select.Item value={value}>{value} — not on this site</Select.Item>
+            )}
+            {options.map((o) => (
+              <Select.Item key={o} value={o}>
+                {o}
+              </Select.Item>
+            ))}
+          </Select.Content>
+        </Select>
+        {(hint || orphan || meta?.truncated) && (
+          <Text className="mt-1 text-xs text-ui-fg-subtle">
+            {hint ? `${hint} ` : ""}
+            {orphan
+              ? "Saved earlier, and this ERPNext has no such record now. Syncs using it will fail until it exists or you pick another. "
+              : ""}
+            {meta?.truncated ? `Showing the first ${CONSTANT_OPTIONS_LIMIT}.` : ""}
+          </Text>
+        )}
+      </>
+    )
+  }
+
+  return (
+    <>
+      <Input
+        placeholder={placeholder ?? "Fixed value, sent every time"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <Text className="mt-1 text-xs text-ui-fg-subtle">
+        {hint ? `${hint} ` : ""}
+        {meta?.loading
+          ? "Reading the choices from ERPNext…"
+          : meta?.error
+            ? `Could not read the choices from ERPNext (${meta.error}) — type the value instead.`
+            : listed
+              ? "This ERPNext has no records to choose from yet, so it has to be created there first."
+              : meta
+                ? "This field takes free text."
+                : ""}
+      </Text>
+    </>
+  )
 }
 
 type FieldPair = {
@@ -1876,53 +2064,17 @@ const AddSyncWizard: React.FC<{
 
   /** Fixed-value pairs that are switched on but have nothing to send. */
   const blankConstants = fields.filter(
-    (f) => f.on && f.constant !== undefined && !f.constant.trim(),
+    (f) => f.on && f.constant !== undefined && !constantHasValue(f.constant),
   )
 
-  /**
-   * What each fixed-value field will accept, read from the connected
-   * ERPNext. Nothing here is shipped: a deployment's Item Groups and UOMs
-   * are its own, and a list this plugin decided on would be one client's
-   * setup handed to every other client.
-   */
-  const [constantOptions, setConstantOptions] = useState<
-    Record<string, { options: string[]; truncated?: boolean; error?: string }>
-  >({})
+  const { options: constantOptions, request: requestConstantOptions } =
+    useConstantOptions(preset?.doctype)
 
   useEffect(() => {
-    if (!preset) return
-    const wanted = preset.fields.filter((f) => f.constant !== undefined)
-    if (!wanted.length) return
-    let cancelled = false
-    ;(async () => {
-      for (const f of wanted) {
-        try {
-          const r = await fetch(
-            `/admin/erpnext/doctypes/${encodeURIComponent(preset.doctype)}/options?` +
-              new URLSearchParams({ field: f.erpnext_field }).toString(),
-            { credentials: "include" },
-          )
-          const b = await r.json()
-          if (cancelled) return
-          setConstantOptions((prev) => ({
-            ...prev,
-            [f.erpnext_field]: b?.ok
-              ? { options: b.options ?? [], truncated: b.truncated }
-              : { options: [], error: b?.message ?? "could not read the choices" },
-          }))
-        } catch (e: any) {
-          if (cancelled) return
-          setConstantOptions((prev) => ({
-            ...prev,
-            [f.erpnext_field]: { options: [], error: e?.message ?? "network error" },
-          }))
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
+    for (const f of preset?.fields ?? []) {
+      if (f.constant !== undefined) requestConstantOptions(f.erpnext_field)
     }
-  }, [preset?.key])
+  }, [preset?.key, requestConstantOptions])
 
   const save = async () => {
     if (!preset) return
@@ -1931,7 +2083,7 @@ const AddSyncWizard: React.FC<{
     try {
       const field_mappings = fields
         .filter((f) => f.on)
-        .filter((f) => f.constant === undefined || f.constant.trim())
+        .filter((f) => f.constant === undefined || constantHasValue(f.constant))
         .map((f) => ({
           medusa_path: f.medusa_path,
           erpnext_field: f.erpnext_field,
@@ -2162,34 +2314,13 @@ const AddSyncWizard: React.FC<{
                         )
                       return (
                         <div className="mt-2">
-                          {meta?.options.length ? (
-                            <Select value={f.constant || ""} onValueChange={setConstant}>
-                              <Select.Trigger>
-                                <Select.Value placeholder={`Choose from this ERPNext`} />
-                              </Select.Trigger>
-                              <Select.Content>
-                                {meta.options.map((o) => (
-                                  <Select.Item key={o} value={o}>{o}</Select.Item>
-                                ))}
-                              </Select.Content>
-                            </Select>
-                          ) : (
-                            <Input
-                              placeholder="Value to send every time"
-                              value={f.constant ?? ""}
-                              onChange={(e) => setConstant(e.target.value)}
-                            />
-                          )}
-                          <Text className="mt-1 text-xs text-ui-fg-subtle">
-                            {f.constantHint}
-                            {meta?.error
-                              ? ` Could not read the choices from ERPNext (${meta.error}) — type the value instead.`
-                              : meta && !meta.options.length
-                                ? " This ERPNext has no records to choose from yet, so it has to be created there first."
-                                : meta?.truncated
-                                  ? " Showing the first 200."
-                                  : ""}
-                          </Text>
+                          <ConstantValueControl
+                            value={f.constant ?? ""}
+                            meta={meta}
+                            hint={f.constantHint}
+                            placeholder="Value to send every time"
+                            onChange={setConstant}
+                          />
                         </div>
                       )
                     })()}
@@ -2801,10 +2932,18 @@ const MappingEditor: React.FC<{
    *  form just did to itself so the grid never appears to fill by magic. */
   const [suggestStatus, setSuggestStatus] = useState<string | null>(null)
 
+  /** `undefined` in a patch REMOVES the key rather than setting it to
+   *  undefined. `constant` is read by its presence — a key left behind
+   *  holding undefined is a pair that says it has a fixed value and has
+   *  none — so "stop being a constant" has to mean the key is gone. */
   const setPair = (idx: number, patch: Partial<FieldPair>) => {
     setDraft((d) => {
       const fm = [...(d.field_mappings ?? [])]
-      fm[idx] = { ...fm[idx], ...patch }
+      const next: any = { ...fm[idx], ...patch }
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === undefined) delete next[k]
+      }
+      fm[idx] = next
       return { ...d, field_mappings: fm }
     })
   }
@@ -2822,60 +2961,10 @@ const MappingEditor: React.FC<{
    * `company` on an order, `item_group` on an item — and typing the name
    * is how you find out later that it was wrong. Ask the connected site
    * what the field accepts, the same question the wizard asks, so editing
-   * an existing mapping offers the same choices as building a new one.
-   *
-   * Cached per field for the life of the editor and dropped when the
-   * doctype changes: the answers belong to that doctype. */
-  const [constantOptions, setConstantOptions] = useState<
-    Record<string, ConstantOptionsMeta>
-  >({})
-  const askedOptionsFor = useRef<{ doctype: string; fields: Set<string> }>({
-    doctype: "",
-    fields: new Set(),
-  })
+   * an existing mapping offers the same choices as building a new one. */
+  const { options: constantOptions, request: requestConstantOptions } =
+    useConstantOptions(draft.doctype)
 
-  const requestConstantOptions = useCallback(
-    (field: string) => {
-      const doctype = draft.doctype
-      if (!field || !doctype) return
-      const asked = askedOptionsFor.current
-      if (asked.doctype !== doctype) {
-        asked.doctype = doctype
-        asked.fields = new Set()
-        setConstantOptions({})
-      }
-      if (asked.fields.has(field)) return
-      asked.fields.add(field)
-      setConstantOptions((prev) => ({
-        ...prev,
-        [field]: { options: [], loading: true },
-      }))
-      ;(async () => {
-        try {
-          const r = await fetch(
-            `/admin/erpnext/doctypes/${encodeURIComponent(doctype)}/options?` +
-              new URLSearchParams({ field }).toString(),
-            { credentials: "include" },
-          )
-          const b = await r.json()
-          setConstantOptions((prev) => ({
-            ...prev,
-            [field]: b?.ok
-              ? { options: b.options ?? [], truncated: b.truncated }
-              : { options: [], error: b?.message ?? "unreachable" },
-          }))
-        } catch (err: any) {
-          // Not a server fault: usually Frappe unreachable or the api key
-          // lacking permission. Say so and let the operator type a value.
-          setConstantOptions((prev) => ({
-            ...prev,
-            [field]: { options: [], error: err?.message ?? "unreachable" },
-          }))
-        }
-      })()
-    },
-    [draft.doctype],
-  )
   const removePair = (idx: number) => {
     setDraft((d) => {
       const fm = [...(d.field_mappings ?? [])]
@@ -2893,7 +2982,18 @@ const MappingEditor: React.FC<{
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        // A row switched to "fixed value" and left blank is not a pair
+        // yet: it has no source, and keeping it would count as filling
+        // the Frappe field it names — silencing the mandatory-field
+        // warnings and passing the rehearsal that gates switching the
+        // mapping on. The banner above the list says so before we get
+        // here; this is what makes it true. Same rule as the wizard.
+        body: JSON.stringify({
+          ...draft,
+          field_mappings: (draft.field_mappings ?? []).filter(
+            (p) => p.constant === undefined || constantHasValue(p.constant),
+          ),
+        }),
       })
       const body = await res.json()
       if (!res.ok) throw new Error(body.message || "save_failed")
@@ -3455,12 +3555,45 @@ const MappingEditor: React.FC<{
             doctype and fill this in, or <em>Add pair</em> to build manually.
           </div>
         )}
+        {/* A row turned into a fixed value and left blank. It looks like
+            a pair and is not one: no source, nothing to send, and it
+            names a Frappe field — so it would count as covering that
+            field and switch the warning below OFF. Say so here, and drop
+            it on save rather than persisting a pair that writes nothing. */}
+        {(() => {
+          const blanks = (draft.field_mappings ?? []).filter(
+            (p) => p.constant !== undefined && !constantHasValue(p.constant),
+          )
+          if (!blanks.length) return null
+          return (
+            <div className="mb-3 rounded border border-ui-tag-orange-border bg-ui-tag-orange-bg p-3 text-xs">
+              <div className="mb-1 font-medium">
+                {blanks.length} fixed value{blanks.length === 1 ? "" : "s"} with
+                nothing to send
+              </div>
+              <div className="text-ui-fg-subtle">
+                These rows will not be saved until you say what to send:{" "}
+                {blanks
+                  .map((p) => p.erpnext_field || "(no field picked)")
+                  .join(", ")}
+                . Pick a value, or use ↩ to read a store field instead.
+              </div>
+            </div>
+          )
+        })()}
         {/* Mandatory ERPNext fields we could not guess a source for.
             They're not persistable as pairs (no source), so they'd be
             invisible — but they're exactly what makes a push 417 later. */}
         {(() => {
+          // A blank fixed value is not a source, so it does not count as
+          // mapping the field it names — otherwise turning a row into a
+          // constant would hide the very gap it creates.
           const mapped = new Set(
-            (draft.field_mappings ?? []).map((p) => p.erpnext_field),
+            (draft.field_mappings ?? [])
+              .filter(
+                (p) => p.constant === undefined || constantHasValue(p.constant),
+              )
+              .map((p) => p.erpnext_field),
           )
           const gaps = Object.values(annotations).filter(
             (a) => a.reqd && !a.medusa_path && !mapped.has(a.erpnext_field),
@@ -3595,84 +3728,6 @@ const MappingEditor: React.FC<{
  * source, a fieldname the picker does not know — lives behind the ⋯, still
  * reachable and no longer in the way.
  */
-/**
- * The value side of a fixed-value pair.
- *
- * A Link or a Select answers with what it will accept, and then this is a
- * dropdown of that site's own records — its Companies, its Item Groups.
- * Anything else answers with nothing, and a typed value is the honest
- * answer. Mirrors `constantControl` in the Frappe app's mapper so the
- * same pair looks the same from either end.
- */
-const ConstantValueControl: React.FC<{
-  value: string
-  meta?: ConstantOptionsMeta
-  hasField: boolean
-  onChange: (v: string) => void
-}> = ({ value, meta, hasField, onChange }) => {
-  if (!hasField) {
-    return (
-      <div className="rounded border border-ui-border-base px-2 py-1.5 text-xs text-ui-fg-subtle">
-        Pick the ERPNext field first — the values on offer are that field's.
-      </div>
-    )
-  }
-
-  const options = meta?.options ?? []
-  // A value that is no longer on the site stays selectable rather than
-  // being dropped from a mapping that has already been running with it.
-  const orphan = Boolean(value) && options.length > 0 && !options.includes(value)
-
-  if (options.length) {
-    return (
-      <>
-        <Select value={value} onValueChange={onChange}>
-          <Select.Trigger>
-            <Select.Value placeholder="Choose from this ERPNext" />
-          </Select.Trigger>
-          <Select.Content>
-            {orphan && (
-              <Select.Item value={value}>{value} — not on this site</Select.Item>
-            )}
-            {options.map((o) => (
-              <Select.Item key={o} value={o}>
-                {o}
-              </Select.Item>
-            ))}
-          </Select.Content>
-        </Select>
-        {(orphan || meta?.truncated) && (
-          <Text className="mt-1 text-xs text-ui-fg-subtle">
-            {orphan
-              ? "Saved earlier, and this ERPNext has no such record now. Syncs using it will fail until it exists or you pick another. "
-              : ""}
-            {meta?.truncated ? "Showing the first 200." : ""}
-          </Text>
-        )}
-      </>
-    )
-  }
-
-  return (
-    <>
-      <Input
-        placeholder="Fixed value, sent every time"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      />
-      <Text className="mt-1 text-xs text-ui-fg-subtle">
-        {meta?.loading
-          ? "Reading the choices from ERPNext…"
-          : meta?.error
-            ? `Could not read the choices from ERPNext (${meta.error}) — type the value instead.`
-            : meta
-              ? "This field takes free text, or has nothing to choose from there yet."
-              : ""}
-      </Text>
-    </>
-  )
-}
-
 const FieldPairRow: React.FC<{
   pair: FieldPair
   entity: MedusaEntity | null
@@ -3713,9 +3768,10 @@ const FieldPairRow: React.FC<{
   }, [isConstant, pair.erpnext_field, onRequestConstantOptions])
 
   /** Flip between reading a store field and sending a fixed value. Going
-   *  in clears the path (a constant has no source); coming out drops the
-   *  key entirely rather than leaving an empty string behind, which the
-   *  engine would still treat as a value to send. */
+   *  in clears the path (a constant has no source); coming out removes
+   *  the `constant` key — `setPair` deletes keys patched to undefined —
+   *  rather than leaving an empty string behind, which would read as a
+   *  pair that has a fixed value and no value. */
   const toggleConstant = () =>
     onChange(
       isConstant
