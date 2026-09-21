@@ -12,6 +12,13 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
 - A fixed value is chosen from the connected site in the mapping editor, not only in the guided
   wizard: a Link or Select offers that site's own records, a pair can be turned into a fixed value
   and back, and a saved value the site no longer has stays selected and says so.
+- A fixed value left blank no longer counts as a source. Turning a row into a fixed value and not
+  saying what to send used to satisfy the mandatory-field warnings and the rehearsal that gates
+  switching a mapping on, then write an empty string over the field on the first real record. It is
+  now flagged in the editor, dropped on save, left out of the payload, and reported in the skipped
+  fields.
+- The wizard and the editor share one fixed-value control and one options reader, so a reply for a
+  doctype that has since been changed away from is discarded rather than shown under the new one.
 
 ## 0.1.1
 

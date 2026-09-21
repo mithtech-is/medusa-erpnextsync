@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { applyMapping, unmetRequired } from "../mapping-engine"
+import { applyMapping, constantHasValue, unmetRequired } from "../mapping-engine"
 
 /**
  * The engine that turns a record on one side into a payload for the
@@ -177,6 +177,92 @@ describe("fixed-value fields", () => {
             source: {},
         })
         expect(res.ok && res.payload).toEqual({})
+    })
+})
+
+/**
+ * A row switched to "fixed value" in the admin and never filled in. It
+ * has no source and nothing to send, and writing the blank would put an
+ * empty string over whatever ERPNext already holds.
+ */
+describe("a fixed value nobody filled in", () => {
+    const blanks = [undefined, "", "   ", "\t\n"]
+
+    it("is not a value", () => {
+        for (const c of blanks) expect(constantHasValue(c)).toBe(false)
+    })
+
+    it("counts anything else, including null and falsy scalars", () => {
+        for (const c of [null, 0, false, "x", " x "]) {
+            expect(constantHasValue(c)).toBe(true)
+        }
+    })
+
+    it("is left out of the payload rather than written as a blank", () => {
+        const res = applyMapping({
+            direction: "push",
+            fields: [
+                { medusa_path: "handle", erpnext_field: "item_code" },
+                { medusa_path: "", erpnext_field: "item_group", constant: "" },
+                { medusa_path: "", erpnext_field: "stock_uom", constant: "  " },
+            ],
+            mappingDirection: "push",
+            source: { handle: "t-shirt" },
+        })
+        expect(res.ok).toBe(true)
+        if (!res.ok) return
+        expect(res.payload).toEqual({ item_code: "t-shirt" })
+    })
+
+    it("is reported as skipped, unlike a constant that fires", () => {
+        // The one case where a constant belongs in `skippedFields`: it
+        // moved nothing, and that is a surprise worth surfacing.
+        const res = applyMapping({
+            direction: "push",
+            fields: [
+                { medusa_path: "", erpnext_field: "item_group", constant: "" },
+                { medusa_path: "", erpnext_field: "stock_uom", constant: "Nos" },
+            ],
+            mappingDirection: "push",
+            source: {},
+        })
+        expect(res.ok && res.skippedFields).toContain("item_group")
+        expect(res.ok && res.skippedFields).not.toContain("stock_uom")
+    })
+
+    it("still writes a constant that is null, which clears the field", () => {
+        const res = applyMapping({
+            direction: "push",
+            fields: [{ medusa_path: "", erpnext_field: "item_group", constant: null }],
+            mappingDirection: "push",
+            source: {},
+        })
+        expect(res.ok && res.payload).toEqual({ item_group: null })
+    })
+
+    it("does not cover the mandatory field it names", () => {
+        // The bug this guards: a blank fixed value on `item_group` made
+        // the rehearsal report full coverage, so the mapping could be
+        // switched on and then failed on the first real record.
+        const unmet = unmetRequired({
+            direction: "push",
+            mappingDirection: "push",
+            required: [{ name: "item_group", label: "Item Group" }],
+            fields: [{ medusa_path: "", erpnext_field: "item_group", constant: "" }],
+        })
+        expect(unmet.map((f) => f.name)).toEqual(["item_group"])
+    })
+
+    it("covers it once somebody says what to send", () => {
+        const unmet = unmetRequired({
+            direction: "push",
+            mappingDirection: "push",
+            required: [{ name: "item_group", label: "Item Group" }],
+            fields: [
+                { medusa_path: "", erpnext_field: "item_group", constant: "Products" },
+            ],
+        })
+        expect(unmet).toEqual([])
     })
 })
 
