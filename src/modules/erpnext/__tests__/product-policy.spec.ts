@@ -80,7 +80,7 @@ describe("the link a product carries", () => {
 
 describe("what the store really refuses a product without", () => {
     it("does not count handle, which Medusa derives from the title", async () => {
-        const { __discoveryTest__ } = await import("../discovery")
+        const { __discoveryTest__ } = await import("../discovery.js")
         const isRequired = (__discoveryTest__ as any).isRequired
         const nonNullNoDefault = { nullable: false, primary: false } as any
         expect(isRequired({ ...nonNullNoDefault, name: "title" }, 0)).toBe(true)
