@@ -724,6 +724,26 @@ class ErpnextModuleService extends MedusaService({
             "modified",
             "docstatus",
             "idx",
+            // Link keys. These read like fields on the document and are not:
+            // the Frappe app moved the Medusa ids off Customer, Item and the
+            // sales doctypes into `Medusync Link` (patch v1_7), keeping the
+            // names as keys into that table — see links.py, LINK_KEYS and
+            // DETAIL_KEYS. A field map naming one is correct and always was.
+            // Without this, every site that has run the patch has its
+            // catalogue, customer and order mappings switched off the first
+            // time this check runs, for fields nobody removed by mistake.
+            "medusa_customer_id",
+            "medusa_product_id",
+            "medusa_variant_id",
+            "medusa_order_id",
+            "medusa_address_id",
+            "medusa_payment_id",
+            "medusa_invoice_id",
+            "medusa_display_id",
+            "medusa_order_source",
+            "medusa_payment_method",
+            "medusa_payment_reference",
+            "medusa_customer_tier",
         ])
 
         for (const mapping of mappings) {

@@ -3,6 +3,15 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.1.2 — 2026-09-23
+
+- A link key is no longer mistaken for a missing field. The Frappe app moved the Medusa ids off
+  Customer, Item and the sales doctypes into `Medusync Link` (patch v1_7) and kept the names as keys
+  into that table, so a field map naming `medusa_product_id` is correct. `checkMappingDrift` was
+  checking them against live doctype meta, finding them gone, and switching the mapping off — on
+  sites where nothing was misconfigured. Seen on a live catalogue: "Item no longer has:
+  medusa_product_id", mapping disabled, inbound events accepted and silently taken by nothing.
+
 ## 0.1.1 — 2026-09-21
 
 - Verified against Medusa 2.21.0 (install, `plugin:build`, test suite, `tsc --noEmit`).
