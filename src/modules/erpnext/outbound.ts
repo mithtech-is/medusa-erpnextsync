@@ -1,18 +1,17 @@
 /**
- * Medusa → ERPNext is paused.
+ * Medusa → ERPNext can be paused.
  *
- * The transport that carried pushes was the medusync envelope, and medusync
- * is retired. Phase 2 replaces it with plain REST writes. Until then every
- * push mapping is evaluated as before (policy, trigger, allowlist,
- * transform) and then stops here, recording what it would have sent, so
- * nothing is lost and nothing leaves.
+ * Pushes run over plain Frappe REST. Set `ERPNEXT_PAUSE_PUSH=true` to stop
+ * them without touching the mappings: every push mapping is still
+ * evaluated (policy, trigger, allowlist, transform) and then stops, on
+ * record, so nothing is lost and nothing leaves.
  */
-export const OUTBOUND_PAUSED = true
+export const OUTBOUND_PAUSED = process.env.ERPNEXT_PAUSE_PUSH === "true"
 
 export const OUTBOUND_PAUSED_REASON = "outbound-paused"
 
 export const OUTBOUND_PAUSED_MESSAGE =
-    "Pushes to ERPNext are paused in this release; ERPNext → Medusa catalogue sync is live."
+    "Pushes to ERPNext are paused (ERPNEXT_PAUSE_PUSH=true); ERPNext → Medusa is live."
 
 export function pausedResult(): {
     ok: true

@@ -42,6 +42,18 @@ export default async function erpnextForwardHandler({
     if (!eventName) return
     if (OUTBOUND_PAUSED) return
 
+    // A captured payment is an order event in disguise: the order's push
+    // mappings run for `order.payment_captured`, which is when a Sales
+    // Invoice can be raised.
+    if (eventName === "payment.captured") {
+        const orderId = await orderIdForPayment(container, event?.data?.id)
+        if (!orderId) return
+        return erpnextForwardHandler({
+            event: { ...event, name: "order.payment_captured", data: { ...(event?.data ?? {}), id: orderId } },
+            container,
+        } as SubscriberArgs<any>)
+    }
+
     const entityId = event?.data?.id as string | undefined
     // Idempotency key for the far side. Medusa's event envelope does not
     // reliably carry a top-level `id` (workflow-emitted events often omit
@@ -137,6 +149,30 @@ export default async function erpnextForwardHandler({
     return
 }
 
+/** The order a payment belongs to, through its payment collection. */
+async function orderIdForPayment(container: any, paymentId: string | undefined): Promise<string | null> {
+    if (!paymentId) return null
+    try {
+        const query: any = container.resolve("query")
+        const { data: payments } = await query.graph({
+            entity: "payment",
+            fields: ["id", "payment_collection_id"],
+            filters: { id: paymentId },
+        })
+        const collectionId = payments?.[0]?.payment_collection_id
+        if (!collectionId) return null
+        const { data: orders } = await query.graph({
+            entity: "order",
+            fields: ["id"],
+            filters: { payment_collections: { id: collectionId } },
+        })
+        return orders?.[0]?.id ?? null
+    } catch (err: any) {
+        console.warn(`[erpnext-forward] could not resolve the order for payment ${paymentId}:`, err?.message)
+        return null
+    }
+}
+
 /**
  * Map an event name to the Medusa entity key it concerns. Drives the
  * mapping-lookup query — without this we'd have to ask the database
@@ -168,7 +204,7 @@ function resolveEntityKey(eventName: string): string | null {
  * registry instantly extends this list — no extra wiring.
  */
 function buildSubscribedEvents(): string[] {
-    const set = new Set<string>()
+    const set = new Set<string>(["payment.captured"])
     for (const e of listMedusaEntities()) {
         for (const ev of e.events) set.add(ev)
     }

@@ -54,6 +54,13 @@ const SaveSchema = z.object({
     frappe_webhook_secret: z.string().nullable().optional(),
     /** ISO 3166 region for phone numbers without a country code. */
     phone_region: z.string().max(2).nullable().optional(),
+    /** Where a pushed document lands; empty falls back to ERPNext's defaults. */
+    erpnext_company: z.string().nullable().optional(),
+    erpnext_price_list: z.string().nullable().optional(),
+    erpnext_customer_group: z.string().nullable().optional(),
+    erpnext_territory: z.string().nullable().optional(),
+    erpnext_shipping_account: z.string().nullable().optional(),
+    erpnext_taxes_template: z.string().nullable().optional(),
     erpnext_api_key: z.string().nullable().optional(),
     erpnext_api_secret: z.string().nullable().optional(),
     request_timeout_ms: z.number().int().optional(),

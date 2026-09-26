@@ -410,8 +410,8 @@ async function capturedPayments(query: any, collections: any[]): Promise<any[]> 
                 if (!p?.captured_at && !captured) continue
                 out.push({
                     id: p.id,
-                    // Medusa keeps money in minor units; ERPNext books major.
-                    amount: (captured || Number(p.amount) || 0) / 100,
+                    // Medusa 2 keeps money in the currency's major unit.
+                    amount: captured || Number(p.amount) || 0,
                     currency: p.currency_code ?? null,
                     provider_id: p.provider_id ?? null,
                     captured_at: p.captured_at ?? new Date().toISOString(),
@@ -479,7 +479,11 @@ const orderEntity: EntityDescriptor = {
                 "currency_code",
                 "payment_status",
                 "fulfillment_status",
+                "created_at",
+                "shipping_total",
+                "discount_total",
                 "summary.*",
+                "items.id",
                 "items.title",
                 // In Medusa v2 the order line QUANTITY lives on the item
                 // DETAIL (order_item), not the line item — `items.quantity`
@@ -491,7 +495,9 @@ const orderEntity: EntityDescriptor = {
                 "items.unit_price",
                 "items.total",
                 "items.tax_total",
+                "items.variant.id",
                 "items.variant.sku",
+                "items.variant.product.id",
                 "items.variant.product.handle",
                 "items.variant.product.title",
                 "shipping_address.*",

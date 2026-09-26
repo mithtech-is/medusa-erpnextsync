@@ -3,6 +3,33 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.3.0 — unreleased
+
+**Medusa → ERPNext is back, over plain Frappe REST.** Nothing is installed on ERPNext.
+
+- Push mappings write with the API key: `POST /api/resource/<doctype>` to create, `PUT` to
+  update, matched through `erpnext_link`, then the mapping's key. `allow_create` /
+  `allow_update` are enforced here. A document created on a selection DocType is stamped
+  `Medusa → ERPNext` (or `Both` for a two-way mapping).
+- **Customers** become Customers (name, type, email, phone, GST fields when the site has them,
+  customer group and territory from Settings) with their addresses — and the company's
+  GST-registered billing address — as linked **Address** documents.
+- **Orders** become a draft **Sales Order** (lines by the product's link or the SKU, the
+  customer, both addresses, the order number as PO number, shipping as an "Actual" charge on the
+  configured account, a discount on the grand total) and, once paid in full, a draft
+  **Sales Invoice** made from it; `order.payment_captured` is raised from `payment.captured`.
+  The invoice is recorded in `erpnext_invoice`. A cancelled order deletes its draft documents or
+  cancels submitted ones; a deleted customer or product is disabled, never deleted.
+- Settings → Pushing to ERPNext: Company, selling price list, customer group, territory,
+  shipping account, taxes template, and what an order becomes (Sales Order, plus a Sales
+  Invoice once paid, or the invoice only).
+- Echo suppression both ways: a document the API user last wrote is not applied back from a
+  webhook or a pull; a push is not sent for a record an inbound write touched moments ago.
+- `ERPNEXT_PAUSE_PUSH=true` pauses pushes without touching the mappings.
+- Money is in the currency's major unit (Medusa 2); the old ÷100 is gone.
+- Presets: customers keyed `email ↔ email_id`; orders keyed `display_id ↔ po_no` and
+  listening to `order.payment_captured`; the `medusa_*_id` pairs are gone.
+
 ## 0.2.0 — 2026-09-26
 
 **Breaking: the `medusync` Frappe app is no longer used.** ERPNext → Medusa runs on Frappe core

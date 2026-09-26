@@ -64,8 +64,11 @@ DocType; the pair is its identity and there is one per pair.
 - A document narrows its mapping, never widens it: a push for a document
   ERPNext last showed as ERPNext → Medusa, or blank, is skipped as
   `record-direction`.
-- **Push** mappings are evaluated but **paused** in this release: the log
-  shows `paused`, nothing leaves.
+- **Push** mappings write over REST. Settings → *Pushing to ERPNext* names
+  the Company, price list, customer group, territory, shipping account and
+  taxes template; blank means ERPNext's default. A line with no ERPNext
+  Item stops an order (`failed`, naming the SKUs) rather than shipping it
+  short; link the product or create the Item and retry the event.
 
 ### Trying one before trusting it
 
@@ -104,7 +107,7 @@ POST /admin/erpnext/events/retry-failed   { "limit": 200 }
 ```
 POST /admin/erpnext/mappings/{id}/pull-now            { "full": true }   # full = ignore the watermark
 POST /admin/erpnext/pull/items                                           # preview, read-only
-POST /admin/erpnext/push/products|customers|orders                       # paused: logged, not sent
+POST /admin/erpnext/push/products|customers|orders                       # through the push mappings
 ```
 
 ## The catalogue

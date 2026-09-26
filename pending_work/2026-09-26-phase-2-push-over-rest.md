@@ -1,8 +1,11 @@
 # Phase 2 — Medusa → ERPNext over REST
 
-**Status 2026-09-26:** not started. Pushes are paused in 0.2.0 (`src/modules/erpnext/outbound.ts`);
-every push mapping is evaluated up to the transport and logged as `paused`. This note records
-what Phase 2 has to restore and the seams already prepared for it. Scope it with the user first.
+**Status 2026-09-26 (evening):** built on `feat/push-over-rest` — generic REST push, Customer +
+Address, Sales Order + Sales Invoice on capture, cancel/disable, echo suppression, the
+`payment.captured` subscriber. Left for later: Payment Entry per captured payment
+(`record_payments`), the store's own invoice numbering (Frappe ignores a name on insert for a
+naming-series DocType; needs a custom field or a server hook), stub Items for unlinked lines,
+and the open question below.
 
 ## What medusync used to do that has to come back
 

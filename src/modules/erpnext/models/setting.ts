@@ -150,6 +150,20 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      */
     log_retention_days: model.number().default(180),
 
+    // ── Where a pushed document lands (Phase 2) ──────────────────────
+    /** ERPNext Company the documents belong to. Empty → Global Defaults. */
+    erpnext_company: model.text().nullable(),
+    /** Selling price list on Sales Orders and Invoices. Empty → Selling Settings. */
+    erpnext_price_list: model.text().nullable(),
+    /** What a new Customer gets. Empty → ERPNext's own defaults. */
+    erpnext_customer_group: model.text().nullable(),
+    erpnext_territory: model.text().nullable(),
+    /** Account head that books an order's shipping as an "Actual" charge.
+     *  Empty → shipping is not booked and the sync row says so. */
+    erpnext_shipping_account: model.text().nullable(),
+    /** Sales Taxes and Charges Template applied to sales documents. */
+    erpnext_taxes_template: model.text().nullable(),
+
     // ── Orders and invoices (this store's choice; honoured by the push) ─
     /** "Sales Order" | "Sales Invoice" | "Sales Order and Sales Invoice". */
     order_document: model.text().nullable(),

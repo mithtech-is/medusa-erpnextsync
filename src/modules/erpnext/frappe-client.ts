@@ -13,6 +13,7 @@ export type FrappeClient = {
     get(path: string, query?: Record<string, string>): Promise<FrappeResult>
     post(path: string, body: any): Promise<FrappeResult>
     put(path: string, body: any): Promise<FrappeResult>
+    delete(path: string): Promise<FrappeResult>
 }
 
 /** What ERPNext meant, out of the several places it puts an error. */
@@ -82,5 +83,6 @@ export function makeFrappeClient(opts: {
         get: (path, query) => call("GET", path, query),
         post: (path, body) => call("POST", path, undefined, body),
         put: (path, body) => call("PUT", path, undefined, body),
+        delete: (path) => call("DELETE", path),
     }
 }

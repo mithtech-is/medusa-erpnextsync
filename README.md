@@ -44,10 +44,26 @@ Medusa and drafts the products of those that do not (deselected while the
 store was down, trashed, renamed); a document that became Medusa → ERPNext
 is left alone.
 
-**Medusa → ERPNext is paused** in this release. Push mappings are still
-evaluated — policy, trigger, allowlist, transform — and the outcome is
-logged as `paused`; nothing leaves. Customers and orders over REST are the
-next phase, stock and prices the one after.
+**Medusa → ERPNext, over plain Frappe REST.** A push mapping writes with
+the API key: a document is found through the link table, then by the
+mapping's key, and created or updated as the mapping allows. Two doctypes
+get more than a flat document:
+
+- **Customer**: name, type, email, phone, GST fields when the site has
+  them, customer group and territory from Settings, and the customer's
+  addresses (plus the company's GST-registered billing address) as linked
+  **Address** documents.
+- **Sales Order**: one line per order line (the product's link, else its
+  SKU), the customer, both addresses, the order number as PO number,
+  shipping as an "Actual" charge on the configured account, a discount on
+  the grand total; and once the order is paid in full a draft **Sales
+  Invoice** made from it. Everything is created as a draft; an ERPNext
+  user submits.
+
+A cancelled order deletes its draft documents (or cancels submitted
+ones); a deleted customer or product is disabled, never deleted.
+`ERPNEXT_PAUSE_PUSH=true` pauses pushes without touching the mappings.
+Stock and prices are the next phase.
 
 ## Set up ERPNext
 

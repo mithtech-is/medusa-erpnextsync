@@ -43,6 +43,12 @@ type SettingsView = {
   erpnext_setup_at: string | null
   erpnext_setup_report: SetupReport | null
   phone_region: string
+  erpnext_company: string | null
+  erpnext_price_list: string | null
+  erpnext_customer_group: string | null
+  erpnext_territory: string | null
+  erpnext_shipping_account: string | null
+  erpnext_taxes_template: string | null
   outbound_paused: boolean
   erpnext_api_key_masked: string | null
   erpnext_api_secret_masked: string | null
@@ -177,8 +183,9 @@ const ErpnextPage = () => {
       {view?.outbound_paused && (
         <div className="mb-4 rounded border border-ui-tag-orange-border bg-ui-tag-orange-bg px-3 py-2">
           <Text size="small">
-            Pushes to ERPNext are paused in this release: push mappings are
-            evaluated and logged, nothing leaves. ERPNext → Medusa is live.
+            Pushes to ERPNext are paused (ERPNEXT_PAUSE_PUSH is set): push
+            mappings are evaluated and logged, nothing leaves. ERPNext → Medusa
+            is live.
           </Text>
         </div>
       )}
@@ -237,6 +244,15 @@ const SettingsTab: React.FC<{
     view.log_retention_days ?? 180,
   )
   const [phoneRegion, setPhoneRegion] = useState(view.phone_region ?? "IN")
+  const [pushCfg, setPushCfg] = useState({
+    erpnext_company: view.erpnext_company ?? "",
+    erpnext_price_list: view.erpnext_price_list ?? "",
+    erpnext_customer_group: view.erpnext_customer_group ?? "",
+    erpnext_territory: view.erpnext_territory ?? "",
+    erpnext_shipping_account: view.erpnext_shipping_account ?? "",
+    erpnext_taxes_template: view.erpnext_taxes_template ?? "",
+  })
+  const [orderDocument, setOrderDocument] = useState(view.order_document ?? "Sales Order and Sales Invoice")
   /** A freshly generated secret, shown once. Cleared on save — a stored
    *  secret is never re-displayed. */
   const [freshSecret, setFreshSecret] = useState<string | null>(null)
@@ -291,6 +307,15 @@ const SettingsTab: React.FC<{
     setPushAllowlist(view.push_allowlist ?? "")
     setLogRetentionDays(view.log_retention_days ?? 180)
     setPhoneRegion(view.phone_region ?? "IN")
+    setPushCfg({
+      erpnext_company: view.erpnext_company ?? "",
+      erpnext_price_list: view.erpnext_price_list ?? "",
+      erpnext_customer_group: view.erpnext_customer_group ?? "",
+      erpnext_territory: view.erpnext_territory ?? "",
+      erpnext_shipping_account: view.erpnext_shipping_account ?? "",
+      erpnext_taxes_template: view.erpnext_taxes_template ?? "",
+    })
+    setOrderDocument(view.order_document ?? "Sales Order and Sales Invoice")
     setInvoiceStorage(view.invoice_storage ?? "local")
     setLocalDir(view.invoice_local_dir ?? "")
     setS3Bucket(view.s3_bucket ?? "")
@@ -322,6 +347,8 @@ const SettingsTab: React.FC<{
         push_allowlist: pushAllowlist.trim() || null,
         log_retention_days: Number(logRetentionDays) || 0,
         phone_region: phoneRegion.trim().toUpperCase() || "IN",
+        ...Object.fromEntries(Object.entries(pushCfg).map(([k, v]) => [k, v.trim() || null])),
+        order_document: orderDocument,
         invoice_storage: invoiceStorage,
         invoice_local_dir: localDir.trim() || null,
         s3_bucket: s3Bucket.trim() || null,
@@ -859,14 +886,61 @@ const SettingsTab: React.FC<{
         />
       </section>
       <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Pushing to ERPNext</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          Where a document the store writes lands. Every field is optional:
+          blank means ERPNext's own default (the default Company, the
+          Selling Settings price list, no customer group or territory).
+          Without a shipping account an order's shipping is not booked and
+          the sync row says so.
+        </Text>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {(
+            [
+              ["erpnext_company", "Company", "Global Defaults → Default Company"],
+              ["erpnext_price_list", "Selling price list", "Selling Settings → Default Price List"],
+              ["erpnext_customer_group", "Customer group for new customers", "ERPNext default"],
+              ["erpnext_territory", "Territory for new customers", "ERPNext default"],
+              ["erpnext_shipping_account", "Shipping account head", "not booked"],
+              ["erpnext_taxes_template", "Sales taxes and charges template", "none"],
+            ] as Array<[keyof typeof pushCfg, string, string]>
+          ).map(([key, label, fallback]) => (
+            <div key={key}>
+              <Label>{label}</Label>
+              <Input
+                value={pushCfg[key]}
+                onChange={(e) => setPushCfg((c) => ({ ...c, [key]: e.target.value }))}
+                placeholder={fallback}
+              />
+            </div>
+          ))}
+          <div>
+            <Label>A store order becomes</Label>
+            <Select value={orderDocument} onValueChange={(v) => setOrderDocument(v)}>
+              <Select.Trigger>
+                <Select.Value />
+              </Select.Trigger>
+              <Select.Content>
+                <Select.Item value="Sales Order">Sales Order only</Select.Item>
+                <Select.Item value="Sales Order and Sales Invoice">Sales Order, and a Sales Invoice once paid</Select.Item>
+                <Select.Item value="Sales Invoice">Sales Invoice only, once paid</Select.Item>
+              </Select.Content>
+            </Select>
+            <Text size="small" className="text-ui-fg-subtle">
+              Documents are created as drafts; an ERPNext user submits them.
+            </Text>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
         <Heading level="h2">Orders and invoices</Heading>
         <Text size="small" className="text-ui-fg-subtle mb-3">
-          What the push to ERPNext does with an order. Pushes are paused in
-          this release; these settings are kept for when they resume.
+          What the push to ERPNext does with an order, as saved.
         </Text>
         <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
           <Text size="small">
-            A store order becomes: <strong>{view.order_document || "Sales Order"}</strong>
+            A store order becomes: <strong>{view.order_document || "Sales Order and Sales Invoice"}</strong>
           </Text>
           <Text size="small">
             Invoice numbers:{" "}
@@ -2017,7 +2091,7 @@ type Direction = "push" | "pull" | "both"
  * differs per direction, so say it at the point of choosing.
  */
 const DIRECTION_HELP: Record<Direction, string> = {
-  push: "Medusa events write into ERPNext over the REST API. Paused in this release: the mapping is evaluated and logged, nothing leaves.",
+  push: "Medusa events write into ERPNext over the REST API with the API key in Settings. Customers get their Addresses; orders become a Sales Order and, once paid, a Sales Invoice, as drafts.",
   pull: "The webhooks Set up ERPNext installs deliver each selected document (ERPNext → Medusa or Both) as it changes, and a cron polls every 5 min for selected rows changed since the last run. Needs only the API key.",
   both: "Both of the above on the same record. Per-field overrides below decide which side owns each field — set a field to one-way to stop the other side overwriting it.",
 }
@@ -2199,16 +2273,17 @@ const SYNC_PRESETS: SyncPreset[] = [
     // Keyed on the link field, not on email. ERPNext keeps `email_id` on
     // the linked Contact and refills the column from it, so a key built on
     // email changes underneath the mapping the moment a Contact is set.
-    key_medusa_field: "id",
-    key_erpnext_field: "medusa_customer_id",
+    key_medusa_field: "email",
+    key_erpnext_field: "email_id",
     defaultDirection: "both",
     directions: ["both", "push", "pull"],
     note:
-      "ERPNext does not store a customer's email or phone on the Customer record — " +
-      "they live on a linked Contact, and the columns that look like them are filled " +
-      "from it. This sync keeps the name and the link id. Email and phone need a " +
-      "second mapping onto Contact, or a handler.",
+      "A customer is matched by email. On the way out the name, type, email and phone are " +
+      "filled in even when unmapped, GST fields when your ERPNext has them, and the " +
+      "customer's addresses become linked Address documents.",
     fields: [
+      { medusa_path: "email", erpnext_field: "email_id", direction: "both", transform: "lowercase", label: "Email", on: true },
+      { medusa_path: "phone", erpnext_field: "mobile_no", direction: "both", transform: "phone", label: "Phone", on: true },
       { medusa_path: "{first_name} {last_name}", erpnext_field: "customer_name", direction: "push", label: "Name", on: true },
       {
         medusa_path: "",
@@ -2219,7 +2294,6 @@ const SYNC_PRESETS: SyncPreset[] = [
         constant: "",
         constantHint: "Mandatory on ERPNext, and a store has no equivalent.",
       },
-      { medusa_path: "id", erpnext_field: "medusa_customer_id", direction: "push", label: "Medusa link id", on: true, advanced: true },
     ],
   },
   {
@@ -2260,7 +2334,6 @@ const SYNC_PRESETS: SyncPreset[] = [
         constant: "",
         constantHint: "Mandatory on an ERPNext Item, and a store has no equivalent.",
       },
-      { medusa_path: "id", erpnext_field: "medusa_product_id", direction: "push", label: "Medusa link id", on: true, advanced: true },
     ],
   },
   {
@@ -2270,14 +2343,16 @@ const SYNC_PRESETS: SyncPreset[] = [
     blurb: "Send each placed order to ERPNext as a Sales Order.",
     doctype: "Sales Order",
     medusa_entity: "order",
-    events: ["order.placed", "order.canceled"],
-    key_medusa_field: "id",
-    key_erpnext_field: "medusa_order_id",
+    events: ["order.placed", "order.payment_captured", "order.canceled"],
+    key_medusa_field: "display_id",
+    key_erpnext_field: "po_no",
     defaultDirection: "push",
     directions: ["push"],
-    note: "Line items, the customer link and amounts are attached automatically. Orders always flow Medusa → ERPNext.",
+    note:
+      "Line items, the customer, the addresses and the amounts are attached automatically; " +
+      "the order number lands in the Sales Order's PO number. Once the order is paid a " +
+      "Sales Invoice is raised too, per Settings → Pushing to ERPNext. Orders always flow Medusa → ERPNext.",
     fields: [
-      { medusa_path: "id", erpnext_field: "medusa_order_id", direction: "push", label: "Order id (link)", on: true },
       { medusa_path: "email", erpnext_field: "contact_email", direction: "push", label: "Customer email", on: true },
     ],
   },
