@@ -85,15 +85,15 @@ describe("the webhook body", () => {
         expect(parseFrappeWebhookBody("not json")).toEqual({ ok: false, message: "body is not JSON" })
         const noDoc = parseFrappeWebhookBody(JSON.stringify({ event: "on_update", doctype: "Item", name: "x" }))
         expect(noDoc.ok).toBe(false)
-        if (!noDoc.ok) expect(noDoc.message).toMatch(/^doc:/)
+        if (noDoc.ok === false) expect(noDoc.message).toMatch(/^doc:/)
         const badEvent = parseFrappeWebhookBody(JSON.stringify({ event: "after_insert", doctype: "Item", name: "x", doc: {} }))
         expect(badEvent.ok).toBe(false)
-        if (!badEvent.ok) expect(badEvent.message).toMatch(/^event:/)
+        if (badEvent.ok === false) expect(badEvent.message).toMatch(/^event:/)
     })
 
     it("gets one event id per document version, so Frappe's retries share a row", () => {
         const res = parseFrappeWebhookBody(BODY)
-        if (!res.ok) throw new Error(res.message)
+        if (res.ok === false) throw new Error(res.message)
         expect(frappeEventId(res.body)).toBe("frappe:on_update:Item:SKU-1:2026-09-26 10:00:00.000000")
     })
 })

@@ -225,9 +225,9 @@ export async function ensureCustomField(
         ...extra,
     })
     const got = await client.get(`${CUSTOM_FIELD_PATH}/${encodeURIComponent(name)}`)
-    if (!got.ok && got.status === 404) {
+    if (got.ok === false && got.status === 404) {
         const created = await client.post(CUSTOM_FIELD_PATH, desired)
-        if (!created.ok) return item("error", { error: describeSetupFailure(created) })
+        if (created.ok === false) return item("error", { error: describeSetupFailure(created) })
         return item("created", {
             detail:
                 mode === "deny"
@@ -235,7 +235,7 @@ export async function ensureCustomField(
                     : "default 0: tick the documents to sync",
         })
     }
-    if (!got.ok) return item("error", { error: describeSetupFailure(got) })
+    if (got.ok === false) return item("error", { error: describeSetupFailure(got) })
     const existing = got.data ?? {}
     if (!sameText(existing.fieldtype, "Check")) {
         return item("error", { error: `${name} exists with fieldtype ${existing.fieldtype}; expected Check` })
@@ -244,7 +244,7 @@ export async function ensureCustomField(
     const patch: Record<string, any> = {}
     for (const k of CUSTOM_FIELD_MUTABLE) patch[k] = desired[k]
     const put = await client.put(`${CUSTOM_FIELD_PATH}/${encodeURIComponent(name)}`, patch)
-    if (!put.ok) return item("error", { error: describeSetupFailure(put) })
+    if (put.ok === false) return item("error", { error: describeSetupFailure(put) })
     return item("updated", { detail: "existing documents keep their current tick" })
 }
 
@@ -265,12 +265,12 @@ export async function ensureWebhook(
         ...extra,
     })
     const got = await client.get(`${WEBHOOK_PATH}/${encodeURIComponent(name)}`)
-    if (!got.ok && got.status === 404) {
+    if (got.ok === false && got.status === 404) {
         const created = await client.post(WEBHOOK_PATH, desired)
-        if (!created.ok) return item("error", { error: describeSetupFailure(created) })
+        if (created.ok === false) return item("error", { error: describeSetupFailure(created) })
         return item("created")
     }
-    if (!got.ok) return item("error", { error: describeSetupFailure(got) })
+    if (got.ok === false) return item("error", { error: describeSetupFailure(got) })
     const existing = got.data ?? {}
     if (
         !sameText(existing.webhook_doctype, desired.webhook_doctype) ||
@@ -284,7 +284,7 @@ export async function ensureWebhook(
         return item("unchanged")
     }
     const put = await client.put(`${WEBHOOK_PATH}/${encodeURIComponent(name)}`, webhookUpdatePayload(desired))
-    if (!put.ok) return item("error", { error: describeSetupFailure(put) })
+    if (put.ok === false) return item("error", { error: describeSetupFailure(put) })
     return item("updated")
 }
 

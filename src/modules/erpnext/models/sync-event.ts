@@ -1,22 +1,17 @@
 import { model } from "@medusajs/framework/utils"
 
 /**
- * `erpnext_sync_event` — durable log of every Medusa-side event we tried
- * to forward to the ERPNext (Frappe) sync app.
+ * `erpnext_sync_event` — durable log of every sync attempt, both ways.
  *
- * Why this exists:
- * The previous fire-and-forget subscriber dropped events on the floor if
- * ERPNext was down or rate-limited. The Frappe-side hourly reconciler
- * (the configured Frappe reconcile method) is the safety net for *missed* events,
- * but it can't tell us *which specific webhooks failed* and why. This
- * table makes the failure surface visible (admin UI: GET /admin/erpnext/
- * events) and gives us a knob to manually retry without waiting for the
- * next reconcile tick.
+ * Outbound rows are Medusa events the push path handled (paused today,
+ * see ../outbound.ts). Inbound rows are Frappe Webhook deliveries and
+ * the hourly selection reconcile. The admin lists them and can replay
+ * one; the retry job replays failed ones.
  *
  * Identity:
- *   `event_id` is Medusa's `event.id` — used to dedupe and to correlate
- *   with rows in Frappe's `Medusa Sync Log` (which records the same id
- *   on the receiving side). One row per Medusa event id.
+ *   `event_id` is Medusa's `event.id` on an outbound row and
+ *   `frappe:<event>:<doctype>:<name>:<modified>` on an inbound one, so
+ *   Frappe's own retries of one delivery land on one row.
  *
  * Lifecycle:
  *   pending  → row created right before the HTTP POST
@@ -33,17 +28,6 @@ export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
     id: model.id().primaryKey(),
 
     /**
-     * Who caused this row: `<system>:<site_id>`, e.g. "erpnext:default".
-     * On an inbound row it is the sender; on an outbound row it is empty
-     * unless the push was itself caused by an inbound write.
-     */
-    origin: model.text().nullable(),
-
-    /** Carried unchanged through a causal chain, so one customer edit can
-     *  be followed across both systems in the logs. */
-    correlation_id: model.text().nullable(),
-
-    /**
      * `<entity>:<id>` of the Medusa record an INBOUND write touched.
      *
      * This is the breadcrumb that stops a sync loop. An inbound write
@@ -54,9 +38,6 @@ export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
      * side drops it.
      */
     entity_ref: model.text().nullable(),
-
-    /** Which site this row belongs to. */
-    site_id: model.text().nullable(),
 
     /** Medusa event name, e.g. "customer.created", "order.placed". */
     event: model.text().index(),
@@ -102,7 +83,7 @@ export const ErpnextSyncEvent = model.define("erpnext_sync_event", {
 
     /**
      * Sync direction. "outbound" = Medusa→Frappe; "inbound" =
-     * Frappe→Medusa, POSTed by medusync (or by any signed sender). The
+     * Frappe→Medusa, POSTed by a Frappe core Webhook. The
      * retry and reconciliation crons scan by (status, direction), so
      * this column is indexed in the migration.
      */

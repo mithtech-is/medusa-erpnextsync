@@ -3,38 +3,17 @@ import { model } from "@medusajs/framework/utils"
 /**
  * `erpnext_setting` — singleton row for the Medusa-side ERPNext sync.
  *
- * Mirrors the shape a Medusa project's own `*_setting`
- * pattern: a single row keyed by `singleton_key = "default"` so the
- * admin UI is one GET / one POST, with no list/pagination concerns.
+ * One row keyed by `singleton_key = "default"`, so the admin UI is one
+ * GET / one POST. Connection values fall back to env for bootstrap
+ * (`ERPNEXT_URL`, `ERPNEXT_API_KEY`/`SECRET`, `ERPNEXT_FRAPPE_WEBHOOK_SECRET`,
+ * `MEDUSA_BACKEND_URL`), so a fresh deploy works before anyone saves the
+ * settings page.
  *
- * Why DB-stored (and not just env vars):
- *   - The Frappe side already has a `Medusa Settings` Single DocType
- *     that's editable from the desk. The Medusa side previously had
- *     only env vars, which meant any change required a redeploy and
- *     was invisible to operators. This row brings parity.
- *   - The forwarder reads from the row first and falls back to env
- *     vars (`ERPNEXT_URL`, `ERPNEXT_WEBHOOK_SECRET`) for bootstrap,
- *     so a fresh deploy still works even before an admin saves the
- *     settings page.
+ * Secrets are stored as plaintext, like other settings models; the admin
+ * GET masks them to a 3+3 preview. Treat the DB and its backups as
+ * sensitive.
  *
- * Secret handling:
- *   - Stored as plaintext (the same choice other settings models make /
- *     `webhook_secret`). The admin GET response masks them to a
- *     3-char prefix + 3-char suffix preview so a screenshot can't
- *     leak the value. Treat the DB + backups as sensitive.
- *   - The webhook secret MUST match
- *     `Medusa Settings → Medusa Webhook Secret` on the Frappe side,
- *     or HMAC verification will fail and webhooks will 401. The
- *     admin UI surfaces a "test connection" button that POSTs a
- *     ping event to validate the pair end-to-end.
- *
- * Toggle precedence (read by `getActiveConfig` in the service):
- *   row.enable_sync = false    → forwarder no-ops, rows are not even
- *                                logged (consistent with how the
- *                                Frappe side reads
- *                                `Medusa Settings.enable_sync`).
- *   row.erpnext_url unset      → fall back to ERPNEXT_URL env.
- *   row.webhook_secret unset   → fall back to ERPNEXT_WEBHOOK_SECRET.
+ * `enable_sync = false` → every job and route no-ops without writing rows.
  */
 export const ErpnextSetting = model.define("erpnext_setting", {
     /**
@@ -59,27 +38,6 @@ export const ErpnextSetting = model.define("erpnext_setting", {
     singleton_key: model.text().default("default"),
 
     /**
-     * This Medusa instance's identity on the wire.
-     *
-     * One ERPNext can serve several Medusa stores; every envelope names
-     * its site so the far side can tell them apart, keep their logs
-     * separate, and recognise its own change coming home. Must equal the
-     * Site ID of the matching Medusync Site record. Empty falls back to
-     * "default", which is what a single-store install gets.
-     */
-    site_id: model.text().nullable(),
-
-    /**
-     * Which ERPNext DocType holds the catalogue, as ERPNext reports it.
-     *
-     * Not an opinion this side gets to have: ERPNext owns the catalogue
-     * and announces the DocType, so "link this product to an existing
-     * one" searches the right place even on a project that keeps its
-     * products somewhere other than Item.
-     */
-    products_doctype: model.text().nullable(),
-
-    /**
      * What may happen when a product is created in Medusa: "off",
      * "link" (attach to an existing Item only, the default) or "create".
      * See ./product-policy.ts for why this is the one catalogue decision
@@ -94,46 +52,38 @@ export const ErpnextSetting = model.define("erpnext_setting", {
     enable_sync: model.boolean().default(true),
 
     // ── Connection ───────────────────────────────────────────────────
-    /** Base URL of the Frappe site running the sync app, e.g.
-     *  `https://erp.example.com`. Trailing slash is stripped by
-     *  the service before composing the receive endpoint. Empty →
-     *  ERPNEXT_URL env is used. */
+    /** Base URL of the ERPNext site, e.g. `https://erp.example.com`.
+     *  Trailing slash is stripped by the service. Empty → ERPNEXT_URL. */
     erpnext_url: model.text().nullable(),
 
-    /** Whitelisted Frappe method that receives Medusa→Frappe pushes,
-     *  e.g. `medusync.api.receive`. The mapped-push path appends
-     *  `_mapped`. Empty → ERPNEXT_RECEIVE_METHOD env, else the built-in
-     *  default (`medusync.api.receive`). Lets one plugin talk to any
-     *  Frappe app whose endpoint name differs. */
-    frappe_receive_method: model.text().nullable(),
+    /** Where ERPNext reaches this store. The Frappe Webhooks POST to
+     *  `<medusa_public_url>/webhooks/erpnext-inbound`. Empty →
+     *  MEDUSA_BACKEND_URL. */
+    medusa_public_url: model.text().nullable(),
 
     /**
-     * HMAC-SHA256 secret for Medusa→Frappe pushes (the "old"
-     * webhook_secret). Sent as `x-medusa-signature` over the raw JSON
-     * body. Must equal `Medusa Settings.medusa_webhook_secret` on
-     * the Frappe side. Empty → ERPNEXT_WEBHOOK_SECRET env is used.
-     *
-     * NB column name stays `webhook_secret` for backwards-compat with
-     * existing rows; semantically it's now `medusa_to_frappe_secret`.
+     * The DocTypes that carry the `medusa_sync` selection field, each
+     * with its mode: `[{doctype:"Item", mode:"allow"|"deny"}]`. See
+     * ../selection.ts. Empty means `[{Item, allow}]`.
      */
-    webhook_secret: model.text().nullable(),
+    sync_doctypes: model.json().nullable(),
+
+    /** When "Set up ERPNext" last ran, and what it found and did — the
+     *  per-item report from ../erpnext-setup.ts. */
+    erpnext_setup_at: model.dateTime().nullable(),
+    erpnext_setup_report: model.json().nullable(),
 
     /**
-     * HMAC-SHA256 secret for Frappe→Medusa pushes (added F0). The
-     * Frappe `Webhook` rows seeded by F2 sign every body with this
-     * secret; the F1 inbound receiver verifies with the same value.
-     *
-     * Kept SEPARATE from `webhook_secret` so each direction can be
-     * rotated independently — a leak on one side doesn't compromise
-     * the other.
+     * HMAC-SHA256 secret every Frappe Webhook row signs with
+     * (`X-Frappe-Webhook-Signature`). Generated by "Set up ERPNext" when
+     * empty and written into the Webhook rows by it; the inbound route
+     * verifies with the same value. Empty → ERPNEXT_FRAPPE_WEBHOOK_SECRET.
      */
-    frappe_to_medusa_secret: model.text().nullable(),
+    frappe_webhook_secret: model.text().nullable(),
 
-    /** Optional: ERPNext API key/secret (Frappe `api_key:api_secret`)
-     *  for any future case where Medusa needs to *call* ERPNext's
-     *  whitelisted methods directly (currently it only POSTs to the
-     *  webhook receiver, which is allow_guest + HMAC-verified, so
-     *  these aren't required today). */
+    /** ERPNext API key/secret (`Authorization: token key:secret`) for
+     *  everything this side asks ERPNext: the pull, the setup, the meta
+     *  reads. The API user needs System Manager for the setup. */
     erpnext_api_key: model.text().nullable(),
     erpnext_api_secret: model.text().nullable(),
 
@@ -196,7 +146,7 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      */
     log_retention_days: model.number().default(180),
 
-    // ── Orders and invoices (sent by ERPNext, see medusync.invoicing) ─
+    // ── Orders and invoices (this store's choice; honoured by the push) ─
     /** "Sales Order" | "Sales Invoice" | "Sales Order and Sales Invoice". */
     order_document: model.text().nullable(),
 

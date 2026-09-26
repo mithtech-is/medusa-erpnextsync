@@ -5,8 +5,8 @@ import { model } from "@medusajs/framework/utils"
  * entity with one Frappe doctype, with a field-by-field mapping and
  * direction toggles.
  *
- * Replaces the earlier hard-coded "customer.* → medusync.api.receive"
- * pipeline with a generic, configurable mapper.
+ * A generic, configurable mapper: which fields travel, which way, and
+ * how the two records are matched.
  *
  * Identity:
  *   `name` is operator-facing label (e.g. "Customer → ERPNext Customer").
@@ -62,29 +62,14 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
     name: model.text(),
 
     /**
-     * The id this mapping has in BOTH systems.
-     *
-     * The same mapping exists as a Medusync Mapping on the ERPNext side.
-     * Edits can start from either, so the two copies are paired by this
-     * uid and ordered by `version`: the higher version wins, and on a tie
-     * ERPNext wins, because ERPNext owns which documents may sync at all.
+     * The pair identity: `pair:<entity>:<doctype>`, derived, unique. One
+     * Medusa entity and one DocType is one mapping. See ../pair-identity.ts.
      */
     mapping_uid: model.text().nullable(),
 
-    /** Increments on every local save. Compared against the incoming
-     *  version to decide whose copy is newer. */
+    /** Increments on every save. The enable gate and the drift check use
+     *  it to tell an edited mapping from a rehearsed one. */
     version: model.number().default(1),
-
-    /** Which Medusa site this mapping belongs to. Empty means it applies
-     *  wherever this instance is pointed. */
-    site_id: model.text().nullable(),
-
-    /** Which side wins when the same record changed on both. */
-    source_of_truth: model.text().default("ERPNext"),
-
-    /** Last time this mapping's CONFIGURATION was reconciled with the
-     *  other side, not the last time a record synced through it. */
-    last_synced_at: model.dateTime().nullable(),
 
     /** Optional notes for ops — "owned by accounting", "do not touch",
      *  upstream ticket links, etc. */
@@ -193,8 +178,8 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
     /**
      * Something about this mapping needs a person.
      *
-     * "Mapping Required" — ERPNext enabled it and this side has not
-     * rehearsed it, so it was left switched off. "Field Missing" — it
+     * "Mapping Required" — it was switched on without a rehearsal and
+     * was left switched off. "Field Missing" — it
      * names an ERPNext field the DocType no longer has, so it cannot do
      * what it says and has been switched off.
      *
