@@ -16,7 +16,7 @@ import {
  */
 const SECRET = "0123456789abcdef0123456789abcdef"
 const BODY = Buffer.from(
-    '{\n "doc": {\n  "item_code": "SKU-1",\n  "medusa_sync": 1,\n  "modified": "2026-09-26 10:00:00.000000"\n },\n "doctype": "Item",\n "event": "on_update",\n "name": "SKU-1"\n}',
+    '{\n "doc": {\n  "item_code": "SKU-1",\n  "medusa_sync": "Both",\n  "modified": "2026-09-26 10:00:00.000000"\n },\n "doctype": "Item",\n "event": "on_update",\n "name": "SKU-1"\n}',
     "utf8",
 )
 
@@ -36,7 +36,7 @@ describe("the Frappe webhook signature", () => {
     })
 
     it("refuses a body that changed after signing", () => {
-        const tampered = Buffer.from(BODY.toString("utf8").replace('"medusa_sync": 1', '"medusa_sync": 0'), "utf8")
+        const tampered = Buffer.from(BODY.toString("utf8").replace('"medusa_sync": "Both"', '"medusa_sync": ""'), "utf8")
         expect(verifyFrappeSignature({ rawBody: tampered, header: sign(BODY, SECRET), secret: SECRET })).toBe(false)
     })
 
@@ -100,21 +100,26 @@ describe("the webhook body", () => {
 
 describe("what one webhook means for one mapping", () => {
     const mapping = { medusa_entity: "product", key_erpnext_field: "item_code" }
+    const E2M = "ERPNext → Medusa"
+    const M2E = "Medusa → ERPNext"
 
-    it("a ticked document is upserted by the raw key", () => {
+    it("a document moving ERPNext → Medusa is upserted by the raw key", () => {
         const plan = planFrappeEvent({
             event: "on_update",
-            doc: { item_code: "ABC 1", medusa_sync: 1 },
+            doc: { item_code: "ABC 1", medusa_sync: E2M },
             mapping,
             link: null,
         })
         expect(plan).toMatchObject({ action: "upsert", key: "ABC 1", republish: false })
+        expect(
+            planFrappeEvent({ event: "on_update", doc: { item_code: "ABC", medusa_sync: "Both" }, mapping, link: null }),
+        ).toMatchObject({ action: "upsert" })
     })
 
-    it("a ticked document we drafted earlier is republished", () => {
+    it("a selected document we drafted earlier is republished", () => {
         const plan = planFrappeEvent({
             event: "on_update",
-            doc: { item_code: "ABC", medusa_sync: 1 },
+            doc: { item_code: "ABC", medusa_sync: E2M },
             mapping,
             link: { medusa_id: "prod_1", state: "drafted" },
         })
@@ -124,44 +129,56 @@ describe("what one webhook means for one mapping", () => {
     it("republishing is a product thing", () => {
         const plan = planFrappeEvent({
             event: "on_update",
-            doc: { name: "C-1", medusa_sync: "1" },
+            doc: { name: "C-1", medusa_sync: "Both" },
             mapping: { medusa_entity: "customer", key_erpnext_field: "name" },
             link: { medusa_id: "cus_1", state: "drafted" },
         })
         expect(plan).toMatchObject({ action: "upsert", republish: false })
     })
 
-    it("an unticked document is drafted through its link", () => {
+    it("a deselected document is drafted through its link", () => {
         const plan = planFrappeEvent({
             event: "on_update",
-            doc: { item_code: "ABC", medusa_sync: 0 },
+            doc: { item_code: "ABC", medusa_sync: "" },
             mapping,
             link: { medusa_id: "prod_1", state: "active" },
         })
         expect(plan).toMatchObject({ action: "draft", by: "link", medusa_id: "prod_1" })
     })
 
-    it("an unticked document with no link is drafted by key, and skipped without one", () => {
+    it("a deselected document with no link is drafted by key, and skipped without one", () => {
         expect(
-            planFrappeEvent({ event: "on_update", doc: { item_code: "ABC", medusa_sync: 0 }, mapping, link: null }),
+            planFrappeEvent({ event: "on_update", doc: { item_code: "ABC", medusa_sync: null }, mapping, link: null }),
         ).toMatchObject({ action: "draft", by: "key", key: "ABC" })
         expect(
-            planFrappeEvent({ event: "on_update", doc: { medusa_sync: 0 }, mapping, link: null }),
+            planFrappeEvent({ event: "on_update", doc: { medusa_sync: "" }, mapping, link: null }),
         ).toMatchObject({ action: "skip" })
     })
 
-    it("a trashed document is drafted whatever the tick says", () => {
+    it("a Medusa-owned document is never drafted, whatever ERPNext does to its copy", () => {
+        const owned = { item_code: "ABC", medusa_sync: M2E }
+        const link = { medusa_id: "prod_1", state: "active" }
+        expect(planFrappeEvent({ event: "on_update", doc: owned, mapping, link })).toMatchObject({ action: "skip" })
+        const trashed = planFrappeEvent({ event: "on_trash", doc: owned, mapping, link })
+        expect(trashed.action).toBe("skip")
+        if (trashed.action === "skip") expect(trashed.reason).toMatch(/untouched/)
+    })
+
+    it("a trashed document is drafted when it moved ERPNext → Medusa", () => {
         expect(
             planFrappeEvent({
                 event: "on_trash",
-                doc: { item_code: "ABC", medusa_sync: 1 },
+                doc: { item_code: "ABC", medusa_sync: "Both" },
                 mapping,
                 link: { medusa_id: "prod_1", state: "active" },
             }),
         ).toMatchObject({ action: "draft", by: "link", medusa_id: "prod_1" })
         expect(
-            planFrappeEvent({ event: "on_trash", doc: { item_code: "ABC" }, mapping, link: null }),
+            planFrappeEvent({ event: "on_trash", doc: { item_code: "ABC", medusa_sync: E2M }, mapping, link: null }),
         ).toMatchObject({ action: "draft", by: "key", key: "ABC" })
+        expect(
+            planFrappeEvent({ event: "on_trash", doc: { item_code: "ABC", medusa_sync: "" }, mapping, link: null }),
+        ).toMatchObject({ action: "skip" })
     })
 
     it("a document without the field is not ours to touch", () => {
@@ -170,8 +187,8 @@ describe("what one webhook means for one mapping", () => {
         if (plan.action === "skip") expect(plan.reason).toMatch(/Set up ERPNext/)
     })
 
-    it("a ticked document without a key value cannot be placed", () => {
-        expect(planFrappeEvent({ event: "on_update", doc: { medusa_sync: 1 }, mapping, link: null })).toMatchObject({
+    it("a selected document without a key value cannot be placed", () => {
+        expect(planFrappeEvent({ event: "on_update", doc: { medusa_sync: E2M }, mapping, link: null })).toMatchObject({
             action: "skip",
         })
     })

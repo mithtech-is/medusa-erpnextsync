@@ -29,7 +29,7 @@
  * `availableInContainer` adapters from a module name + model name.
  */
 
-import { Modules } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import crypto from "crypto"
 
 /**
@@ -168,6 +168,10 @@ export type EntityDescriptor = {
      *  try/resolve on `moduleName`. Override for entities whose
      *  parent module exposes them via a sub-feature flag. */
     availableInContainer?: (container: any) => boolean
+    /** The known values for a target path — an enum, or records another
+     *  module holds — for the mapper's fixed/default value picker. A path
+     *  not listed here takes free text. */
+    options?: Record<string, (container: any) => Promise<Array<{ value: string; label: string }>>>
 }
 
 // ─── Generic builder ─────────────────────────────────────────────────
@@ -559,8 +563,146 @@ const productEntity: EntityDescriptor = {
         const [row] = await m.listProducts({ id }, { take: 1, relations: ["variants"], withDeleted: true })
         return row ?? null
     },
+    options: {
+        status: async () =>
+            ["draft", "proposed", "published", "rejected"].map((v) => ({ value: v, label: v })),
+        sales_channels: async (container) => {
+            const sc: any = container.resolve(Modules.SALES_CHANNEL)
+            const rows = await sc.listSalesChannels({}, { take: 200, select: ["id", "name"] })
+            return (rows ?? []).map((r: any) => ({ value: r.id, label: r.name ?? r.id }))
+        },
+        shipping_profile_id: async (container) => {
+            const f: any = container.resolve(Modules.FULFILLMENT)
+            const rows = await f.listShippingProfiles({}, { take: 200, select: ["id", "name"] })
+            return (rows ?? []).map((r: any) => ({ value: r.id, label: r.name ?? r.id }))
+        },
+        collection_id: async (container) => {
+            const m: any = container.resolve(Modules.PRODUCT)
+            const rows = await m.listProductCollections({}, { take: 200, select: ["id", "title", "handle"] })
+            return (rows ?? []).map((r: any) => ({ value: r.id, label: r.title ?? r.handle ?? r.id }))
+        },
+        type_id: async (container) => {
+            const m: any = container.resolve(Modules.PRODUCT)
+            const rows = await m.listProductTypes({}, { take: 200, select: ["id", "value"] })
+            return (rows ?? []).map((r: any) => ({ value: r.id, label: r.value ?? r.id }))
+        },
+    },
     async upsertByKey(container, key_field, key_value, payload) {
         const m: any = container.resolve(Modules.PRODUCT)
+        // Sales channels and the shipping profile are relations the product
+        // module does not write; they are linked after the upsert.
+        const salesChannels = payload.sales_channels
+        const shippingProfile = payload.shipping_profile_id
+        if (salesChannels !== undefined || shippingProfile !== undefined) {
+            payload = { ...payload }
+            delete payload.sales_channels
+            delete payload.shipping_profile_id
+        }
+        const outcome = await upsertProductRecord(m, key_field, key_value, payload)
+        if (outcome.ok && outcome.id) {
+            await linkProductRelations(container, outcome.id, { salesChannels, shippingProfile })
+        }
+        return outcome
+    },
+    // Safe inbound delete: unpublish (status → draft) rather than destroy.
+    async disableByKey(container, key_field, key_value) {
+        const m: any = container.resolve(Modules.PRODUCT)
+        const isMetaKey = key_field.startsWith("metadata.")
+        const filter: any = isMetaKey
+            ? { metadata: { [key_field.slice("metadata.".length)]: key_value } }
+            : { [key_field]: key_value }
+        const [existing] = await m.listProducts(filter, { select: ["id"], take: 1 })
+        if (!existing) return { ok: true, skipped: true, action: "absent" }
+        await m.upsertProducts([{ id: existing.id, status: "draft" }])
+        return { ok: true, id: existing.id, action: "unpublished" }
+    },
+}
+
+/**
+ * Put a pulled product in its sales channels and on its shipping profile.
+ * Values are ids, or names the operator picked from the value picker.
+ * Sales channels are added, never removed; the shipping profile is
+ * replaced. Never throws: the product is already written, and a missing
+ * channel is a warning, not a lost product.
+ */
+async function linkProductRelations(
+    container: any,
+    productId: string,
+    rel: { salesChannels?: unknown; shippingProfile?: unknown },
+): Promise<void> {
+    let link: any
+    let query: any
+    try {
+        link = container.resolve(ContainerRegistrationKeys.LINK)
+        query = container.resolve(ContainerRegistrationKeys.QUERY)
+    } catch {
+        return
+    }
+    try {
+        const wanted = Array.isArray(rel.salesChannels)
+            ? rel.salesChannels
+            : typeof rel.salesChannels === "string"
+              ? rel.salesChannels.split(",")
+              : []
+        const channelIds: string[] = []
+        if (wanted.length) {
+            const sc: any = container.resolve(Modules.SALES_CHANNEL)
+            const all: any[] = (await sc.listSalesChannels({}, { take: 500, select: ["id", "name"] })) ?? []
+            for (const w of wanted) {
+                const needle = String(w ?? "").trim()
+                if (!needle) continue
+                const hit = all.find((c) => c.id === needle || c.name === needle)
+                if (hit) channelIds.push(hit.id)
+                else console.warn(`[erpnext] sales channel "${needle}" not found for product ${productId}`)
+            }
+        }
+        const profileWanted = rel.shippingProfile != null ? String(rel.shippingProfile).trim() : ""
+        let profileId: string | null = null
+        if (profileWanted) {
+            const f: any = container.resolve(Modules.FULFILLMENT)
+            const all: any[] = (await f.listShippingProfiles({}, { take: 500, select: ["id", "name"] })) ?? []
+            const hit = all.find((p) => p.id === profileWanted || p.name === profileWanted)
+            if (hit) profileId = hit.id
+            else console.warn(`[erpnext] shipping profile "${profileWanted}" not found for product ${productId}`)
+        }
+        if (!channelIds.length && !profileId) return
+
+        const { data } = await query.graph({
+            entity: "product",
+            fields: ["id", "sales_channels.id", "shipping_profile.id"],
+            filters: { id: productId },
+        })
+        const current = data?.[0] ?? {}
+        const have = new Set(((current.sales_channels ?? []) as any[]).map((c) => c.id))
+        const creates: any[] = []
+        for (const id of channelIds) {
+            if (!have.has(id)) {
+                creates.push({ [Modules.PRODUCT]: { product_id: productId }, [Modules.SALES_CHANNEL]: { sales_channel_id: id } })
+            }
+        }
+        if (profileId && current.shipping_profile?.id !== profileId) {
+            if (current.shipping_profile?.id) {
+                await link.dismiss({
+                    [Modules.PRODUCT]: { product_id: productId },
+                    [Modules.FULFILLMENT]: { shipping_profile_id: current.shipping_profile.id },
+                })
+            }
+            creates.push({ [Modules.PRODUCT]: { product_id: productId }, [Modules.FULFILLMENT]: { shipping_profile_id: profileId } })
+        }
+        if (creates.length) await link.create(creates)
+    } catch (err: any) {
+        console.warn(`[erpnext] relations for product ${productId} not linked:`, err?.message ?? err)
+    }
+}
+
+/** The product upsert proper: match by key, keep it sellable, write. */
+async function upsertProductRecord(
+    m: any,
+    key_field: string,
+    key_value: string,
+    payload: Record<string, any>,
+): Promise<{ ok: boolean; id?: string; created?: boolean; error?: string }> {
+    {
         const isMetaKey = key_field.startsWith("metadata.")
         const metaKeyName = isMetaKey ? key_field.slice("metadata.".length) : null
         // An ERP item code is rarely URL-safe, and Medusa rejects a handle
@@ -681,19 +823,7 @@ const productEntity: EntityDescriptor = {
         }
         const [created] = await m.upsertProducts([createPayload])
         return { ok: true, id: created.id, created: true }
-    },
-    // Safe inbound delete: unpublish (status → draft) rather than destroy.
-    async disableByKey(container, key_field, key_value) {
-        const m: any = container.resolve(Modules.PRODUCT)
-        const isMetaKey = key_field.startsWith("metadata.")
-        const filter: any = isMetaKey
-            ? { metadata: { [key_field.slice("metadata.".length)]: key_value } }
-            : { [key_field]: key_value }
-        const [existing] = await m.listProducts(filter, { select: ["id"], take: 1 })
-        if (!existing) return { ok: true, skipped: true, action: "absent" }
-        await m.upsertProducts([{ id: existing.id, status: "draft" }])
-        return { ok: true, id: existing.id, action: "unpublished" }
-    },
+    }
 }
 
 const productCategoryEntity = genericEntity({

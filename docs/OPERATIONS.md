@@ -19,7 +19,8 @@ Nothing is installed on ERPNext. On the Settings tab:
 | API key / secret | a Frappe API user; needs **System Manager** for the setup |
 | Medusa public URL | where ERPNext reaches this store; the webhooks POST to `<url>/webhooks/erpnext-inbound` |
 | Frappe webhook secret | generated for you by Set up ERPNext; rotate with Generate |
-| Selection | the DocTypes that get the **Sync to Medusa** tick, each allow or deny list |
+| Selection | the DocTypes that get the **Sync to Medusa** field (blank / ERPNext → Medusa / Medusa → ERPNext / Both), each allow or deny list |
+| Default phone region | what a phone number without a country code is assumed to be (IN) |
 
 Save, **Test connection** (`POST /admin/erpnext/ping`), then **Set up
 ERPNext** (`POST /admin/erpnext/setup`). The report lists the Custom Field
@@ -29,8 +30,8 @@ it is idempotent.
 
 On the ERPNext side the evidence is **Webhook Request Log**: one row per
 delivery attempt, with the request and the response. No row means the
-condition did not fire (the document was not ticked, before or after the
-save). A row with a 401 means the secret differs: rotate it here and run
+condition did not fire (the document was not on ERPNext → Medusa or Both,
+before or after the save). A row with a 401 means the secret differs: rotate it here and run
 Set up ERPNext again.
 
 ## Mappings
@@ -39,7 +40,10 @@ Mappings live here only. A mapping pairs one Medusa entity with one
 DocType; the pair is its identity and there is one per pair.
 
 - **Pull** and **both** mappings on a selection DocType receive webhooks
-  and are polled every 5 minutes for ticked rows.
+  and are polled every 5 minutes for rows on ERPNext → Medusa or Both.
+- A document narrows its mapping, never widens it: a push for a document
+  ERPNext last showed as ERPNext → Medusa, or blank, is skipped as
+  `record-direction`.
 - **Push** mappings are evaluated but **paused** in this release: the log
   shows `paused`, nothing leaves.
 
@@ -87,16 +91,18 @@ POST /admin/erpnext/push/products|customers|orders                       # pause
 
 ERPNext owns it. The rules:
 
-- Only a **ticked** document reaches the store. Untick it or delete it and
-  its product goes to **draft**; tick it again and the same product is
-  republished. Nothing is ever deleted here on ERPNext's say-so.
+- Only a document on **ERPNext → Medusa** or **Both** reaches the store.
+  Blank it or delete it and its product goes to **draft**; select it again
+  and the same product is republished. A **Medusa → ERPNext** document is
+  Medusa's own and is never drafted. Nothing is ever deleted here on
+  ERPNext's say-so.
 - Deleting a product here **never** touches the ERPNext Item.
 - Whether a product created *here* may reach ERPNext at all is
   `medusa_product_policy`: `off`, `link` (the default — it must be attached
   to an existing Item first) or `create`. Moot while pushes are paused.
 
 The hourly reconciliation drafts the products of linked documents that no
-longer carry the tick; its counts are in the server log under
+longer move ERPNext → Medusa; its counts are in the server log under
 `[erpnext-recon] selection reconcile`.
 
 ## Starting over

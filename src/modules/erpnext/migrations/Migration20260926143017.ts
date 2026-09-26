@@ -3,7 +3,8 @@ import { Migration } from "@mikro-orm/migrations"
 /**
  * medusync is retired: ERPNext → Medusa now arrives through Frappe core
  * Webhooks, selection is the `medusa_sync` Check field, and the map from
- * an ERPNext document to a Medusa record lives here, in `erpnext_link`.
+ * an ERPNext document to a Medusa record lives here, in `erpnext_link`,
+ * with the direction the document last showed.
  *
  * What changes on the settings row: the medusync pairing (`site_id`,
  * `frappe_receive_method`, the Medusa→Frappe `webhook_secret`) goes; the
@@ -27,6 +28,7 @@ export class Migration20260926143017 extends Migration {
                 "medusa_id"     text NOT NULL,
                 "mapping_id"    text NULL,
                 "state"         text NOT NULL DEFAULT 'active',
+                "remote_direction" text NULL,
                 "last_seen_at"  timestamptz NULL,
                 "created_at"    timestamptz NOT NULL DEFAULT now(),
                 "updated_at"    timestamptz NOT NULL DEFAULT now(),
@@ -61,7 +63,8 @@ export class Migration20260926143017 extends Migration {
                 ADD COLUMN IF NOT EXISTS "medusa_public_url" text NULL,
                 ADD COLUMN IF NOT EXISTS "sync_doctypes" jsonb NULL,
                 ADD COLUMN IF NOT EXISTS "erpnext_setup_at" timestamptz NULL,
-                ADD COLUMN IF NOT EXISTS "erpnext_setup_report" jsonb NULL;
+                ADD COLUMN IF NOT EXISTS "erpnext_setup_report" jsonb NULL,
+                ADD COLUMN IF NOT EXISTS "phone_region" text NOT NULL DEFAULT 'IN';
         `)
         // Allow mode: the Check field defaults to 0, so an existing catalogue
         // stays out of the store until its documents are ticked.
@@ -150,7 +153,8 @@ export class Migration20260926143017 extends Migration {
                 DROP COLUMN IF EXISTS "medusa_public_url",
                 DROP COLUMN IF EXISTS "sync_doctypes",
                 DROP COLUMN IF EXISTS "erpnext_setup_at",
-                DROP COLUMN IF EXISTS "erpnext_setup_report";
+                DROP COLUMN IF EXISTS "erpnext_setup_report",
+                DROP COLUMN IF EXISTS "phone_region";
         `)
         this.addSql(`
             DO $$ BEGIN

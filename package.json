@@ -38,8 +38,9 @@
     "./*": "./.medusa/server/src/*.js"
   },
   "dependencies": {
-    "zod": "^3.22.0",
-    "@aws-sdk/client-s3": "3.1116.0"
+    "@aws-sdk/client-s3": "3.1116.0",
+    "libphonenumber-js": "^1.13.14",
+    "zod": "^3.22.0"
   },
   "devDependencies": {
     "@medusajs/admin-sdk": "^2.21.0",

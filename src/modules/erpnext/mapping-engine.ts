@@ -19,16 +19,31 @@
  *
  * Transforms (string codes; matched case-insensitively):
  *   lowercase / uppercase / trim
- *   number / integer / boolean   — coerce; non-coercible → null
- *   json                         — JSON.stringify
+ *   text                         — scalar → string
+ *   number / integer / boolean   — coerce; a value that will not → skip
+ *   check                        — boolean-ish → 1 / 0 (a Frappe Check)
+ *   decimal:<places>             — number rounded to that many places
+ *   json / parse_json            — JSON.stringify / JSON.parse
+ *   map:a=b,c=d                  — value translation; the shared
+ *                                  `transform` runs it in reverse on pull
+ *   phone[:REGION]               — E.164, via libphonenumber; invalid → skip
  *   split:<sep>                  — string → array via sep ("split:,")
  *   join:<sep>                   — array → string via sep ("join: | ")
  *   prefix:<s> / suffix:<s>      — concat constants
  *   slice:<start>:<end>          — substring or array slice
- *   date_iso / date_yyyy_mm_dd   — Date or parseable string → ISO / YYYY-MM-DD
+ *   date_iso                     — → ISO timestamp (a naive Frappe value is
+ *                                  read in the site's timezone)
+ *   date_yyyy_mm_dd              — → YYYY-MM-DD in the site's timezone
+ *   datetime_frappe              — → YYYY-MM-DD HH:mm:ss in the site's timezone
  *
- * Any unknown transform is a no-op (logged, not thrown — operator
- * mistakes shouldn't break the whole sync).
+ * A coercing transform that cannot coerce SKIPS the field — it is listed
+ * in `skippedFields` with the reason in `failures` — and never writes null
+ * over the target. Any unknown transform is a no-op.
+ *
+ * A pair may carry `transform_push` and `transform_pull`; `transform` is
+ * the fallback for both. Likewise a fixed value per direction (`constant`
+ * on push, `constant_pull` on pull) and a default per direction
+ * (`default_push` / `default_pull`, falling back to `default`).
  *
  * Composite templates:
  *   A pair's `medusa_path` may be a template instead of a dot-path:
@@ -46,6 +61,8 @@
  *   skips them rather than writing a joined string back into one of
  *   the source fields.
  */
+
+import { parsePhoneNumberFromString } from "libphonenumber-js/min"
 
 /** Which way a whole mapping is allowed to move. */
 export type MappingDirection = "push" | "pull" | "both"
@@ -74,11 +91,16 @@ export type MappingFieldPair = {
      *  `direction` when absent. */
     direction?: FieldDirection
     /** Optional transform code (see file-doc). Applied AFTER reading
-     *  from the source and BEFORE writing to the target. */
+     *  from the source and BEFORE writing to the target. The fallback for
+     *  both directions when `transform_push` / `transform_pull` are absent. */
     transform?: string | null
-    /** Fallback value when the source field is missing/empty/null.
-     *  Set to a static string/number/boolean or null. */
+    transform_push?: string | null
+    transform_pull?: string | null
+    /** Fallback value when the source field is missing/empty/null, for
+     *  both directions unless a per-direction default is set. */
     default?: unknown
+    default_push?: unknown
+    default_pull?: unknown
     /**
      * A fixed value written to `erpnext_field` on every push, with no
      * Medusa source at all. `medusa_path` is empty on such a pair.
@@ -88,16 +110,24 @@ export type MappingFieldPair = {
      * a value and have no counterpart in the store: `Item.item_group` and
      * `Item.stock_uom` are mandatory Links with no default, and nothing in
      * a Medusa product corresponds to either.
-     *
-     * Push-only by construction — a constant is our answer to ERPNext's
-     * requirement, not a fact about the store, so pulling it back would
-     * invent a field on the Medusa record.
      */
     constant?: unknown
+    /** A fixed value written to `medusa_path` on every pull — every pulled
+     *  product published, tagged with its source, put in a sales channel.
+     *  `erpnext_field` may be empty on such a pair. */
+    constant_pull?: unknown
     /** When true, a missing source value short-circuits the whole
      *  mapping (caller skips with `required_missing` reason). When
      *  false (default), the target field is simply omitted. */
     required?: boolean
+}
+
+/** What the coercing transforms need to know about the deployment. */
+export type TransformOptions = {
+    /** IANA zone of the ERPNext site, for naive Frappe datetimes. UTC when unset. */
+    timezone?: string | null
+    /** ISO 3166 region the `phone` transform assumes for national numbers. */
+    phoneRegion?: string | null
 }
 
 export type ApplyMappingArgs = {
@@ -110,11 +140,46 @@ export type ApplyMappingArgs = {
     /** Source object. On push: the enriched Medusa entity (dot-paths).
      *  On pull: the Frappe doc (top-level field names). */
     source: Record<string, any>
+    options?: TransformOptions
 }
 
+export type FieldFailure = { field: string; transform: string; reason: string }
+
 export type ApplyMappingResult =
-    | { ok: true; payload: Record<string, any>; skippedFields: string[] }
+    | {
+          ok: true
+          payload: Record<string, any>
+          skippedFields: string[]
+          /** Fields skipped because their transform could not coerce the
+           *  value; also listed in `skippedFields`. */
+          failures: FieldFailure[]
+      }
     | { ok: false; reason: string; field?: string }
+
+/** The transform a pair uses in one direction, and whether it was inherited
+ *  from the shared `transform` (which runs a `map:` in reverse on pull). */
+export function transformFor(
+    pair: MappingFieldPair,
+    direction: "push" | "pull",
+): { code: string | null; inherited: boolean } {
+    const own = direction === "push" ? pair.transform_push : pair.transform_pull
+    if (own !== undefined && own !== null && String(own).trim() !== "") return { code: String(own), inherited: false }
+    const shared = pair.transform
+    if (shared !== undefined && shared !== null && String(shared).trim() !== "") return { code: String(shared), inherited: true }
+    return { code: null, inherited: false }
+}
+
+/** The fixed value a pair writes in one direction, or undefined when it
+ *  reads a source instead. */
+export function fixedFor(pair: MappingFieldPair, direction: "push" | "pull"): unknown {
+    return direction === "push" ? pair.constant : pair.constant_pull
+}
+
+/** The default a pair falls back to in one direction, or undefined. */
+export function defaultFor(pair: MappingFieldPair, direction: "push" | "pull"): unknown {
+    const own = direction === "push" ? pair.default_push : pair.default_pull
+    return own !== undefined ? own : pair.default
+}
 
 /**
  * Apply one mapping's `field_mappings` to a source object, producing
@@ -123,6 +188,19 @@ export type ApplyMappingResult =
 export function applyMapping(args: ApplyMappingArgs): ApplyMappingResult {
     const payload: Record<string, any> = {}
     const skipped: string[] = []
+    const failures: FieldFailure[] = []
+    const ctxBase = { direction: args.direction, ...(args.options ?? {}) }
+
+    const write = (target: string, value: unknown) => {
+        if (args.direction === "push") {
+            // Frappe payloads are flat objects keyed by fieldname.
+            payload[target] = value
+        } else {
+            // On pull we write back into Medusa with dot-paths so a
+            // single mapping can land into `metadata.kyc_pan` etc.
+            setByPath(payload, target, value)
+        }
+    }
 
     for (const pair of args.fields ?? []) {
         const effectiveDirection = pair.direction ?? args.mappingDirection
@@ -134,36 +212,49 @@ export function applyMapping(args: ApplyMappingArgs): ApplyMappingResult {
             continue
         }
 
-        // A fixed value has no source to read, so it is settled before any
-        // of the path handling below — which would otherwise reject it for
-        // having an empty `medusa_path`.
-        if (pair.constant !== undefined) {
-            if (args.direction === "push" && pair.erpnext_field) {
-                // A row turned into a fixed value but never filled in has
-                // nothing to send. Writing "" would overwrite whatever the
-                // far side holds with a blank, so leave the field out of
-                // the payload entirely and say so: this is exactly the
-                // "moved nothing unexpectedly" the operator reads `skipped`
-                // for.
-                if (constantHasValue(pair.constant)) {
-                    payload[pair.erpnext_field] = applyTransform(
-                        pair.constant,
-                        pair.transform,
-                    )
-                } else {
-                    skipped.push(pair.erpnext_field)
-                }
-            }
-            // Not added to `skipped` on pull: that list is what an operator
-            // reads to find pairs that moved nothing unexpectedly, and a
-            // constant never moves on pull by design.
-            continue
-        }
-
-        const sourcePath =
-            args.direction === "push" ? pair.medusa_path : pair.erpnext_field
         const targetField =
             args.direction === "push" ? pair.erpnext_field : pair.medusa_path
+        const { code, inherited } = transformFor(pair, args.direction)
+        const ctx = { ...ctxBase, invert: inherited && args.direction === "pull" }
+
+        // A fixed value has no source to read, so it is settled before any
+        // of the path handling below — which would otherwise reject it for
+        // having an empty source path.
+        const fixed = fixedFor(pair, args.direction)
+        if (fixed !== undefined) {
+            if (!targetField) {
+                skipped.push("<unset>")
+                continue
+            }
+            // A row turned into a fixed value but never filled in has
+            // nothing to send. Writing "" would overwrite whatever the
+            // far side holds with a blank, so leave the field out of
+            // the payload entirely and say so: this is exactly the
+            // "moved nothing unexpectedly" the operator reads `skipped`
+            // for.
+            if (!constantHasValue(fixed)) {
+                skipped.push(targetField)
+                continue
+            }
+            const coerced = coerce(fixed, code, ctx)
+            if (coerced.ok === false) {
+                skipped.push(targetField)
+                failures.push({ field: targetField, transform: code ?? "", reason: coerced.reason })
+                continue
+            }
+            write(targetField, coerced.value)
+            continue
+        }
+        const sourcePath =
+            args.direction === "push" ? pair.medusa_path : pair.erpnext_field
+
+        // A pair fixed in the OTHER direction usually has nothing to read
+        // or write in this one (a push constant has no Medusa path). Not a
+        // skip worth reporting: a constant never moves the other way by
+        // design. A pair that names both a source and a target here still
+        // flows.
+        const otherFixed = fixedFor(pair, args.direction === "push" ? "pull" : "push") !== undefined
+        if (otherFixed && (!sourcePath || !targetField)) continue
 
         if (!sourcePath || !targetField) {
             skipped.push(targetField || sourcePath || "<unset>")
@@ -187,8 +278,9 @@ export function applyMapping(args: ApplyMappingArgs): ApplyMappingResult {
         let value: unknown = raw
 
         if (isEmpty(value)) {
-            if (pair.default !== undefined) {
-                value = pair.default
+            const fallback = defaultFor(pair, args.direction)
+            if (fallback !== undefined) {
+                value = fallback
             } else if (pair.required) {
                 return {
                     ok: false,
@@ -201,20 +293,18 @@ export function applyMapping(args: ApplyMappingArgs): ApplyMappingResult {
             }
         }
 
-        value = applyTransform(value, pair.transform)
-
-        if (args.direction === "push") {
-            // Frappe payloads are flat objects keyed by fieldname.
-            // No dot-path expansion needed on the target side.
-            payload[targetField] = value
-        } else {
-            // On pull we write back into Medusa with dot-paths so a
-            // single mapping can land into `metadata.kyc_pan` etc.
-            setByPath(payload, targetField, value)
+        const coerced = coerce(value, code, ctx)
+        if (coerced.ok === false) {
+            // Never write null over the target for a value that would not
+            // convert; leave the field alone and say why.
+            skipped.push(targetField)
+            failures.push({ field: targetField, transform: code ?? "", reason: coerced.reason })
+            continue
         }
+        write(targetField, coerced.value)
     }
 
-    return { ok: true, payload, skippedFields: skipped }
+    return { ok: true, payload, skippedFields: skipped, failures }
 }
 
 /**
@@ -467,93 +557,247 @@ function isEmpty(v: unknown): boolean {
     return false
 }
 
+export type CoerceContext = TransformOptions & {
+    direction?: "push" | "pull"
+    /** Run a `map:` the other way round — the shared `transform` on pull. */
+    invert?: boolean
+}
+
+export type CoerceResult = { ok: true; value: unknown } | { ok: false; reason: string }
+
+const BOOL_TRUE = new Set(["true", "1", "yes", "y", "on"])
+const BOOL_FALSE = new Set(["false", "0", "no", "n", "off"])
+
+function asBoolean(value: unknown): boolean | null {
+    if (typeof value === "boolean") return value
+    if (typeof value === "number") return Number.isFinite(value) ? value !== 0 : null
+    if (typeof value === "string") {
+        const s = value.trim().toLowerCase()
+        if (BOOL_TRUE.has(s)) return true
+        if (BOOL_FALSE.has(s)) return false
+    }
+    return null
+}
+
+function asNumber(value: unknown): number | null {
+    if (typeof value === "number") return Number.isFinite(value) ? value : null
+    if (typeof value === "boolean") return value ? 1 : 0
+    if (typeof value === "string" && value.trim() !== "") {
+        const n = Number(value.trim())
+        return Number.isFinite(n) ? n : null
+    }
+    return null
+}
+
+/** `map:a=b,c=d` → pairs, in order. Keys and values are trimmed text. */
+export function parseMapTransform(arg: string): Array<[string, string]> {
+    return String(arg ?? "")
+        .split(",")
+        .map((entry) => entry.split("="))
+        .filter((kv) => kv.length >= 2)
+        .map(([k, ...v]) => [k.trim(), v.join("=").trim()] as [string, string])
+}
+
+const NAIVE_DATETIME = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?)?$/
+
+/** Offset of `zone` at the instant `utcMs`, in ms east of UTC. */
+function zoneOffsetMs(utcMs: number, zone: string): number {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: zone,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    }).formatToParts(new Date(utcMs))
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0")
+    const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"))
+    return asUtc - Math.floor(utcMs / 1000) * 1000
+}
+
+/** A naive wall-clock time in `zone` → the instant. */
+function zonedToUtc(y: number, mo: number, d: number, h: number, mi: number, s: number, ms: number, zone: string): number {
+    const guess = Date.UTC(y, mo - 1, d, h, mi, s, ms)
+    const first = guess - zoneOffsetMs(guess, zone)
+    // A second pass settles a wall time near a DST change.
+    return guess - zoneOffsetMs(first, zone)
+}
+
 /**
- * Apply a transform code to a value. Returns the (possibly type-
- * changed) result. Unknown codes are no-ops. Failures within a
- * transform return the original value rather than throwing — operator
- * mistakes shouldn't break the whole sync run.
+ * Read a date-ish value as an instant. A naive Frappe string
+ * ("2026-09-26 10:00:00.123456") is read in the site's timezone; anything
+ * with an offset, a Date, or an epoch is taken as it is.
  */
-export function applyTransform(value: unknown, code?: string | null): unknown {
-    if (!code) return value
+export function parseDateValue(value: unknown, zone?: string | null): Date | null {
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value
+    if (typeof value === "number") return Number.isFinite(value) ? new Date(value) : null
+    if (typeof value !== "string" || !value.trim()) return null
+    const m = NAIVE_DATETIME.exec(value.trim())
+    if (m) {
+        const [, y, mo, d, h, mi, sec, frac] = m
+        const ms = frac ? Math.round(Number(`0.${frac}`) * 1000) : 0
+        const tz = zone && zone.trim() ? zone.trim() : "UTC"
+        try {
+            return new Date(zonedToUtc(Number(y), Number(mo), Number(d), Number(h ?? 0), Number(mi ?? 0), Number(sec ?? 0), ms, tz))
+        } catch {
+            return null
+        }
+    }
+    const d = new Date(value)
+    return Number.isNaN(d.getTime()) ? null : d
+}
+
+/** An instant as "YYYY-MM-DD HH:mm:ss" (or the date part) in `zone`. */
+export function formatInZone(date: Date, zone: string | null | undefined, withTime: boolean): string {
+    const tz = zone && zone.trim() ? zone.trim() : "UTC"
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    }).formatToParts(date)
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00"
+    const ymd = `${get("year")}-${get("month")}-${get("day")}`
+    return withTime ? `${ymd} ${get("hour")}:${get("minute")}:${get("second")}` : ymd
+}
+
+/**
+ * Apply a transform code to a value, saying so when it cannot.
+ *
+ * Shape-changing transforms (split, join, prefix, …) pass a value of the
+ * wrong shape through untouched, as before. Coercing ones — number,
+ * integer, boolean, check, decimal, text, phone, map, parse_json and the
+ * dates — answer `ok: false` for a value that will not convert, and the
+ * engine skips the field rather than write null. Unknown codes are no-ops.
+ */
+export function coerce(value: unknown, code: string | null | undefined, ctx: CoerceContext = {}): CoerceResult {
+    if (!code) return { ok: true, value }
     const [name, ...rawArgs] = code.split(":")
     const arg = rawArgs.join(":")
     const norm = (name ?? "").trim().toLowerCase()
+    const fail = (reason: string): CoerceResult => ({ ok: false, reason })
+    const ok = (v: unknown): CoerceResult => ({ ok: true, value: v })
 
     try {
         switch (norm) {
             case "":
-                return value
+                return ok(value)
             case "lowercase":
-                return typeof value === "string" ? value.toLowerCase() : value
+                return ok(typeof value === "string" ? value.toLowerCase() : value)
             case "uppercase":
-                return typeof value === "string" ? value.toUpperCase() : value
+                return ok(typeof value === "string" ? value.toUpperCase() : value)
             case "trim":
-                return typeof value === "string" ? value.trim() : value
+                return ok(typeof value === "string" ? value.trim() : value)
+            case "text": {
+                if (value === null || value === undefined) return fail("nothing to write as text")
+                if (typeof value === "object") return fail("a list or object is not text; use json or join")
+                return ok(String(value))
+            }
             case "number": {
-                const n = Number(value)
-                return Number.isFinite(n) ? n : null
+                const n = asNumber(value)
+                return n === null ? fail(`"${String(value)}" is not a number`) : ok(n)
             }
             case "integer": {
-                const n = Number(value)
-                return Number.isFinite(n) ? Math.trunc(n) : null
+                const n = asNumber(value)
+                return n === null ? fail(`"${String(value)}" is not a number`) : ok(Math.trunc(n))
+            }
+            case "decimal": {
+                const n = asNumber(value)
+                if (n === null) return fail(`"${String(value)}" is not a number`)
+                const places = Math.max(0, Math.min(10, Number(arg) || 0))
+                return ok(Number(n.toFixed(places)))
             }
             case "boolean": {
-                if (typeof value === "boolean") return value
-                if (value == null) return false
-                if (typeof value === "number") return value !== 0
-                const s = String(value).trim().toLowerCase()
-                if (["true", "1", "yes", "y", "on"].includes(s)) return true
-                if (["false", "0", "no", "n", "off", ""].includes(s)) return false
-                return Boolean(value)
+                const b = asBoolean(value)
+                return b === null ? fail(`"${String(value)}" is not a yes/no value`) : ok(b)
+            }
+            case "check": {
+                const b = asBoolean(value)
+                return b === null ? fail(`"${String(value)}" is not a yes/no value`) : ok(b ? 1 : 0)
             }
             case "json":
-                return JSON.stringify(value)
+                return ok(JSON.stringify(value))
+            case "parse_json": {
+                if (typeof value !== "string") return ok(value)
+                try {
+                    return ok(JSON.parse(value))
+                } catch {
+                    return fail("not valid JSON")
+                }
+            }
+            case "map": {
+                const pairs = parseMapTransform(arg)
+                if (!pairs.length) return fail("map: has no a=b pairs")
+                const needle = String(value ?? "").trim()
+                const hit = pairs.find(([from, to]) => (ctx.invert ? to : from) === needle)
+                if (!hit) return fail(`no mapping for "${needle}"`)
+                return ok(ctx.invert ? hit[0] : hit[1])
+            }
+            case "phone": {
+                if (value === null || value === undefined || String(value).trim() === "") return fail("no phone number")
+                const region = (arg || ctx.phoneRegion || "").trim().toUpperCase()
+                const parsed = parsePhoneNumberFromString(String(value), region ? (region as any) : undefined)
+                if (!parsed || !parsed.isValid()) return fail(`"${String(value)}" is not a valid phone number${region ? ` for ${region}` : ""}`)
+                return ok(parsed.number)
+            }
             case "split":
-                return typeof value === "string"
-                    ? value.split(arg || ",")
-                    : value
+                return ok(typeof value === "string" ? value.split(arg || ",") : value)
             case "join":
-                return Array.isArray(value) ? value.join(arg || ",") : value
+                return ok(Array.isArray(value) ? value.join(arg || ",") : value)
             case "prefix":
-                return value == null ? value : `${arg}${value}`
+                return ok(value == null ? value : `${arg}${value}`)
             case "suffix":
-                return value == null ? value : `${value}${arg}`
+                return ok(value == null ? value : `${value}${arg}`)
             case "slice": {
                 const [a, b] = (arg || "").split(":")
                 const start = Number(a)
                 const end = b !== undefined && b !== "" ? Number(b) : undefined
-                if (typeof value === "string") {
-                    return value.slice(
-                        Number.isFinite(start) ? start : 0,
-                        Number.isFinite(end as number) ? (end as number) : undefined,
+                if (typeof value === "string" || Array.isArray(value)) {
+                    return ok(
+                        (value as any).slice(
+                            Number.isFinite(start) ? start : 0,
+                            Number.isFinite(end as number) ? (end as number) : undefined,
+                        ),
                     )
                 }
-                if (Array.isArray(value)) {
-                    return value.slice(
-                        Number.isFinite(start) ? start : 0,
-                        Number.isFinite(end as number) ? (end as number) : undefined,
-                    )
-                }
-                return value
+                return ok(value)
             }
             case "date_iso": {
-                const d = value instanceof Date ? value : new Date(value as any)
-                return Number.isNaN(d.getTime()) ? null : d.toISOString()
+                const d = parseDateValue(value, ctx.timezone)
+                return d ? ok(d.toISOString()) : fail(`"${String(value)}" is not a date`)
             }
             case "date_yyyy_mm_dd": {
-                const d = value instanceof Date ? value : new Date(value as any)
-                if (Number.isNaN(d.getTime())) return null
-                return d.toISOString().slice(0, 10)
+                const d = parseDateValue(value, ctx.timezone)
+                return d ? ok(formatInZone(d, ctx.timezone, false)) : fail(`"${String(value)}" is not a date`)
+            }
+            case "datetime_frappe": {
+                const d = parseDateValue(value, ctx.timezone)
+                return d ? ok(formatInZone(d, ctx.timezone, true)) : fail(`"${String(value)}" is not a date`)
             }
             default:
-                // Unknown transform — leave the value untouched. We
-                // could throw, but a typo in the admin form
-                // shouldn't pin every sync run.
-                return value
+                // Unknown transform — leave the value untouched. A typo in
+                // the admin form shouldn't pin every sync run.
+                return ok(value)
         }
-    } catch {
-        return value
+    } catch (err: any) {
+        return fail(err?.message ?? "transform failed")
     }
+}
+
+/**
+ * Apply a transform code to a value. The result, or `undefined` when the
+ * transform could not coerce it — callers that need the reason use
+ * `coerce`. Kept for the tests and the studio; the engine uses `coerce`.
+ */
+export function applyTransform(value: unknown, code?: string | null, ctx: CoerceContext = {}): unknown {
+    const r = coerce(value, code, ctx)
+    return r.ok ? r.value : undefined
 }
 
 /** A field the receiving side will not accept a record without. */
@@ -571,9 +815,9 @@ export type RequiredField = { name: string; label?: string }
  *
  * A field counts as covered when some pair writes it in the direction being
  * checked and that pair actually has something to write: a source path, a
- * fixed value that is filled in, or a default for when the source is empty.
- * A pair switched to "fixed value" and left blank does NOT cover anything —
- * it is the case this check exists for.
+ * fixed value for that direction that is filled in, or a default for when
+ * the source is empty. A pair switched to "fixed value" and left blank
+ * does NOT cover anything — it is the case this check exists for.
  */
 export function unmetRequired(args: {
     direction: "push" | "pull"
@@ -588,12 +832,12 @@ export function unmetRequired(args: {
         const effective = pair.direction ?? args.mappingDirection
         if (!fieldFlowsInDirection(effective, args.direction)) continue
 
+        const fixed = fixedFor(pair, args.direction)
         const hasSource =
-            constantHasValue(pair.constant) ||
-            pair.default !== undefined ||
-            Boolean(
-                args.direction === "push" ? pair.medusa_path : pair.erpnext_field,
-            )
+            fixed !== undefined
+                ? constantHasValue(fixed)
+                : defaultFor(pair, args.direction) !== undefined ||
+                  Boolean(args.direction === "push" ? pair.medusa_path : pair.erpnext_field)
         if (!hasSource) continue
 
         const target =

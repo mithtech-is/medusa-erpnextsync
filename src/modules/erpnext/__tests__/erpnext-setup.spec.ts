@@ -23,18 +23,19 @@ describe("what Set up ERPNext creates", () => {
         expect(inboundUrl("https://shop.example.com/")).toBe("https://shop.example.com/webhooks/erpnext-inbound")
     })
 
-    it("a Check field whose default follows the mode", () => {
+    it("a Select field with the three directions, whose default follows the mode", () => {
         const allow = buildCustomField("Item", "allow")
         expect(allow).toMatchObject({
             dt: "Item",
             fieldname: "medusa_sync",
             label: "Sync to Medusa",
-            fieldtype: "Check",
-            default: "0",
+            fieldtype: "Select",
+            options: "\nERPNext → Medusa\nMedusa → ERPNext\nBoth",
+            default: "",
             insert_after: "disabled",
             in_standard_filter: 1,
         })
-        expect(buildCustomField("Item", "deny").default).toBe("1")
+        expect(buildCustomField("Item", "deny").default).toBe("Both")
         expect(buildCustomField("Website Item", "allow").insert_after).toBe("append")
     })
 
@@ -46,11 +47,12 @@ describe("what Set up ERPNext creates", () => {
         expect(webhookJsonTemplate("on_trash")).not.toContain(".__")
     })
 
-    it("conditions that fire for a document that is, or was, ticked", () => {
+    it("conditions that fire for a document that moves, or moved, ERPNext → Medusa", () => {
+        const tuple = '("ERPNext → Medusa", "Both")'
         expect(ON_UPDATE_CONDITION).toBe(
-            'doc.get("medusa_sync") or (doc.get_doc_before_save() and doc.get_doc_before_save().get("medusa_sync"))',
+            `doc.get("medusa_sync") in ${tuple} or (doc.get_doc_before_save() and doc.get_doc_before_save().get("medusa_sync") in ${tuple})`,
         )
-        expect(ON_TRASH_CONDITION).toBe('doc.get("medusa_sync")')
+        expect(ON_TRASH_CONDITION).toBe(`doc.get("medusa_sync") in ${tuple}`)
     })
 
     it("signed webhooks with the Content-Type header Frappe would otherwise omit", () => {
@@ -126,21 +128,21 @@ describe("making ERPNext match", () => {
         expect(same.writes).toHaveLength(0)
 
         const drifted = fakeClient({
-            "/api/resource/Custom%20Field/Item-medusa_sync": { ok: true, status: 200, data: { ...desired, default: "1" } },
+            "/api/resource/Custom%20Field/Item-medusa_sync": { ok: true, status: 200, data: { ...desired, default: "Both" } },
         })
         const item = await ensureCustomField(drifted.client, "Item", "allow")
         expect(item.action).toBe("updated")
-        expect(drifted.writes[0]).toMatchObject({ method: "PUT", body: { default: "0" } })
+        expect(drifted.writes[0]).toMatchObject({ method: "PUT", body: { default: "" } })
         expect(drifted.writes[0].body).not.toHaveProperty("insert_after")
     })
 
     it("refuses a field of another type rather than overwrite it", async () => {
         const { client } = fakeClient({
-            "/api/resource/Custom%20Field/Item-medusa_sync": { ok: true, status: 200, data: { fieldtype: "Data" } },
+            "/api/resource/Custom%20Field/Item-medusa_sync": { ok: true, status: 200, data: { fieldtype: "Check" } },
         })
         const item = await ensureCustomField(client, "Item", "allow")
         expect(item.action).toBe("error")
-        expect(item.error).toMatch(/fieldtype Data/)
+        expect(item.error).toMatch(/fieldtype Check/)
     })
 
     it("says what a 403 means", async () => {

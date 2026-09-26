@@ -1,6 +1,6 @@
 import crypto from "crypto"
 import { z } from "zod"
-import { selectionOf } from "./selection"
+import { allowsPull, selectionOf } from "./selection"
 
 /**
  * The inbound side of a Frappe core Webhook.
@@ -90,7 +90,7 @@ export function frappeEventId(body: FrappeWebhookBody): string {
     return `frappe:${body.event}:${body.doctype}:${body.name}:${modified}`
 }
 
-export type LinkLike = { medusa_id: string; state?: string | null } | null | undefined
+export type LinkLike = { medusa_id: string; state?: string | null; remote_direction?: string | null } | null | undefined
 
 export type FrappePlan =
     | { action: "upsert"; key: string; republish: boolean; reason: string }
@@ -101,12 +101,16 @@ export type FrappePlan =
 /**
  * What one webhook means for one mapping.
  *
- * Trash → draft. Unticked → draft (the webhook only fires for an untick
- * when the document was ticked before, so the product is ours). Ticked →
- * upsert, republishing a product we drafted earlier. The key is the raw
- * value of the mapping's ERPNext key field, exactly as the pull uses it;
- * the entity decides how it matches (a handle is derived from an item
- * code by the product entity, not here).
+ * The document's `medusa_sync` says which way it moves. ERPNext → Medusa
+ * or Both: an update is upserted (republishing a product we drafted
+ * earlier), a trash drafts. Blank — deselected — drafts, since the webhook
+ * only fires for a blank document that moved ERPNext → Medusa before this
+ * save, so the product is ours. Medusa → ERPNext is Medusa's own record:
+ * nothing ERPNext does to its copy touches the product.
+ *
+ * The key is the raw value of the mapping's ERPNext key field, exactly as
+ * the pull uses it; the entity decides how it matches (a handle is derived
+ * from an item code by the product entity, not here).
  */
 export function planFrappeEvent(args: {
     event: FrappeWebhookEvent
@@ -117,21 +121,34 @@ export function planFrappeEvent(args: {
     const { event, doc, mapping, link } = args
     const rawKey = doc?.[mapping.key_erpnext_field]
     const key = rawKey != null && rawKey !== "" ? String(rawKey) : null
+    const direction = selectionOf(doc)
+
+    if (direction === "absent") {
+        return { action: "skip", reason: "document carries no medusa_sync field; run Set up ERPNext" }
+    }
+    if (direction === "medusa_to_erpnext") {
+        return {
+            action: "skip",
+            reason:
+                event === "on_trash"
+                    ? "ERPNext removed its copy of a Medusa-owned record; product untouched"
+                    : "record is Medusa → ERPNext; nothing to pull",
+        }
+    }
 
     if (event === "on_trash") {
+        if (!allowsPull(direction)) {
+            return { action: "skip", reason: "trashed, but not selected for ERPNext → Medusa" }
+        }
         if (link?.medusa_id) return { action: "draft", by: "link", medusa_id: link.medusa_id, key, reason: "trashed in ERPNext" }
         if (key) return { action: "draft", by: "key", key, reason: "trashed in ERPNext; no link, matched by key" }
         return { action: "skip", reason: `trashed, but no value for key field '${mapping.key_erpnext_field}'` }
     }
 
-    const selected = selectionOf(doc)
-    if (selected === "absent") {
-        return { action: "skip", reason: "document carries no medusa_sync field; run Set up ERPNext" }
-    }
-    if (selected === "off") {
-        if (link?.medusa_id) return { action: "draft", by: "link", medusa_id: link.medusa_id, key, reason: "unticked in ERPNext" }
-        if (key) return { action: "draft", by: "key", key, reason: "unticked in ERPNext; no link, matched by key" }
-        return { action: "skip", reason: "unticked and never synced" }
+    if (!allowsPull(direction)) {
+        if (link?.medusa_id) return { action: "draft", by: "link", medusa_id: link.medusa_id, key, reason: "deselected in ERPNext" }
+        if (key) return { action: "draft", by: "key", key, reason: "deselected in ERPNext; no link, matched by key" }
+        return { action: "skip", reason: "not selected and never synced" }
     }
     if (!key) {
         return { action: "skip", reason: `no value for key field '${mapping.key_erpnext_field}'` }
@@ -141,6 +158,6 @@ export function planFrappeEvent(args: {
         action: "upsert",
         key,
         republish,
-        reason: republish ? "ticked again; republishing" : "ticked",
+        reason: republish ? "selected again; republishing" : "selected for ERPNext → Medusa",
     }
 }

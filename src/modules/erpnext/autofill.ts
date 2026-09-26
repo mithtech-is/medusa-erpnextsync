@@ -48,6 +48,7 @@
  */
 
 import type { MedusaFieldDescriptor } from "./registry"
+import { suggestConversion, type ConversionVerdict } from "./conversion"
 
 /** One field as returned by `getDoctypeMeta`. */
 export type DoctypeFieldMeta = {
@@ -85,11 +86,18 @@ export type AutofillRow = {
     /** Dot-path, or a `{a} {b}` template for composite matches. */
     medusa_path: string
     transform: string | null
+    /** Per-direction transforms set when both sides' types differ and a
+     *  safe conversion exists (`check` out, `boolean` in, and so on). */
+    transform_push?: string | null
+    transform_pull?: string | null
     default: unknown
     direction: "push" | "pull" | "both"
     confidence: AutofillConfidence
     /** Short human sentence for the row tooltip. */
     why: string
+    /** The two sides' types do not agree and the conversion is lossy or a
+     *  guess: the suggested transform, if any, and why it needs a person. */
+    review?: { push?: ConversionVerdict; pull?: ConversionVerdict; note: string }
 }
 
 export type AutofillResult = {
@@ -439,6 +447,14 @@ export function buildAutofill(args: BuildAutofillArgs): AutofillResult {
             continue
         }
 
+        const typed = typeVerdicts({
+            medusaType: args.entityPaths.find((p) => p.path === match.medusa_path)?.type,
+            frappeType: field.fieldtype,
+            direction: match.direction ?? args.direction,
+            hasTransform: Boolean(match.transform),
+            isComposite: match.confidence === "composite",
+        })
+
         rows.push({
             erpnext_field: fieldname,
             erpnext_label: field.label || fieldname,
@@ -446,6 +462,9 @@ export function buildAutofill(args: BuildAutofillArgs): AutofillResult {
             reqd: isMandatory,
             medusa_path: match.medusa_path,
             transform: match.transform,
+            ...(typed.transform_push ? { transform_push: typed.transform_push } : {}),
+            ...(typed.transform_pull ? { transform_pull: typed.transform_pull } : {}),
+            ...(typed.review ? { review: typed.review } : {}),
             // Only carry Frappe's own default across when we have no
             // Medusa source — otherwise the default would mask a real
             // value the moment the source is momentarily empty.
@@ -624,6 +643,39 @@ function bestMatch(
             ? "mandatory in ERPNext — pick a Medusa source or set a default"
             : "no confident match",
     }
+}
+
+/**
+ * What the two sides' types say about a matched pair: a safe conversion is
+ * applied per direction; a lossy or ambiguous one is flagged for review
+ * with the suggestion; an existing transform (canonical or suggested by
+ * the descriptor) is left alone.
+ */
+export function typeVerdicts(args: {
+    medusaType: string | null | undefined
+    frappeType: string | null | undefined
+    direction: "push" | "pull" | "both"
+    hasTransform: boolean
+    isComposite: boolean
+}): { transform_push?: string; transform_pull?: string; review?: AutofillRow["review"] } {
+    if (!args.medusaType || args.hasTransform || args.isComposite) return {}
+    const out: { transform_push?: string; transform_pull?: string; review?: AutofillRow["review"] } = {}
+    const verdicts: { push?: ConversionVerdict; pull?: ConversionVerdict } = {}
+    if (args.direction === "push" || args.direction === "both") {
+        verdicts.push = suggestConversion({ direction: "push", medusaType: args.medusaType, frappeType: args.frappeType })
+    }
+    if (args.direction === "pull" || args.direction === "both") {
+        verdicts.pull = suggestConversion({ direction: "pull", medusaType: args.medusaType, frappeType: args.frappeType })
+    }
+    if (verdicts.push?.kind === "safe") out.transform_push = verdicts.push.transform
+    if (verdicts.pull?.kind === "safe") out.transform_pull = verdicts.pull.transform
+    const notes: string[] = []
+    for (const [dir, v] of Object.entries(verdicts) as Array<[string, ConversionVerdict]>) {
+        if (v.kind === "review") notes.push(`${dir}: ${v.why}${v.transform ? ` — try ${v.transform}` : ""}`)
+        if (v.kind === "unmappable") notes.push(`${dir}: ${v.why}`)
+    }
+    if (notes.length) out.review = { ...verdicts, note: notes.join("; ") }
+    return out
 }
 
 const CONFIDENCE_SCORE: Record<AutofillConfidence, number> = {

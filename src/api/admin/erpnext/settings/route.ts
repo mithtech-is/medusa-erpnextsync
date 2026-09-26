@@ -52,6 +52,8 @@ const SaveSchema = z.object({
         .optional(),
     /** The secret every Frappe Webhook signs with; secret semantics. */
     frappe_webhook_secret: z.string().nullable().optional(),
+    /** ISO 3166 region for phone numbers without a country code. */
+    phone_region: z.string().max(2).nullable().optional(),
     erpnext_api_key: z.string().nullable().optional(),
     erpnext_api_secret: z.string().nullable().optional(),
     request_timeout_ms: z.number().int().optional(),

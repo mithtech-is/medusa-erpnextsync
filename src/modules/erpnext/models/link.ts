@@ -35,6 +35,10 @@ export const ErpnextLink = model.define("erpnext_link", {
     /** "active" | "drafted" */
     state: model.text().default("active"),
 
-    /** Last time ERPNext showed us this document ticked. */
+    /** The document's `medusa_sync` value as ERPNext last showed it —
+     *  which way the document moves. Read before a push leaves. */
+    remote_direction: model.text().nullable(),
+
+    /** Last time ERPNext showed us this document selected. */
     last_seen_at: model.dateTime().nullable(),
 })

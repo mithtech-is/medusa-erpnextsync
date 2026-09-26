@@ -14,6 +14,7 @@ import {
   Textarea,
 } from "@medusajs/ui"
 import { ArrowsPointingOut, Plus, Trash } from "@medusajs/icons"
+import { suggestConversion, type ConversionVerdict } from "../../../modules/erpnext/conversion"
 
 /**
  * /app/erpnext — ERPNext / Frappe sync admin page.
@@ -41,6 +42,7 @@ type SettingsView = {
   sync_doctypes: Array<{ doctype: string; mode: "allow" | "deny" }>
   erpnext_setup_at: string | null
   erpnext_setup_report: SetupReport | null
+  phone_region: string
   outbound_paused: boolean
   erpnext_api_key_masked: string | null
   erpnext_api_secret_masked: string | null
@@ -161,10 +163,10 @@ const ErpnextPage = () => {
       </div>
       <Text size="small" className="text-ui-fg-subtle mb-4">
         ERPNext → Medusa through Frappe's own webhooks and a scheduled
-        pull: tick <strong>Sync to Medusa</strong> on a document and it
-        lands here; untick or delete it and its product goes to draft.
-        Set up ERPNext, under Settings, installs the tick box and the
-        webhooks.
+        pull: set <strong>Sync to Medusa</strong> on a document to
+        ERPNext → Medusa or Both and it lands here; clear it or delete the
+        document and its product goes to draft. Set up ERPNext, under
+        Settings, installs the field and the webhooks.
       </Text>
 
       {error && (
@@ -234,6 +236,7 @@ const SettingsTab: React.FC<{
   const [logRetentionDays, setLogRetentionDays] = useState(
     view.log_retention_days ?? 180,
   )
+  const [phoneRegion, setPhoneRegion] = useState(view.phone_region ?? "IN")
   /** A freshly generated secret, shown once. Cleared on save — a stored
    *  secret is never re-displayed. */
   const [freshSecret, setFreshSecret] = useState<string | null>(null)
@@ -287,6 +290,7 @@ const SettingsTab: React.FC<{
     setRetryInterval(view.auto_retry_min_interval_minutes)
     setPushAllowlist(view.push_allowlist ?? "")
     setLogRetentionDays(view.log_retention_days ?? 180)
+    setPhoneRegion(view.phone_region ?? "IN")
     setInvoiceStorage(view.invoice_storage ?? "local")
     setLocalDir(view.invoice_local_dir ?? "")
     setS3Bucket(view.s3_bucket ?? "")
@@ -317,6 +321,7 @@ const SettingsTab: React.FC<{
         auto_retry_min_interval_minutes: retryInterval,
         push_allowlist: pushAllowlist.trim() || null,
         log_retention_days: Number(logRetentionDays) || 0,
+        phone_region: phoneRegion.trim().toUpperCase() || "IN",
         invoice_storage: invoiceStorage,
         invoice_local_dir: localDir.trim() || null,
         s3_bucket: s3Bucket.trim() || null,
@@ -578,12 +583,14 @@ const SettingsTab: React.FC<{
         </div>
         <Text size="small" className="text-ui-fg-subtle mb-3">
           Every doctype listed here gets a <strong>Sync to Medusa</strong>{" "}
-          tick box and two webhooks. Only ticked documents reach the
-          store; unticking or deleting one drafts its product.{" "}
-          <strong>Allow list</strong>: new documents start unticked — tick
-          the few to sync. <strong>Deny list</strong>: new documents start
-          ticked — untick the exemptions; the first setup ticks every
-          existing document too. Changing the mode later affects new
+          field — blank, ERPNext → Medusa, Medusa → ERPNext or Both — and
+          two webhooks. A document moves only the way its field says, and
+          never wider than its mapping allows; clearing the field or
+          deleting the document drafts its product.{" "}
+          <strong>Allow list</strong>: new documents start blank — set the
+          few to sync. <strong>Deny list</strong>: new documents start on
+          Both — blank the exemptions; the first setup puts every existing
+          document on Both too. Changing the mode later affects new
           documents only.
         </Text>
         <div className="space-y-2">
@@ -617,8 +624,8 @@ const SettingsTab: React.FC<{
                     <Select.Value />
                   </Select.Trigger>
                   <Select.Content>
-                    <Select.Item value="allow">Allow list — default unticked</Select.Item>
-                    <Select.Item value="deny">Deny list — default ticked</Select.Item>
+                    <Select.Item value="allow">Allow list — default blank</Select.Item>
+                    <Select.Item value="deny">Deny list — default Both</Select.Item>
                   </Select.Content>
                 </Select>
               </div>
@@ -785,6 +792,28 @@ const SettingsTab: React.FC<{
           stays queryable in the Events tab. Default 180 days. Set 0 to
           keep forever, but note these rows carry the synced payload, so
           on a Customer mapping that is a second copy of personal data.
+        </Text>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2" className="mb-3">
+          Phone numbers
+        </Heading>
+        <div className="flex items-center gap-2">
+          <Label>Default region</Label>
+          <Input
+            className="w-24 font-mono uppercase"
+            maxLength={2}
+            value={phoneRegion}
+            onChange={(e) => setPhoneRegion(e.target.value.toUpperCase())}
+            placeholder="IN"
+          />
+        </div>
+        <Text className="mt-1 text-xs text-ui-fg-subtle">
+          The country a phone number without a country code belongs to, as
+          a two-letter code. The <code>phone</code> transform writes numbers
+          in international form (+91…); a number it cannot read is skipped,
+          never written blank.
         </Text>
       </section>
 
@@ -1492,6 +1521,27 @@ const PullFilterBuilder: React.FC<{
   )
 }
 
+/**
+ * What is saved. A row switched to "fixed value" and left blank on the
+ * ERPNext side is not a pair yet and is dropped (same rule as the wizard);
+ * a blank Medusa-side fixed value is forgotten so the row reads its source
+ * again; a row with nothing on either side goes.
+ */
+function cleanPairs(pairs: FieldPair[]): FieldPair[] {
+  const out: FieldPair[] = []
+  for (const p of pairs) {
+    if (p.constant !== undefined && !constantHasValue(p.constant)) continue
+    const next: FieldPair = { ...p }
+    if (next.constant_pull !== undefined && !constantHasValue(next.constant_pull)) delete next.constant_pull
+    for (const k of ["transform", "transform_push", "transform_pull"] as const) {
+      if (next[k] !== undefined && String(next[k] ?? "").trim() === "") delete next[k]
+    }
+    if (!next.medusa_path && !next.erpnext_field && next.constant === undefined && next.constant_pull === undefined) continue
+    out.push(next)
+  }
+  return out
+}
+
 /** One field as `/medusa-entities/:key/fields` reports it. */
 type DiscoveredField = {
   path: string
@@ -1527,9 +1577,12 @@ function requiredCoverage(
   for (const p of pairs ?? []) {
     const effective = String(p.direction ?? mappingDirection)
     if (!(effective === "both" || effective === direction)) continue
+    const fixed = direction === "push" ? p.constant : p.constant_pull
+    const fallback = (direction === "push" ? p.default_push : p.default_pull) ?? p.default
     const hasSource =
-      constantHasValue(p.constant) ||
-      Boolean(direction === "push" ? p.medusa_path : p.erpnext_field)
+      fixed !== undefined
+        ? constantHasValue(fixed)
+        : fallback !== undefined || Boolean(direction === "push" ? p.medusa_path : p.erpnext_field)
     if (!hasSource) continue
     const target = direction === "push" ? p.erpnext_field : p.medusa_path
     if (target) covered.add(target)
@@ -1680,8 +1733,12 @@ type AutofillAnnotation = {
   reqd: boolean
   medusa_path: string
   transform: string | null
+  transform_push?: string | null
+  transform_pull?: string | null
   default?: unknown
   direction: "push" | "pull" | "both"
+  /** The two sides' types disagree and the conversion needs a person. */
+  review?: { note: string }
   confidence:
     | "canonical"
     | "composite"
@@ -1907,13 +1964,21 @@ const ConstantValueControl: React.FC<{
 }
 
 type FieldPair = {
-  /** A fixed value sent every time, with no store field behind it. */
+  /** A fixed value sent to ERPNext every time, with no store field behind it. */
   constant?: unknown
+  /** A fixed value written into Medusa on every pull. */
+  constant_pull?: unknown
   medusa_path: string
   erpnext_field: string
   direction?: "push" | "pull" | "both"
+  /** The fallback for both directions. */
   transform?: string
+  transform_push?: string
+  transform_pull?: string
+  /** Used when the source is empty; the fallback for both directions. */
   default?: unknown
+  default_push?: unknown
+  default_pull?: unknown
   required?: boolean
 }
 
@@ -1984,15 +2049,91 @@ const TRANSFORM_OPTIONS = [
   { value: "lowercase", label: "lowercase" },
   { value: "uppercase", label: "uppercase" },
   { value: "trim", label: "trim whitespace" },
-  { value: "number", label: "→ number" },
-  { value: "integer", label: "→ integer" },
-  { value: "boolean", label: "→ boolean" },
-  { value: "json", label: "JSON stringify" },
+  { value: "text", label: "→ text" },
+  { value: "number", label: "→ number (skips what will not convert)" },
+  { value: "integer", label: "→ integer (truncates)" },
+  { value: "decimal:2", label: "→ decimal, 2 places" },
+  { value: "boolean", label: "→ true/false" },
+  { value: "check", label: "→ 1/0 (Frappe Check)" },
+  { value: "phone", label: "→ phone in +91… form" },
+  { value: "map:a=b,c=d", label: "translate values a→b, c→d (reversed on the way back)" },
+  { value: "json", label: "→ JSON text" },
+  { value: "parse_json", label: "JSON text → object" },
   { value: "split:,", label: "split by comma → array" },
   { value: "join:,", label: "join array by comma → string" },
   { value: "date_iso", label: "→ ISO datetime" },
-  { value: "date_yyyy_mm_dd", label: "→ YYYY-MM-DD" },
+  { value: "date_yyyy_mm_dd", label: "→ YYYY-MM-DD (site timezone)" },
+  { value: "datetime_frappe", label: "→ YYYY-MM-DD HH:mm:ss (site timezone)" },
 ]
+
+/** The value picker for a Medusa target: the known values where the store
+ *  can list them (product status, sales channels, shipping profiles,
+ *  collections, types), free text otherwise. */
+const MedusaValueControl: React.FC<{
+  entity: string | null
+  path: string
+  value: string
+  placeholder?: string
+  onChange: (v: string) => void
+}> = ({ entity, path, value, placeholder, onChange }) => {
+  const [options, setOptions] = useState<Array<{ value: string; label: string }> | null>(null)
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    setOptions(null)
+    if (!entity || !path) return
+    setLoading(true)
+    fetch(`/admin/erpnext/medusa-entities/${encodeURIComponent(entity)}/options?path=${encodeURIComponent(path)}`, {
+      credentials: "include",
+    })
+      .then((r) => r.json())
+      .then((b) => {
+        if (!cancelled) setOptions(Array.isArray(b?.options) ? b.options : null)
+      })
+      .catch(() => {
+        if (!cancelled) setOptions(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [entity, path])
+  if (!path) {
+    return (
+      <div className="rounded border border-ui-border-base px-2 py-1.5 text-xs text-ui-fg-subtle">
+        Pick the store field first — the values on offer are that field's.
+      </div>
+    )
+  }
+  if (options && options.length) {
+    const orphan = Boolean(value) && !options.some((o) => o.value === value)
+    return (
+      <Select value={value} onValueChange={onChange}>
+        <Select.Trigger>
+          <Select.Value placeholder="Choose from this store" />
+        </Select.Trigger>
+        <Select.Content>
+          {orphan && <Select.Item value={value}>{value} — not in this store</Select.Item>}
+          {options.map((o) => (
+            <Select.Item key={o.value} value={o.value}>
+              {o.label}
+            </Select.Item>
+          ))}
+        </Select.Content>
+      </Select>
+    )
+  }
+  return (
+    <>
+      <Input placeholder={placeholder ?? "Value"} value={value} onChange={(e) => onChange(e.target.value)} />
+      <Text className="mt-1 text-xs text-ui-fg-subtle">
+        {loading ? "Reading the choices from the store…" : "This field takes free text."}
+      </Text>
+    </>
+  )
+}
 
 // ─── Guided setup (plain-language wizard for non-technical admins) ────
 //
@@ -3113,9 +3254,7 @@ const MappingEditor: React.FC<{
         // here; this is what makes it true. Same rule as the wizard.
         body: JSON.stringify({
           ...draft,
-          field_mappings: (draft.field_mappings ?? []).filter(
-            (p) => p.constant === undefined || constantHasValue(p.constant),
-          ),
+          field_mappings: cleanPairs(draft.field_mappings ?? []),
         }),
       })
       const body = await res.json()
@@ -3205,7 +3344,7 @@ const MappingEditor: React.FC<{
     setBusy(true)
     setError(null)
     try {
-      const sample: Record<string, any> = { doctype: draft.doctype, name: "sample", medusa_sync: 1 }
+      const sample: Record<string, any> = { doctype: draft.doctype, name: "sample", medusa_sync: "Both" }
       for (const pair of (draft.field_mappings ?? []) as any[]) {
         if (!pair.erpnext_field) continue
         sample[pair.erpnext_field] = `sample ${pair.erpnext_field}`
@@ -3910,8 +4049,40 @@ const FieldPairRow: React.FC<{
   // Opened when the row already uses something the simple view cannot
   // express, so nothing is ever hidden that is actually in effect.
   const [open, setOpen] = useState(
-    Boolean(isTemplate || pair.transform || pair.constant !== undefined),
+    Boolean(
+      isTemplate ||
+        pair.transform ||
+        pair.transform_push ||
+        pair.transform_pull ||
+        pair.constant !== undefined ||
+        pair.constant_pull !== undefined ||
+        pair.default !== undefined ||
+        pair.default_push !== undefined ||
+        pair.default_pull !== undefined,
+    ),
   )
+  const flowsPush = effectiveDirection === "push" || effectiveDirection === "both"
+  const flowsPull = effectiveDirection === "pull" || effectiveDirection === "both"
+
+  // The two sides' types, for the mismatch warning. Only when both are
+  // known and the operator has not already chosen a transform that way.
+  const medusaType = (medusaFields.length ? medusaFields : entity?.paths ?? []).find(
+    (p) => p.path === pair.medusa_path,
+  )?.type
+  const frappeType = fields.find((f) => f.fieldname === pair.erpnext_field)?.fieldtype
+  const verdictFor = (dir: "push" | "pull"): ConversionVerdict | null => {
+    if (!medusaType || !frappeType || isTemplate) return null
+    if (dir === "push" ? pair.constant !== undefined : pair.constant_pull !== undefined) return null
+    if (dir === "push" ? pair.transform_push || pair.transform : pair.transform_pull || pair.transform) return null
+    const v = suggestConversion({ direction: dir, medusaType, frappeType })
+    return v.kind === "none" ? null : v
+  }
+  const warnings = (
+    [
+      ...(flowsPush ? [["push", verdictFor("push")] as const] : []),
+      ...(flowsPull ? [["pull", verdictFor("pull")] as const] : []),
+    ] as Array<readonly ["push" | "pull", ConversionVerdict | null]>
+  ).filter((x) => x[1] !== null) as Array<readonly ["push" | "pull", ConversionVerdict]>
 
   // Discovery is the real list; the curated paths are the fallback for a
   // store whose model could not be read.
@@ -4089,44 +4260,183 @@ const FieldPairRow: React.FC<{
         </div>
       )}
 
+      {warnings.length > 0 && (
+        <div className="mt-1 space-y-0.5">
+          {warnings.map(([dir, v]) => (
+            <div key={dir} className="flex flex-wrap items-center gap-1 text-xs">
+              <Badge size="2xsmall" color={v.kind === "safe" ? "blue" : v.kind === "review" ? "orange" : "red"}>
+                {dir === "push" ? "→ ERPNext" : "← ERPNext"} {v.kind === "safe" ? "convert" : v.kind === "review" ? "check type" : "type"}
+              </Badge>
+              <span className="text-ui-fg-subtle">
+                {medusaType} ↔ {frappeType}: {v.kind === "none" ? "" : v.why}
+              </span>
+              {"transform" in v && v.transform && (
+                <button
+                  type="button"
+                  className="underline"
+                  onClick={() =>
+                    onChange(
+                      dir === "push"
+                        ? ({ transform_push: v.transform } as Partial<FieldPair>)
+                        : ({ transform_pull: v.transform } as Partial<FieldPair>),
+                    )
+                  }
+                >
+                  use {v.transform}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {open && (
-        <div className="mt-2 grid grid-cols-3 gap-2 border-t border-ui-border-base pt-2">
-          <div>
-            <Label className="text-xs">Transform</Label>
-            <select
-              className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
-              value={pair.transform ?? ""}
-              onChange={(e) =>
-                onChange({ transform: e.target.value || undefined })
-              }
-            >
-              {TRANSFORM_OPTIONS.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
+        <div className="mt-2 space-y-2 border-t border-ui-border-base pt-2">
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+            {flowsPush && (
+              <DirectionPanel
+                title="Out to ERPNext"
+                direction="push"
+                pair={pair}
+                onChange={onChange}
+                valueControl={(value, set, placeholder) => (
+                  <ConstantValueControl
+                    value={value}
+                    meta={constantOptions[pair.erpnext_field]}
+                    hasField={Boolean(pair.erpnext_field)}
+                    placeholder={placeholder}
+                    onChange={set}
+                  />
+                )}
+                onNeedOptions={() => pair.erpnext_field && onRequestConstantOptions(pair.erpnext_field)}
+              />
+            )}
+            {flowsPull && (
+              <DirectionPanel
+                title="In from ERPNext"
+                direction="pull"
+                pair={pair}
+                onChange={onChange}
+                valueControl={(value, set, placeholder) => (
+                  <MedusaValueControl
+                    entity={entity?.key ?? null}
+                    path={pair.medusa_path}
+                    value={value}
+                    placeholder={placeholder}
+                    onChange={set}
+                  />
+                )}
+              />
+            )}
           </div>
-          <div>
-            <Label className="text-xs">Store path</Label>
-            <Input
-              className="font-mono text-xs"
-              placeholder="dot-path, or {a} {b} to combine"
-              value={pair.medusa_path}
-              onChange={(e) => onChange({ medusa_path: e.target.value })}
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Frappe fieldname</Label>
-            <Input
-              className="font-mono text-xs"
-              placeholder="a fieldname the picker does not list"
-              value={pair.erpnext_field}
-              onChange={(e) => onChange({ erpnext_field: e.target.value })}
-            />
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <Label className="text-xs">Store path</Label>
+              <Input
+                className="font-mono text-xs"
+                placeholder="dot-path, or {a} {b} to combine"
+                value={pair.medusa_path}
+                onChange={(e) => onChange({ medusa_path: e.target.value })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Frappe fieldname</Label>
+              <Input
+                className="font-mono text-xs"
+                placeholder="a fieldname the picker does not list"
+                value={pair.erpnext_field}
+                onChange={(e) => onChange({ erpnext_field: e.target.value })}
+              />
+            </div>
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * One direction of a pair: where its value comes from — the source field,
+ * a fixed value, or a default for when the source is empty — and the
+ * transform applied on the way. Per direction, because "published" is a
+ * fixed value on the way in and nothing on the way out.
+ */
+const DirectionPanel: React.FC<{
+  title: string
+  direction: "push" | "pull"
+  pair: FieldPair
+  onChange: (patch: Partial<FieldPair>) => void
+  valueControl: (value: string, set: (v: string) => void, placeholder: string) => React.ReactNode
+  onNeedOptions?: () => void
+}> = ({ title, direction, pair, onChange, valueControl, onNeedOptions }) => {
+  const fixedKey = direction === "push" ? "constant" : "constant_pull"
+  const defaultKey = direction === "push" ? "default_push" : "default_pull"
+  const transformKey = direction === "push" ? "transform_push" : "transform_pull"
+  const fixed = pair[fixedKey]
+  const ownDefault = pair[defaultKey]
+  const mode: "source" | "fixed" | "default" =
+    fixed !== undefined ? "fixed" : ownDefault !== undefined ? "default" : "source"
+  const ownTransform = pair[transformKey] ?? ""
+  const sharedTransform = pair.transform ?? ""
+
+  useEffect(() => {
+    if (mode !== "source") onNeedOptions?.()
+  }, [mode, onNeedOptions])
+
+  const setMode = (next: "source" | "fixed" | "default") => {
+    const patch: any = {}
+    if (next !== "fixed") patch[fixedKey] = undefined
+    if (next !== "default") patch[defaultKey] = undefined
+    if (next === "fixed") {
+      patch[fixedKey] = ""
+      if (direction === "push") patch.medusa_path = pair.medusa_path
+    }
+    if (next === "default") patch[defaultKey] = ""
+    onChange(patch as Partial<FieldPair>)
+  }
+
+  return (
+    <div className="rounded border border-ui-border-base p-2">
+      <div className="mb-1 flex items-center justify-between">
+        <Text size="xsmall" weight="plus">
+          {title}
+        </Text>
+        <select
+          className="rounded border bg-ui-bg-base px-1 py-0.5 text-xs"
+          value={mode}
+          onChange={(e) => setMode(e.target.value as any)}
+        >
+          <option value="source">value from the source field</option>
+          <option value="fixed">a fixed value, always</option>
+          <option value="default">a default when the source is empty</option>
+        </select>
+      </div>
+      {mode === "fixed" &&
+        valueControl(String(fixed ?? ""), (v) => onChange({ [fixedKey]: v } as Partial<FieldPair>), "Fixed value, written every time")}
+      {mode === "default" &&
+        valueControl(String(ownDefault ?? ""), (v) => onChange({ [defaultKey]: v } as Partial<FieldPair>), "Used only when the source is empty")}
+      {mode === "source" && pair.default !== undefined && (
+        <Text size="xsmall" className="text-ui-fg-subtle">
+          Shared default: {String(pair.default)}
+        </Text>
+      )}
+      <div className="mt-1">
+        <Label className="text-xs">Transform</Label>
+        <Input
+          className="font-mono text-xs"
+          list="erpnext-transforms"
+          placeholder={sharedTransform ? `inherits ${sharedTransform}` : "none"}
+          value={ownTransform}
+          onChange={(e) => onChange({ [transformKey]: e.target.value || undefined } as Partial<FieldPair>)}
+        />
+        <datalist id="erpnext-transforms">
+          {TRANSFORM_OPTIONS.filter((t) => t.value).map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </datalist>
+      </div>
     </div>
   )
 }

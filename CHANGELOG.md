@@ -9,15 +9,35 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
 Webhooks and a `medusa_sync` Check field; nothing is installed on ERPNext.
 
 - **Set up ERPNext** (Settings tab, `POST /admin/erpnext/setup`) creates the `<DocType>-medusa_sync`
-  Custom Field and two Webhooks (`on_update`, `on_trash`) per selection DocType, over REST,
-  idempotently, signed with a secret the store generates. Allow list (default unticked) or deny
-  list (default ticked) per DocType.
-- `POST /webhooks/erpnext-inbound` verifies `X-Frappe-Webhook-Signature` over the raw body and
-  applies `{event, doctype, name, doc}` through the enabled pull mappings: ticked → upsert,
-  unticked or trashed → product to draft, ticked again → republished.
-- The pull ANDs `["medusa_sync","=",1]` into every mapping on a selection DocType.
-- New `erpnext_link` table maps `(doctype, name, entity) → medusa_id`; an hourly reconcile drafts
-  the products of linked documents that no longer carry the tick.
+  Custom Field — a Select: blank / ERPNext → Medusa / Medusa → ERPNext / Both — and two Webhooks
+  (`on_update`, `on_trash`) per selection DocType, over REST, idempotently, signed with a secret the
+  store generates. Allow list (default blank) or deny list (default Both) per DocType.
+- **Per-record direction.** A document moves only the way its field says and never wider than its
+  mapping allows. `POST /webhooks/erpnext-inbound` verifies `X-Frappe-Webhook-Signature` over the
+  raw body and applies `{event, doctype, name, doc}` through the enabled pull mappings: ERPNext →
+  Medusa or Both → upsert, blank or trashed → product to draft, selected again → republished; a
+  Medusa → ERPNext document is never drafted. A push reads the direction ERPNext last showed
+  (kept on the link) and skips `record-direction` for anything but Medusa → ERPNext or Both.
+- The pull ANDs `["medusa_sync","in",["ERPNext → Medusa","Both"]]` into every mapping on a
+  selection DocType.
+- New `erpnext_link` table maps `(doctype, name, entity) → medusa_id` with the document's last
+  direction; an hourly reconcile drafts the products of linked documents that no longer move
+  ERPNext → Medusa.
+- **Field types and conversion.** Auto-map reads both sides' types and sets `transform_push` /
+  `transform_pull` when a safe conversion exists (text ↔ number, 1/0 ↔ true/false, dates); lossy
+  or ambiguous pairs are flagged for review with the suggestion, never converted silently. The
+  mapper row warns on any type mismatch. A transform that cannot coerce skips the field
+  (`skippedFields` + `failures`) and never writes null. New transforms: `map:a=b,c=d` (reversed on
+  the way back when shared), `phone[:REGION]` (E.164 via libphonenumber-js; "Default phone region"
+  setting), `decimal:N`, `check`, `text`, `parse_json`, `datetime_frappe`; naive Frappe datetimes
+  are read and written in the ERPNext site's timezone (`System Settings.time_zone`, cached).
+- **Fixed and default values, either side.** Per pair and per direction a value comes from the
+  source field, a fixed value (`constant` out, new `constant_pull` in — e.g. every pulled product
+  published, in a sales channel, on a shipping profile) or a default when the source is empty
+  (`default_push` / `default_pull`, `default` for both). The mapper offers all three with a value
+  picker: ERPNext Link/Select values as before, and `GET /admin/erpnext/medusa-entities/:entity/options`
+  for product status, sales channels, shipping profiles, collections and types. Coverage of
+  required fields counts fixed and default values per direction.
 - **Pushes to ERPNext are paused.** Push mappings are evaluated and logged as `paused`; the
   subscriber returns early; the retry job leaves outbound rows alone. Phase 2 restores them over
   REST.

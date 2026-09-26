@@ -1,21 +1,30 @@
 import crypto from "crypto"
 import type { FrappeClient, FrappeResult } from "./frappe-client"
-import { SELECTION_FIELD, type SyncDoctype, type SyncMode } from "./selection"
+import {
+    DIRECTION_BOTH,
+    DIRECTION_ERPNEXT_TO_MEDUSA,
+    DIRECTION_MEDUSA_TO_ERPNEXT,
+    SELECTION_FIELD,
+    selectionDefault,
+    type SyncDoctype,
+    type SyncMode,
+} from "./selection"
 
 /**
  * "Set up ERPNext": everything this plugin needs on the ERPNext side,
  * created over REST so nobody clicks through Desk.
  *
  * Per selection DocType, in this order:
- *   1. Custom Field `<DocType>-medusa_sync` (Check, "Sync to Medusa").
- *      First, because a Webhook's condition is validated against a blank
+ *   1. Custom Field `<DocType>-medusa_sync` (Select, "Sync to Medusa":
+ *      blank / ERPNext → Medusa / Medusa → ERPNext / Both). First,
+ *      because a Webhook's condition is validated against a blank
  *      document when the Webhook is saved.
  *   2. Webhook `Medusa Sync: <DocType> on_update` — fires when the
- *      document is ticked, or was ticked before this save (so an untick
- *      arrives once and drafts the product). `on_update` also runs on
- *      insert, so no `after_insert` hook is needed.
- *   3. Webhook `Medusa Sync: <DocType> on_trash` — fires for a ticked
- *      document being deleted.
+ *      document moves ERPNext → Medusa, or did before this save (so a
+ *      deselection arrives once and drafts the product). `on_update` also
+ *      runs on insert, so no `after_insert` hook is needed.
+ *   3. Webhook `Medusa Sync: <DocType> on_trash` — fires for a document
+ *      moving ERPNext → Medusa being deleted.
  *
  * Both Webhooks POST the whole document as JSON, signed with the shared
  * secret, plus the `Content-Type: application/json` header Frappe does not
@@ -37,13 +46,19 @@ export const WEBHOOK_EVENTS: WebhookEvent[] = ["on_update", "on_trash"]
 
 export const CUSTOM_FIELD_LABEL = "Sync to Medusa"
 
-/** Fires for a document that is ticked now or was ticked before this
- *  save. `get_doc_before_save()` is None on insert and on the blank
+/** The Python tuple of values under which ERPNext → Medusa applies. */
+const PULL_TUPLE = `("${DIRECTION_ERPNEXT_TO_MEDUSA}", "${DIRECTION_BOTH}")`
+
+/** Fires for a document that moves ERPNext → Medusa now or did before
+ *  this save. `get_doc_before_save()` is None on insert and on the blank
  *  document Frappe validates the condition against; `and` short-circuits. */
 export const ON_UPDATE_CONDITION =
-    'doc.get("medusa_sync") or (doc.get_doc_before_save() and doc.get_doc_before_save().get("medusa_sync"))'
+    `doc.get("medusa_sync") in ${PULL_TUPLE} or (doc.get_doc_before_save() and doc.get_doc_before_save().get("medusa_sync") in ${PULL_TUPLE})`
 
-export const ON_TRASH_CONDITION = 'doc.get("medusa_sync")'
+export const ON_TRASH_CONDITION = `doc.get("medusa_sync") in ${PULL_TUPLE}`
+
+/** Frappe's Select options: one per line, a blank first line for "not set". */
+export const SELECT_OPTIONS = ["", DIRECTION_ERPNEXT_TO_MEDUSA, DIRECTION_MEDUSA_TO_ERPNEXT, DIRECTION_BOTH].join("\n")
 
 /** Frappe renders this with Jinja, `doc` being `as_dict()` and `json`
  *  being `frappe.as_json`, then `json.loads` the result. */
@@ -69,22 +84,23 @@ export function buildCustomField(doctype: string, mode: SyncMode): Record<string
         dt: doctype,
         fieldname: SELECTION_FIELD,
         label: CUSTOM_FIELD_LABEL,
-        fieldtype: "Check",
-        default: mode === "deny" ? "1" : "0",
+        fieldtype: "Select",
+        options: SELECT_OPTIONS,
+        default: selectionDefault(mode),
         // Item keeps it next to "Disabled" where a person looks for such
         // switches; any other DocType gets it at the end.
         insert_after: doctype === "Item" ? "disabled" : "append",
         in_standard_filter: 1,
         description:
             mode === "deny"
-                ? "Untick to keep this document out of the Medusa store."
-                : "Tick to publish this document to the Medusa store.",
+                ? "Which way this document syncs with the Medusa store. Blank keeps it out."
+                : "Which way this document syncs with the Medusa store. Leave blank to keep it out.",
     }
 }
 
 /** The fields an update may carry. `insert_after` is deliberately absent:
  *  Frappe rewrites "append" to a real fieldname, so it never compares equal. */
-export const CUSTOM_FIELD_MUTABLE = ["label", "default", "in_standard_filter", "description"] as const
+export const CUSTOM_FIELD_MUTABLE = ["label", "options", "default", "in_standard_filter", "description"] as const
 
 export function buildWebhook(args: {
     doctype: string
@@ -181,6 +197,7 @@ export function customFieldMatches(existing: Record<string, any>, desired: Recor
     return (
         sameText(existing.label, desired.label) &&
         sameText(existing.fieldtype, desired.fieldtype) &&
+        sameText(existing.options, desired.options) &&
         sameText(existing.default, desired.default) &&
         sameFlag(existing.in_standard_filter, desired.in_standard_filter) &&
         sameText(existing.description, desired.description)
@@ -231,21 +248,23 @@ export async function ensureCustomField(
         return item("created", {
             detail:
                 mode === "deny"
-                    ? "default 1: every existing document is now ticked"
-                    : "default 0: tick the documents to sync",
+                    ? `default "${DIRECTION_BOTH}": every existing document now syncs both ways`
+                    : "default blank: choose a direction on the documents to sync",
         })
     }
     if (got.ok === false) return item("error", { error: describeSetupFailure(got) })
     const existing = got.data ?? {}
-    if (!sameText(existing.fieldtype, "Check")) {
-        return item("error", { error: `${name} exists with fieldtype ${existing.fieldtype}; expected Check` })
+    if (!sameText(existing.fieldtype, "Select")) {
+        return item("error", {
+            error: `${name} exists with fieldtype ${existing.fieldtype}; expected Select — delete it in ERPNext and run again`,
+        })
     }
     if (customFieldMatches(existing, desired)) return item("unchanged")
     const patch: Record<string, any> = {}
     for (const k of CUSTOM_FIELD_MUTABLE) patch[k] = desired[k]
     const put = await client.put(`${CUSTOM_FIELD_PATH}/${encodeURIComponent(name)}`, patch)
     if (put.ok === false) return item("error", { error: describeSetupFailure(put) })
-    return item("updated", { detail: "existing documents keep their current tick" })
+    return item("updated", { detail: "existing documents keep their current value" })
 }
 
 export async function ensureWebhook(
