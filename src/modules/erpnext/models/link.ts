@@ -4,15 +4,17 @@ import { model } from "@medusajs/framework/utils"
  * `erpnext_link` — which Medusa record an ERPNext document became.
  *
  * Written after every successful pull or webhook upsert, read whenever an
- * ERPNext document goes away (unticked, trashed, renamed) so the right
+ * ERPNext document goes away (deselected, trashed, renamed) so the right
  * product is drafted even when the mapping's key would no longer find it.
  * This is the map medusync used to keep in its own `Medusync Link`
  * DocType; it lives here now because ERPNext no longer runs anything of
  * ours.
  *
- * `state` is "active" while the document is ticked and "drafted" once we
- * took the product off sale for it. A drafted link that is ticked again
- * republishes the same product rather than making a twin.
+ * `state` is "active" while the document is selected and "drafted" once
+ * we took the product off sale for it. A drafted link that is selected
+ * again republishes the same product rather than making a twin.
+ * `remote_direction` is the document's `medusa_sync` as ERPNext last
+ * showed it.
  */
 export const ErpnextLink = model.define("erpnext_link", {
     id: model.id().primaryKey(),

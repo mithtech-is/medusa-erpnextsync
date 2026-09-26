@@ -67,7 +67,7 @@ export class Migration20260926143017 extends Migration {
                 ADD COLUMN IF NOT EXISTS "phone_region" text NOT NULL DEFAULT 'IN';
         `)
         // Allow mode: the Check field defaults to 0, so an existing catalogue
-        // stays out of the store until its documents are ticked.
+        // stays out of the store until its documents are selected.
         this.addSql(`
             UPDATE "erpnext_setting"
                SET "sync_doctypes" = jsonb_build_array(
