@@ -36,12 +36,13 @@ product goes to **draft**. Two paths carry it:
 
 - **Webhooks**, as the document changes — Frappe core Webhooks that
   *Set up ERPNext* installs.
-- **Pull**, every 5 minutes, for ticked rows changed since the last run —
+- **Pull**, every 5 minutes, for selected rows changed since the last run —
   the safety net for a webhook that could not reach the store.
 
-An hourly reconcile checks every linked document still carries the tick and
-drafts the products of those that do not (unticked while the store was
-down, trashed, renamed).
+An hourly reconcile checks every linked document still moves ERPNext →
+Medusa and drafts the products of those that do not (deselected while the
+store was down, trashed, renamed); a document that became Medusa → ERPNext
+is left alone.
 
 **Medusa → ERPNext is paused** in this release. Push mappings are still
 evaluated — policy, trigger, allowlist, transform — and the outcome is
@@ -107,7 +108,7 @@ the pull says "run Set up ERPNext", which beats a page of unselected rows.
 `active` or `drafted` and the `remote_direction` ERPNext last showed. It is written after every successful upsert, by
 webhook or pull, and read whenever a document goes away, so the right
 product is drafted even when the mapping's key would no longer find it. A
-drafted link that is ticked again republishes the same product rather than
+drafted link that is selected again republishes the same product rather than
 making a twin.
 
 ## The catalogue, and products created here

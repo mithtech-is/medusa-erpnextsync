@@ -87,7 +87,7 @@ would do with it. None of the three writes anything.
 |---|---|
 | pending | in flight |
 | success | applied; `action` says what: created, updated, drafted |
-| skipped | deliberately not applied; `last_error` says why (not ticked, no mapping, paused) |
+| skipped | deliberately not applied; `last_error` says why (not selected, no mapping, paused) |
 | failed | a write failed; the retry job replays it |
 | poison | gave up; a row from before the webhook era, or too many attempts |
 

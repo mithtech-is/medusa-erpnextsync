@@ -2018,7 +2018,7 @@ type Direction = "push" | "pull" | "both"
  */
 const DIRECTION_HELP: Record<Direction, string> = {
   push: "Medusa events write into ERPNext over the REST API. Paused in this release: the mapping is evaluated and logged, nothing leaves.",
-  pull: "The webhooks Set up ERPNext installs deliver each ticked document as it changes, and a cron polls every 5 min for ticked rows changed since the last run. Needs only the API key.",
+  pull: "The webhooks Set up ERPNext installs deliver each selected document (ERPNext → Medusa or Both) as it changes, and a cron polls every 5 min for selected rows changed since the last run. Needs only the API key.",
   both: "Both of the above on the same record. Per-field overrides below decide which side owns each field — set a field to one-way to stop the other side overwriting it.",
 }
 
@@ -3350,7 +3350,7 @@ const MappingEditor: React.FC<{
         sample[pair.erpnext_field] = `sample ${pair.erpnext_field}`
       }
       // Shaped like a Frappe Webhook delivery: the whole document under
-      // `doc`, ticked, as an on_update.
+      // `doc`, selected for both directions, as an on_update.
       const res = await fetch("/admin/erpnext/studio/plan-inbound", {
         method: "POST",
         credentials: "include",

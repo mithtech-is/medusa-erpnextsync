@@ -10,10 +10,11 @@ import { getMedusaEntity } from "../modules/erpnext/registry"
  * Every hour at :30 (offset 30min from the :00 pull crons so they
  * don't race), the cron does THREE things:
  *
- *   0) SELECTION RECONCILE — every active link whose ERPNext document is
- *      no longer ticked (unticked while the webhook could not reach us,
- *      trashed, renamed) gets its product drafted. The safety net under
- *      the Frappe Webhooks; see ErpnextModuleService.reconcileSelection.
+ *   0) SELECTION RECONCILE — every active link whose ERPNext document no
+ *      longer moves ERPNext → Medusa (deselected while the webhook could
+ *      not reach us, trashed, renamed) gets its product drafted; a document
+ *      that became Medusa → ERPNext is left alone. The safety net under the
+ *      Frappe Webhooks; see ErpnextModuleService.reconcileSelection.
  *
  *   1) DRIFT DETECTION — for every enabled mapping, compares the
  *      row count on the Frappe side (with the mapping's pull_filter)
