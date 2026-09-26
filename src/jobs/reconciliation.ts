@@ -1,13 +1,19 @@
 import { MedusaContainer } from "@medusajs/framework/types"
 import { Modules } from "@medusajs/framework/utils"
 import { ERPNEXT_MODULE } from "../modules/erpnext"
+import { OUTBOUND_PAUSED } from "../modules/erpnext/outbound"
 import { getMedusaEntity } from "../modules/erpnext/registry"
 
 /**
  * F3 — Tier-2.D reconciliation cron.
  *
  * Every hour at :30 (offset 30min from the :00 pull crons so they
- * don't race), the cron does TWO things:
+ * don't race), the cron does THREE things:
+ *
+ *   0) SELECTION RECONCILE — every active link whose ERPNext document is
+ *      no longer ticked (unticked while the webhook could not reach us,
+ *      trashed, renamed) gets its product drafted. The safety net under
+ *      the Frappe Webhooks; see ErpnextModuleService.reconcileSelection.
  *
  *   1) DRIFT DETECTION — for every enabled mapping, compares the
  *      row count on the Frappe side (with the mapping's pull_filter)
@@ -37,6 +43,22 @@ import { getMedusaEntity } from "../modules/erpnext/registry"
  */
 export default async function reconciliation(container: MedusaContainer) {
     const erpnext: any = container.resolve(ERPNEXT_MODULE)
+
+    // ── 0. Selection reconcile ───────────────────────────────────────
+    try {
+        const sel = await erpnext.reconcileSelection(container)
+        if (sel?.skipped) {
+            console.log(`[erpnext-recon] selection reconcile skipped: ${sel.skipped}`)
+        } else {
+            console.log(
+                `[erpnext-recon] selection reconcile: checked=${sel.checked} drafted=${sel.drafted} ` +
+                    `errors=${sel.errors?.length ?? 0}`,
+            )
+            for (const e of sel.errors ?? []) console.warn("[erpnext-recon] selection:", e)
+        }
+    } catch (err: any) {
+        console.warn("[erpnext-recon] selection reconcile failed:", err?.message)
+    }
 
     // ── 1. Drift detection ───────────────────────────────────────────
     let mappings: any[] = []
@@ -166,6 +188,10 @@ async function recoverMissingCustomersOnFrappe(
             failed: 0,
             skipped: "sync-disabled",
         }
+    }
+    // Re-pushing is pushing; nothing leaves while pushes are paused.
+    if (OUTBOUND_PAUSED) {
+        return { checked: 0, missing: 0, repushed: 0, failed: 0, skipped: "outbound-paused" }
     }
     const creds = await erpnext.getApiCredentials()
     if (!cfg.erpnext_url || !creds.api_key || !creds.api_secret) {

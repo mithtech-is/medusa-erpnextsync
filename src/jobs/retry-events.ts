@@ -1,5 +1,6 @@
 import { MedusaContainer } from "@medusajs/framework/types"
 import { ERPNEXT_MODULE } from "../modules/erpnext"
+import { OUTBOUND_PAUSED } from "../modules/erpnext/outbound"
 
 /**
  * F3 — retry cron for failed erpnext_sync_event rows.
@@ -10,8 +11,8 @@ import { ERPNEXT_MODULE } from "../modules/erpnext"
  *   - last_attempt_at < now() - auto_retry_min_interval_minutes
  *
  * For each, re-dispatch:
- *   - direction='outbound' → forwardEvent({event, event_id, data})
- *   - direction='inbound'  → dispatchInbound (replay handler)
+ *   - direction='inbound'  → replayInboundEvent (the webhook executor)
+ *   - direction='outbound' → retryEvent; left alone while pushes are paused
  *
  * Marks rows that exceed max_attempts as `status=poison` so they
  * stop being retried (the admin Replay button is the only way out
@@ -81,35 +82,17 @@ export default async function retryEvents(container: MedusaContainer) {
         if (row.last_attempt_at && new Date(row.last_attempt_at) > cutoff) {
             continue // not enough time has passed
         }
+        // A paused push is not a failure to recover from.
+        if (row.direction !== "inbound" && OUTBOUND_PAUSED) continue
         try {
             if (row.direction === "inbound") {
-                // For inbound, we can replay the payload (we already
-                // verified the HMAC the first time around). Bypass
-                // signature check by calling dispatch directly. Pass the
-                // cron `container` as the handler scope — without it the
-                // inbound handlers can't resolve the customer/wallet
-                // modules and return `{skipped: "no_scope"}`, which this
-                // loop would then mark "recovered" without doing the
-                // work (silently dropping genuinely-failed inbound rows).
-                const result = await erpnext.dispatchInbound?.(
-                    row.event,
-                    row.payload,
-                    row.event_id,
-                    container,
-                )
-                if (result && !result.skipped) {
-                    await erpnext.updateErpnextSyncEvents([
-                        {
-                            id: row.id,
-                            status: "success",
-                            succeeded_at: new Date(),
-                            last_error: null,
-                            attempts: attempts + 1,
-                            last_attempt_at: new Date(),
-                        },
-                    ])
-                    recovered += 1
-                }
+                // The signature was verified when the row was written; the
+                // stored body is re-applied through the same executor the
+                // webhook route uses. The cron container is the scope the
+                // entity registry writes through.
+                const result = await erpnext.replayInboundEvent(row, container)
+                if (result?.poison) poisoned += 1
+                else if (result?.ok) recovered += 1
             } else {
                 // Tell forwardEvent this is the knock, so the breaker
                 // lets it past itself.

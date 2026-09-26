@@ -23,11 +23,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             return
         }
         if (body.full) {
-            // Reset the watermark so the next pull is a full scan.
-            await erpnext.saveMapping({
-                ...mapping,
-                last_pull_at: null,
-            })
+            // Clear the watermark so this pull is a full scan. Written
+            // directly: `saveMapping` does not carry `last_pull_at`.
+            await erpnext.updateErpnextMappings([{ id: mapping_id, last_pull_at: null }])
             mapping.last_pull_at = null
         }
         const outcome = await erpnext.pullFromMapping({

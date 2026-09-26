@@ -3,6 +3,7 @@ import type {
     SubscriberConfig,
 } from "@medusajs/framework/subscribers"
 import { ERPNEXT_MODULE } from "../modules/erpnext"
+import { OUTBOUND_PAUSED } from "../modules/erpnext/outbound"
 import { getMedusaEntity, listMedusaEntities } from "../modules/erpnext/registry"
 
 /**
@@ -20,15 +21,12 @@ import { getMedusaEntity, listMedusaEntities } from "../modules/erpnext/registry
  *      `fetchById` adapter — shared across all mappings on the same
  *      entity so we don't re-fetch the customer/order N times.
  *   4. For each mapping: call `pushViaMapping` which runs the
- *      transform engine, POSTs the result, and logs into
- *      erpnext_sync_event tagged with mapping_id.
+ *      transform engine and logs into erpnext_sync_event tagged with
+ *      mapping_id.
  *
- * Fallback to legacy behaviour:
- *   When NO mapping matches the event AND the event is one of the
- *   historically-wired set (customer.*, order.*), the legacy
- *   `forwardEvent` path runs with the enriched full payload. This
- *   keeps the existing prod behaviour working until operators
- *   migrate to explicit mappings.
+ * While pushes are paused (../modules/erpnext/outbound.ts) the handler
+ * returns before enriching anything: a paused push is not worth a
+ * record fetch and a log row per event.
  *
  * Backpressure / errors:
  *   Each `pushViaMapping` call is awaited sequentially so a slow
@@ -42,6 +40,7 @@ export default async function erpnextForwardHandler({
 }: SubscriberArgs<any>) {
     const eventName = event?.name as string | undefined
     if (!eventName) return
+    if (OUTBOUND_PAUSED) return
 
     const entityId = event?.data?.id as string | undefined
     // Idempotency key for the far side. Medusa's event envelope does not

@@ -12,7 +12,9 @@ import { ERPNEXT_MODULE } from "../../../../modules/erpnext"
  *   - exists                            — whether a DB row exists yet
  *   - enable_sync                       — kill switch
  *   - erpnext_url                       — base URL (or null)
- *   - webhook_secret_masked             — "abc…xyz" preview, never raw
+ *   - frappe_webhook_secret_masked      — "abc…xyz" preview, never raw
+ *   - sync_doctypes / erpnext_setup_*   — the selection DocTypes and the
+ *                                         last "Set up ERPNext" report
  *   - request_timeout_ms / retry knobs
  *   - env_fallback                      — what env vars currently
  *                                         provide (so the admin UI can
@@ -38,20 +40,18 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
 
 const SaveSchema = z.object({
     enable_sync: z.boolean().optional(),
-    /** This instance's name on the wire; must match the Medusync Site
-     *  record on the ERPNext side. */
-    site_id: z.string().nullable().optional(),
-    /** Normally set by ERPNext announcing it; here for a manual fix. */
-    products_doctype: z.string().nullable().optional(),
     /** What may happen when a product is created in Medusa. */
     medusa_product_policy: z.enum(["off", "link", "create"]).nullable().optional(),
     erpnext_url: z.string().nullable().optional(),
-    // Whitelisted Frappe method receiving pushes (e.g. medusync.api.receive).
-    frappe_receive_method: z.string().nullable().optional(),
-    // Medusa→Frappe HMAC secret (legacy column name `webhook_secret`).
-    webhook_secret: z.string().nullable().optional(),
-    // Frappe→Medusa HMAC secret (F0 — added for the Webhook seeder).
-    frappe_to_medusa_secret: z.string().nullable().optional(),
+    /** Where ERPNext POSTs webhooks; absolute http(s). */
+    medusa_public_url: z.string().nullable().optional(),
+    /** The DocTypes under `medusa_sync` selection, with their modes. */
+    sync_doctypes: z
+        .array(z.object({ doctype: z.string().min(1), mode: z.enum(["allow", "deny"]).optional() }))
+        .nullable()
+        .optional(),
+    /** The secret every Frappe Webhook signs with; secret semantics. */
+    frappe_webhook_secret: z.string().nullable().optional(),
     erpnext_api_key: z.string().nullable().optional(),
     erpnext_api_secret: z.string().nullable().optional(),
     request_timeout_ms: z.number().int().optional(),
@@ -64,7 +64,7 @@ const SaveSchema = z.object({
     push_allowlist: z.string().nullable().optional(),
     /** Days to keep erpnext_sync_event rows. 0 = keep forever. */
     log_retention_days: z.number().int().min(0).max(1825).optional(),
-    /** Normally sent by ERPNext; editable here only to repair a store. */
+    /** Orders and invoices — this store's choice, honoured by the push. */
     order_document: z.string().nullable().optional(),
     invoice_numbering: z.enum(["erpnext", "store"]).nullable().optional(),
     store_invoice_prefix: z.string().nullable().optional(),
@@ -103,24 +103,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             ...parsed.data,
             updated_by_user_id: adminUserId,
         })
-        // A connection that was just made, or re-pointed, is told about
-        // every mapping: a mapping travels when it is saved, and an ERPNext
-        // connected later would otherwise never hear of the rest.
-        const reconnected =
-            "erpnext_url" in parsed.data ||
-            "webhook_secret" in parsed.data ||
-            parsed.data.enable_sync === true
-        if (reconnected && view?.enable_sync && view?.erpnext_url) {
-            try {
-                await erpnext.pushAllMappingConfigs()
-            } catch (err: any) {
-                console.warn("[erpnext] mappings not sent after settings save:", err?.message)
-            }
-        }
         res.json(view)
     } catch (err: any) {
-        res.status(500).json({
-            message: err?.message ?? "settings_save_failed",
-        })
+        const message = err?.message ?? "settings_save_failed"
+        res.status(/must be an absolute/.test(message) ? 400 : 500).json({ message })
     }
 }
