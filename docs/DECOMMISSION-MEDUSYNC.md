@@ -53,8 +53,10 @@ Counts on fixerp (2026-09-26): Medusync Log 240, Site 1, Inclusion 29.
 
 | Site | Bench | Status |
 |---|---|---|
-| fixerp.localhost (local copy of production data) | frappe16 | installed, hooks running |
-| medusync-vanilla.localhost | frappe16 | installed (the app's own test site) |
+| fixerp.localhost (local copy of production data) | frappe16 | **uninstalled 2026-09-26** (backup taken by bench); the plugin's field and Webhooks survived |
+| medusync-vanilla.localhost | frappe16 | **uninstalled 2026-09-26** |
+| frappe16.localhost | frappe16 | installed (not yet asked about) |
+| new-mithtech-polemarch.localhost | frappe16 | installed (another product's site; not yet asked about) |
 | erp.splendax.com (production, 49.13.233.158) | production bench | installed; the old secret pairing was abandoned mid-way — do not finish it |
 
 Each row is a separate yes.
