@@ -3,7 +3,7 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-09-26
 
 **Breaking: the `medusync` Frappe app is no longer used.** ERPNext → Medusa runs on Frappe core
 Webhooks and a `medusa_sync` Check field; nothing is installed on ERPNext.

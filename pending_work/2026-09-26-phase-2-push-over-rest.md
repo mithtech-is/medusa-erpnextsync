@@ -45,10 +45,13 @@ mapping's key field. Frappe validates and answers with `_server_messages`;
 `frappe.client.submit`. Rate: one document per call, sequential per mapping, the circuit
 breaker (`breaker.ts`) around the connection.
 
-## Questions for the user
+## Decisions (user, 2026-09-26)
 
-1. Which order document(s): Sales Order only, or Sales Order + Sales Invoice on capture?
-2. Submit automatically, or leave drafts for ERPNext users?
-3. Should a push be allowed to create an Item (`medusa_product_policy = create`) now that
-   nothing on ERPNext validates it beyond Frappe's own rules?
-4. Customer identity: email, or the Medusa id in a custom field?
+1. An order becomes a **Sales Order, and a Sales Invoice when payment is captured**, honouring
+   the store's invoice numbering settings.
+2. Documents are created as **drafts**; an ERPNext user submits them. A setting may enable
+   auto-submit later.
+3. Customers are matched **by email, then remembered in `erpnext_link`**; no custom field on
+   Customer.
+4. Open: should a push create an Item under `medusa_product_policy = create`, now that nothing
+   on ERPNext validates it beyond Frappe's own rules?

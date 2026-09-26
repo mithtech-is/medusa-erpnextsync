@@ -1,6 +1,6 @@
 {
   "name": "@mithtech-medusa/plugin-erpnext",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "ERPNext (Frappe) sync as a Medusa v2 plugin. ERPNext → Medusa catalogue over Frappe core Webhooks and a scheduled pull, selected per document with a medusa_sync field the plugin creates; mapping engine with configurable doctype field mappings and an admin console. Nothing is installed on ERPNext.",
   "license": "UNLICENSED",
   "keywords": [
