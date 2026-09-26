@@ -153,6 +153,33 @@ POST /admin/erpnext/pull/items                                           # previ
 POST /admin/erpnext/push/products|customers|orders                       # through the push mappings
 ```
 
+## Stock and prices
+
+ERPNext owns both. Switch them on under Settings → *Stock and prices from
+ERPNext*, name the warehouse and the Medusa stock location, then run Set
+up ERPNext again: it adds the Webhooks (`Stock Ledger Entry after_insert`
+at that warehouse, `Sales Order on_submit` / `on_cancel`, `Item Price
+on_update` / `on_trash` on the selling price list).
+
+- A level is `actual − reserved − safety`, never negative, read from the
+  Bin when an event arrives, not from the event. The Item's own
+  `safety_stock` wins over the Settings buffer when it is set.
+- A selling price on the store's list is the variant's price in that
+  currency. Tiers, customer prices and dated prices are skipped and the
+  row says why.
+- Only an Item on ERPNext → Medusa or Both moves; a Medusa-owned Item's
+  stock and price stay where they are.
+- Missed deliveries are caught by the hourly reconcile, and by every
+  catalogue pull for the Items it pulled. On demand:
+
+```
+POST /admin/erpnext/stock-prices/refresh            { "item_codes": ["SKU-1"] }   # or {} for every linked Item
+```
+
+A product with several variants and no variant carrying the Item code as
+its SKU is skipped ("no variant for Item"); give the right variant that
+SKU.
+
 ## The catalogue
 
 ERPNext owns it. The rules:

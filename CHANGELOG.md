@@ -3,6 +3,28 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.4.0 — unreleased
+
+**Stock and prices, ERPNext → Medusa.** ERPNext owns both; nothing is written back.
+
+- A store may sell what is on hand at its one warehouse less what Sales Orders already promise
+  less a safety buffer (the Item's own `safety_stock` when set, else Settings), written to the
+  store's stock location. It moves on a Stock Ledger Entry at the warehouse and on a Sales Order
+  submit or cancel; the level is read from the Bin afterwards, never from the event.
+- A selling price on the store's price list (Settings → selling price list, else Selling
+  Settings) becomes the variant's base price in that currency; a trashed price removes it.
+  Quantity tiers (`packing_unit` > 1), customer-specific prices, buying prices and prices not
+  valid today are left alone.
+- Only an Item that moves ERPNext → Medusa or Both moves its stock and price; a product linked
+  by hand counts as allowed. The variant is the linked product's variant whose SKU is the Item
+  code, else its only variant, else any variant with that SKU.
+- Set up ERPNext adds the Webhooks once the switches are on (`Stock Ledger Entry after_insert`
+  at the warehouse, `Sales Order on_submit` / `on_cancel`, `Item Price on_update` / `on_trash`
+  on the list). The hourly reconcile and every catalogue pull re-read the linked Items' Bins and
+  prices in a few reads; `POST /admin/erpnext/stock-prices/refresh` does it on demand.
+- Settings: "Move stock levels", "Move selling prices", ERPNext warehouse, Medusa stock location
+  id, safety stock (migration `20260927013045`).
+
 ## 0.3.0 — 2026-09-26
 
 **Medusa → ERPNext is back, over plain Frappe REST.** Nothing is installed on ERPNext.

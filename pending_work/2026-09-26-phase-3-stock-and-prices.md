@@ -1,7 +1,8 @@
 # Phase 3 — stock and prices, ERPNext → Medusa (proposal, 2026-09-26)
 
-**Status:** proposed, not built. Needs the user's answer to the questions at the end
-before any code (checkpoint 1 of this phase).
+**Status:** decided by the user on 2026-09-26 (sellable = actual − reserved − safety; prices
+ERPNext → Medusa only; one warehouse per store) and built on `feat/stock-and-prices`
+(commit `b40ecb6` and after). See CHANGELOG 0.4.0.
 
 ## What medusync did (`handlers/commerce/inventory.py`, `pricing.py`), kept as the rule
 
@@ -43,3 +44,20 @@ before any code (checkpoint 1 of this phase).
    Sales Order)? The open questions Q1–Q3 in `00-QUESTIONS-ANSWER-THESE-FIRST.md` are the
    inbound-price ones.
 3. **Warehouses**: one warehouse per store for now (a setting), or the full table?
+
+## Local e2e, 2026-09-26 night (fixerp + Splendx worktree, plugin 0.3.0-dev9)
+
+Set up ERPNext created the five Webhooks (Stock Ledger Entry after_insert at "Stores - FIPL",
+Sales Order on_submit / on_cancel, Item Price on_update / on_trash on "Standard Selling").
+Refresh now wrote level 0 for "STANDARD PANEL WORK" (Both) at the Bengaluru stock location,
+creating the inventory item and its link that the pull had never made; "AMF PANEL - BUSBAR"
+(Medusa → ERPNext) was left alone; "ELE-CAB-…" was skipped with "no variant for Item" (its
+Phase 1 product has no variant). A new Item Price (2,500 INR) on fixerp became the variant's
+price through the webhook (price set created and linked), 2,500 → 2,600 followed, a Material
+Receipt of 1 Nos (MAT-STE-00002, submitted then cancelled) moved the level 0 → 1 → 0 through
+the Stock Ledger Entry webhook. The API user cannot delete an Item Price on fixerp
+(PermissionError); the on_trash path was exercised by deleting the test price as
+Administrator.
+
+Left on fixerp: the cancelled Stock Entry MAT-STE-00002; the five Webhooks. The clone keeps the
+inventory item/level and the price set for "STANDARD PANEL WORK".

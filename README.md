@@ -63,7 +63,16 @@ get more than a flat document:
 A cancelled order deletes its draft documents (or cancels submitted
 ones); a deleted customer or product is disabled, never deleted.
 `ERPNEXT_PAUSE_PUSH=true` pauses pushes without touching the mappings.
-Stock and prices are the next phase.
+
+**ERPNext → Medusa, stock and prices.** ERPNext owns both. Switched on in
+Settings, a store sells what is on hand at its one warehouse less what
+Sales Orders already promise less a safety buffer, written to the store's
+stock location; a selling price on the store's price list becomes the
+variant's price in that currency. Both arrive on Webhooks *Set up ERPNext*
+adds (a ledger entry at the warehouse, a Sales Order submit or cancel, an
+Item Price on the list), are re-read by the hourly reconcile and by every
+catalogue pull, and move only for an Item that moves ERPNext → Medusa.
+Nothing is written back.
 
 ## Set up ERPNext
 

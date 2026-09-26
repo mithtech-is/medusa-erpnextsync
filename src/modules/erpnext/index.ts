@@ -4032,7 +4032,7 @@ class ErpnextModuleService extends MedusaService({
                     const qty = sellableQty(binByCode.get(code) ?? null, safetyFor(safetyByCode.get(code), cfg.erpnext_safety_stock))
                     const r = await this.writeStockLevel(scope, code, cfg.medusa_stock_location_id, qty)
                     note(r, `stock ${code}`)
-                    if (r?.ok && r.action !== "skipped") stock += 1
+                    if (r?.ok && (r.action === "created" || r.action === "updated")) stock += 1
                 }
             }
         }
@@ -4066,7 +4066,7 @@ class ErpnextModuleService extends MedusaService({
                         if (plan.action === "skip") continue
                         const r = await this.applyVariantPrice(scope, plan)
                         note(r, `price ${plan.item_code}`)
-                        if (r?.ok && r.action !== "skipped") prices += 1
+                        if (r?.ok && (r.action === "created" || r.action === "updated" || r.action === "removed")) prices += 1
                     }
                 }
             }
