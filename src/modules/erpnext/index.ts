@@ -4795,7 +4795,9 @@ class ErpnextModuleService extends MedusaService({
             return { ok: false, status: "failed", error, poison: true }
         }
         try {
-            const outcome = await this.applyFrappeEvent(parsed.data, scope)
+            const outcome = isStockOrPriceDoctype(parsed.data.doctype)
+                ? await this.applyStockPriceEvent(parsed.data, scope)
+                : await this.applyFrappeEvent(parsed.data, scope)
             const failed = outcome.results.filter((r: any) => r.ok === false)
             const error = failed.length ? String(failed[0].error ?? "failed").slice(0, ERROR_TRUNCATE) : null
             await this.updateErpnextSyncEvents({
@@ -4827,6 +4829,22 @@ class ErpnextModuleService extends MedusaService({
      * The studio's "plan inbound". Reads links, writes nothing.
      */
     async planInbound(body: FrappeWebhookBody): Promise<any> {
+        // Stock and prices have no mapping; say what would move and why.
+        if (isStockOrPriceDoctype(body.doctype)) {
+            const cfg = await this.getActiveConfig()
+            if (STOCK_DOCTYPES.has(body.doctype)) {
+                if (!cfg.sync_stock) return { action: "skipped", reason: "stock sync is off in Settings" }
+                const pairs = stockPairsOf(body, cfg.erpnext_warehouse)
+                return pairs.length
+                    ? { action: "stock", warehouse: cfg.erpnext_warehouse, items: pairs.map((p) => p.item_code), reads: "Bin per item, then the level = actual − reserved − safety" }
+                    : { action: "skipped", reason: `nothing at warehouse ${cfg.erpnext_warehouse ?? "(not set)"}` }
+            }
+            if (!cfg.sync_prices) return { action: "skipped", reason: "price sync is off in Settings" }
+            const rest = await this.restClient()
+            const priceList = rest ? (await this.pushDefaults(rest.client)).priceList : null
+            const plan = planItemPrice({ event: body.event, doc: body.doc, priceList, today: formatInZone(new Date(), await this.siteTimezone(), false) })
+            return plan.action === "skip" ? { action: "skipped", reason: plan.reason } : { action: `price ${plan.action}`, ...plan }
+        }
         let mappings: any[] = []
         try {
             mappings = (await this.listEnabledPullMappings()).filter((m: any) => m.doctype === body.doctype)

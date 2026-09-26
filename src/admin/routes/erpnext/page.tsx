@@ -433,6 +433,34 @@ const SettingsTab: React.FC<{
       setSettingUp(false)
     }
   }
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshResult, setRefreshResult] = useState<string | null>(null)
+  /** Re-read every linked Item's stock and selling price now. Saves first,
+   *  so the warehouse and switches the refresh reads are the ones shown. */
+  const refreshStockPrices = async () => {
+    setRefreshResult(null)
+    if (!(await save())) return
+    setRefreshing(true)
+    try {
+      const res = await fetch("/admin/erpnext/stock-prices/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      })
+      const body = await res.json()
+      setRefreshResult(
+        body.skipped
+          ? `Nothing refreshed: ${body.skipped === "off" ? "both switches are off" : body.skipped}`
+          : `${body.items ?? 0} linked item(s): ${body.stock ?? 0} level(s) and ${body.prices ?? 0} price(s) changed, ${body.failed ?? 0} failed` +
+              (Array.isArray(body.notes) && body.notes.length ? ` — ${body.notes.slice(0, 5).join("; ")}` : ""),
+      )
+    } catch (e) {
+      setRefreshResult(e instanceof Error ? e.message : "refresh_failed")
+    } finally {
+      setRefreshing(false)
+    }
+  }
   const setupBlocker = !(url.trim() || view.env_fallback.erpnext_url)
     ? "Set the ERPNext URL first"
     : !(view.erpnext_api_key_masked || apiKey)
@@ -1005,6 +1033,12 @@ const SettingsTab: React.FC<{
               An Item's own safety stock wins when it has one.
             </Text>
           </div>
+        </div>
+        <div className="mt-3 flex items-center gap-3">
+          <Button size="small" variant="secondary" onClick={refreshStockPrices} isLoading={refreshing} disabled={!stockCfg.sync_stock && !stockCfg.sync_prices}>
+            Refresh stock and prices now
+          </Button>
+          {refreshResult ? <Text size="small">{refreshResult}</Text> : null}
         </div>
       </section>
 

@@ -23,7 +23,10 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   on the list). The hourly reconcile and every catalogue pull re-read the linked Items' Bins and
   prices in a few reads; `POST /admin/erpnext/stock-prices/refresh` does it on demand.
 - Settings: "Move stock levels", "Move selling prices", ERPNext warehouse, Medusa stock location
-  id, safety stock (migration `20260927013045`).
+  id, safety stock (migration `20260927013045`), and a *Refresh stock and prices now* button.
+- A retried stock or price row is replayed through the same planner; the studio's plan-inbound
+  says what a stock or price event would move.
+- Docs: `docs/DECOMMISSION-MEDUSYNC.md` (Phase 4, per site) and `docs/PRODUCTION-CHECKLIST.md`.
 
 ## 0.3.0 — 2026-09-26
 

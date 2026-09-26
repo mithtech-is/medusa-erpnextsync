@@ -2,7 +2,7 @@ schemaVersion: 1
 id: erpnext
 kind: plugin
 title: ERPNext catalogue sync
-summary: Products kept in step with an ERPNext site over Frappe core Webhooks and a scheduled pull; ERPNext is source of truth. Customers, orders and invoices go the other way over plain Frappe REST as drafts. Nothing is installed on ERPNext.
+summary: Products, stock levels and selling prices kept in step with an ERPNext site over Frappe core Webhooks and a scheduled pull; ERPNext is source of truth. Customers, orders and invoices go the other way over plain Frappe REST as drafts. Nothing is installed on ERPNext.
 provides: [erp-sync, erp-catalogue-pull, erp-customer-push, erp-order-push]
 requires: []
 optional: []
