@@ -5,6 +5,7 @@ import {
     planItemPrice,
     safetyFor,
     sellableQty,
+    stockAllowedByLink,
     stockLedgerCondition,
     stockPairsOf,
 } from "../stock-prices"
@@ -86,5 +87,18 @@ describe("webhook conditions", () => {
     it("quote the names as Python strings", () => {
         expect(stockLedgerCondition('Stores - "F"')).toBe('doc.warehouse == "Stores - \\"F\\""')
         expect(itemPriceCondition("Standard Selling")).toBe('doc.price_list == "Standard Selling" and doc.selling == 1')
+    })
+})
+
+describe("stockAllowedByLink", () => {
+    it("allows an Item ERPNext shows as ERPNext → Medusa or Both, or one with no direction yet", () => {
+        expect(stockAllowedByLink({ remote_direction: "ERPNext → Medusa" })).toBe(true)
+        expect(stockAllowedByLink({ remote_direction: "Both" })).toBe(true)
+        expect(stockAllowedByLink({ remote_direction: null })).toBe(true)
+        expect(stockAllowedByLink(null)).toBe(true)
+    })
+    it("refuses a Medusa-owned or deselected Item", () => {
+        expect(stockAllowedByLink({ remote_direction: "Medusa → ERPNext" })).toBe(false)
+        expect(stockAllowedByLink({ remote_direction: "" })).toBe(false)
     })
 })

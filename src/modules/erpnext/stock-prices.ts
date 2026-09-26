@@ -16,6 +16,8 @@
  * Everything here is pure; the service does the reading and writing.
  */
 
+import { allowsPull, parseRecordDirection } from "./selection"
+
 export const STOCK_LEDGER_DOCTYPE = "Stock Ledger Entry"
 export const SALES_ORDER_DOCTYPE = "Sales Order"
 export const ITEM_PRICE_DOCTYPE = "Item Price"
@@ -111,4 +113,14 @@ export function stockLedgerCondition(warehouse: string): string {
 /** Fires for a selling price on the store's list. */
 export function itemPriceCondition(priceList: string): string {
     return `doc.price_list == ${py(priceList)} and doc.selling == 1`
+}
+
+/**
+ * Only an Item that moves ERPNext → Medusa (or both ways) moves its stock
+ * and price. A link ERPNext has never shown a direction for — a product
+ * linked by hand — is allowed, like a push is.
+ */
+export function stockAllowedByLink(link: { remote_direction?: string | null } | null | undefined): boolean {
+    if (!link || link.remote_direction === null || link.remote_direction === undefined) return true
+    return allowsPull(parseRecordDirection(link.remote_direction))
 }

@@ -78,6 +78,7 @@ import {
     planItemPrice,
     safetyFor,
     sellableQty,
+    stockAllowedByLink,
     stockPairsOf,
     type PricePlan,
 } from "./stock-prices"
@@ -3827,7 +3828,14 @@ class ErpnextModuleService extends MedusaService({
                         reason: `nothing at warehouse ${cfg.erpnext_warehouse ?? "(not set)"}`,
                     })
                 }
-                for (const pair of pairs) results.push(await this.applyStockLevel(scope, pair.item_code))
+                for (const pair of pairs) {
+                    const link = await this.findLink("Item", pair.item_code, "product")
+                    if (!stockAllowedByLink(link)) {
+                        results.push({ ok: true, action: "skipped", reason: `${pair.item_code} does not move ERPNext → Medusa` })
+                        continue
+                    }
+                    results.push(await this.applyStockLevel(scope, pair.item_code))
+                }
             }
         }
         if (body.doctype === ITEM_PRICE_DOCTYPE) {
@@ -3842,11 +3850,10 @@ class ErpnextModuleService extends MedusaService({
                     priceList,
                     today: formatInZone(new Date(), await this.siteTimezone(), false),
                 })
-                results.push(
-                    plan.action === "skip"
-                        ? { ok: true, action: "skipped", reason: plan.reason }
-                        : await this.applyVariantPrice(scope, plan),
-                )
+                if (plan.action === "skip") results.push({ ok: true, action: "skipped", reason: plan.reason })
+                else if (!stockAllowedByLink(await this.findLink("Item", plan.item_code, "product"))) {
+                    results.push({ ok: true, action: "skipped", reason: `${plan.item_code} does not move ERPNext → Medusa` })
+                } else results.push(await this.applyVariantPrice(scope, plan))
             }
         }
         return { via: "frappe", event: body.event, results }
@@ -4064,7 +4071,10 @@ class ErpnextModuleService extends MedusaService({
                 { take: 200, skip: offset, order: { erpnext_name: "ASC" } },
             )
             if (!links.length) break
-            const out = await this.refreshStockAndPrices(scope, links.map((l) => String(l.erpnext_name)))
+            const out = await this.refreshStockAndPrices(
+                scope,
+                links.filter((l) => stockAllowedByLink(l)).map((l) => String(l.erpnext_name)),
+            )
             items += links.length
             stock += out.stock
             prices += out.prices
