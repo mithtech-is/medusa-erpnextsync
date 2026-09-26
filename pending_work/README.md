@@ -1,9 +1,13 @@
 # pending_work
 
-Deferred requirements for the Medusa side of the ERPNext ↔ Medusa connector.
-The Frappe app keeps its own `pending_work/` in the `medusync` app; items that
-touch both systems appear in both folders with the same file name, and the two
-copies are kept in step.
+Deferred requirements for the ERPNext ↔ Medusa connector. **This folder is
+their only home.** Until 2026-09-26 the Frappe app `medusync` kept an
+identical copy; medusync is retired (ERPNext → Medusa now runs on Frappe
+core Webhooks and the `medusa_sync` field, see the README), so the copies
+there are history and this one is the record. Notes below that name
+`Medusync *` doctypes, `medusync/*.py` or the envelope describe the old
+design; the decisions they record still stand unless a newer note says
+otherwise.
 
 ## Start here
 
@@ -48,7 +52,9 @@ The working order is:
 | `2026-09-06-guided-presets-target-readonly-fields.md` | Q10–Q11 |
 | `2026-09-06-payload-key-convention-mismatch.md` | decided and built — Q21 is the follow-on |
 | `2026-09-07-one-sync-per-pair.md` | decided and built — answers Q15 |
-| `2026-09-07-state-of-play.md` | where everything stands; read it first |
+| `2026-09-07-state-of-play.md` | where everything stood on 2026-09-07, before medusync was retired |
+| `2026-09-14-item-product-field-map.md` | the Item ↔ product field map |
+| `2026-09-14-store-payments-and-gateway-settlement.md` | Phase 2 — orders, invoices, payments over REST |
 
 Wallet and credit line are a different kind of pending: they are not waiting
 on a decision so much as on two applications that do not exist yet. Their

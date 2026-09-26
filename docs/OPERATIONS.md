@@ -11,48 +11,49 @@ against `/admin/erpnext/…`.
 
 ## Connecting to ERPNext
 
-The ERPNext side creates a **Medusync Site** record with two secrets.
-Cross them over here:
+Nothing is installed on ERPNext. On the Settings tab:
 
-| Here | There |
+| Field | What |
 |---|---|
-| `webhook_secret` | the site's **Outbound Secret** |
-| `frappe_to_medusa_secret` | the site's **Inbound Secret** |
+| ERPNext URL | the Frappe site |
+| API key / secret | a Frappe API user; needs **System Manager** for the setup |
+| Medusa public URL | where ERPNext reaches this store; the webhooks POST to `<url>/webhooks/erpnext-inbound` |
+| Frappe webhook secret | generated for you by Set up ERPNext; rotate with Generate |
+| Selection | the DocTypes that get the **Sync to Medusa** tick, each allow or deny list |
 
-`erpnext_url` points at the Frappe site. `site_id` must match the Site ID
-over there — it travels in every message and names the store in both logs.
+Save, **Test connection** (`POST /admin/erpnext/ping`), then **Set up
+ERPNext** (`POST /admin/erpnext/setup`). The report lists the Custom Field
+and the two Webhooks per DocType as created, updated, unchanged or error.
+Run it again whenever the public URL, the secret or the selection changes;
+it is idempotent.
 
-`POST /admin/erpnext/ping` should come back green, and so should **Test
-connection to Medusa** on the ERPNext side. Both, not one: they use
-different secrets and prove different directions.
+On the ERPNext side the evidence is **Webhook Request Log**: one row per
+delivery attempt, with the request and the response. No row means the
+condition did not fire (the document was not ticked, before or after the
+save). A row with a 401 means the secret differs: rotate it here and run
+Set up ERPNext again.
 
 ## Mappings
 
-Mappings are authored on the ERPNext side and synchronised here, paired by
-`mapping_uid`. Editing one here pushes it there and the other way round;
-the higher `version` wins and ERPNext wins a tie.
+Mappings live here only. A mapping pairs one Medusa entity with one
+DocType; the pair is its identity and there is one per pair.
 
-Two things to know before touching one:
-
-- **A mapping that arrives here for the first time arrives switched off.**
-  Deliberately. Turning on a rule nobody here has reviewed is exactly what
-  the design refuses to do.
-- **ERPNext will not let its own copy be switched on remotely** unless it
-  has been rehearsed there. Enabling here does not enable there.
+- **Pull** and **both** mappings on a selection DocType receive webhooks
+  and are polled every 5 minutes for ticked rows.
+- **Push** mappings are evaluated but **paused** in this release: the log
+  shows `paused`, nothing leaves.
 
 ### Trying one before trusting it
 
 ```
 GET  /admin/erpnext/studio/sample?entity=product[&id=prod_123]
 POST /admin/erpnext/mappings/{id}/dry-run     { "record_id": "..." }  # optional
-POST /admin/erpnext/studio/plan-inbound       { "event": "...", "data": {} }
+POST /admin/erpnext/studio/plan-inbound       { "event": "on_update", "doctype": "Item",
+                                                "name": "SKU-1", "doc": { ... } }
 ```
 
-`dry-run` without a `record_id` rehearses against a sample built from the
-entity's own declared paths, which is what a mapping nobody has used yet
-needs. None of the three writes anything.
-
-There is no admin page for these yet — see `pending_work/`.
+`plan-inbound` takes what a Frappe Webhook sends and says what each mapping
+would do with it. None of the three writes anything.
 
 ## Reading the log
 
@@ -61,75 +62,53 @@ There is no admin page for these yet — see `pending_work/`.
 | Status | Means |
 |---|---|
 | pending | in flight |
-| success | the far side took it |
-| skipped | deliberately not sent or not applied; `last_error` says why |
-| failed | it did not land; the retry job will try again |
+| success | applied; `action` says what: created, updated, drafted |
+| skipped | deliberately not applied; `last_error` says why (not ticked, no mapping, paused) |
+| failed | a write failed; the retry job replays it |
+| poison | gave up; a row from before the webhook era, or too many attempts |
 
-`is_test = true` marks a rehearsal. Those are never retried, never
-suppress a real push as a duplicate, and are deleted within a day. The
-events list has no filter for them yet.
-
-After an outage, once the cause is fixed:
+Inbound rows carry `event_id = frappe:<event>:<doctype>:<name>:<modified>`,
+so Frappe's own retries of one delivery land on one row. Replaying one:
 
 ```
+POST /admin/erpnext/events/{event_id}/retry
 POST /admin/erpnext/events/retry-failed   { "limit": 200 }
 ```
-
-It re-sends everything that gave up, through the ordinary path.
 
 ## Pushing and pulling by hand
 
 ```
-POST /admin/erpnext/push/products
-POST /admin/erpnext/push/customers
-POST /admin/erpnext/push/orders
-POST /admin/erpnext/pull/items
-POST /admin/erpnext/mappings/{id}/pull-now
+POST /admin/erpnext/mappings/{id}/pull-now            { "full": true }   # full = ignore the watermark
+POST /admin/erpnext/pull/items                                           # preview, read-only
+POST /admin/erpnext/push/products|customers|orders                       # paused: logged, not sent
 ```
-
-Pulling lives here rather than on the ERPNext side, and that is not an
-oversight: nothing on that side reads from Medusa. The store pushes to
-ERPNext and ERPNext pushes to the store, so "pull now" can only be here,
-where the reader is.
 
 ## The catalogue
 
-ERPNext owns it. Two rules you cannot configure away:
+ERPNext owns it. The rules:
 
-- An inbound update to a product ERPNext already has is **skipped**,
-  unless somebody has turned on *Medusa May Update Catalogue Fields* over
-  there.
-- Deleting a product here **never** deletes the ERPNext Item. It unlinks:
-  the Item keeps its stock, its history and its ledger entries, and simply
-  stops claiming a Medusa product.
+- Only a **ticked** document reaches the store. Untick it or delete it and
+  its product goes to **draft**; tick it again and the same product is
+  republished. Nothing is ever deleted here on ERPNext's say-so.
+- Deleting a product here **never** touches the ERPNext Item.
+- Whether a product created *here* may reach ERPNext at all is
+  `medusa_product_policy`: `off`, `link` (the default — it must be attached
+  to an existing Item first) or `create`. Moot while pushes are paused.
 
-Whether a product created *here* may reach ERPNext at all is this side's
-decision, `medusa_product_policy`: `off`, `link` (the default — it must be
-attached to an existing Item first) or `create`.
+The hourly reconciliation drafts the products of linked documents that no
+longer carry the tick; its counts are in the server log under
+`[erpnext-recon] selection reconcile`.
 
 ## Starting over
 
-```
-POST /admin/erpnext/reset/request      { "site_id": "default" }   -> a secret, once
-POST /admin/erpnext/reset/confirm      { "id": "...", "secret": "<ERPNext's>" }
-GET  /admin/erpnext/reset/{id}
-POST /admin/erpnext/reset/{id}/perform
-```
-
-Both systems have to agree. Each generates a secret and shows it once, and
-each has to be handed the other's. Three minutes, single use.
-
-This side clears `erpnext_sync_event` and switches off every mapping. It
-keeps every product, customer and order and every ERPNext id on them —
-losing those would leave both systems holding the same records and no
-longer knowing it.
-
-Afterwards nothing is running on either side. ERPNext restores its shipped
-mappings, switched off, and pushes them over as they are enabled.
+There is no reset ceremony any more. To stop everything: switch **Sync
+enabled** off. To forget the log: lower the retention or truncate
+`erpnext_sync_event`. To forget which document became which product:
+truncate `erpnext_link` — the next webhook or pull rebuilds it by the
+mapping's key. Products, customers and orders are never touched.
 
 ## Where the unfinished work is written down
 
 `pending_work/`, one file per topic, each saying what exists today and what
-has to be decided before it can be built. Tracked in git on purpose. The
-Frappe app keeps its own; items touching both appear in both under the
-same filename.
+has to be decided before it can be built. Tracked in git on purpose. This
+repo is their only home.

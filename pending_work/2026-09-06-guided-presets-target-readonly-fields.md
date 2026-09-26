@@ -1,5 +1,10 @@
 # The guided presets map fields ERPNext will not keep
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 **Raised:** 2026-09-06, while checking why autofill suggests so little for
 Customer
 **Side:** both — the preset lives in the Medusa admin, the constraint is

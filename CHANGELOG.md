@@ -3,6 +3,44 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.2.0 — unreleased
+
+**Breaking: the `medusync` Frappe app is no longer used.** ERPNext → Medusa runs on Frappe core
+Webhooks and a `medusa_sync` Check field; nothing is installed on ERPNext.
+
+- **Set up ERPNext** (Settings tab, `POST /admin/erpnext/setup`) creates the `<DocType>-medusa_sync`
+  Custom Field and two Webhooks (`on_update`, `on_trash`) per selection DocType, over REST,
+  idempotently, signed with a secret the store generates. Allow list (default unticked) or deny
+  list (default ticked) per DocType.
+- `POST /webhooks/erpnext-inbound` verifies `X-Frappe-Webhook-Signature` over the raw body and
+  applies `{event, doctype, name, doc}` through the enabled pull mappings: ticked → upsert,
+  unticked or trashed → product to draft, ticked again → republished.
+- The pull ANDs `["medusa_sync","=",1]` into every mapping on a selection DocType.
+- New `erpnext_link` table maps `(doctype, name, entity) → medusa_id`; an hourly reconcile drafts
+  the products of linked documents that no longer carry the tick.
+- **Pushes to ERPNext are paused.** Push mappings are evaluated and logged as `paused`; the
+  subscriber returns early; the retry job leaves outbound rows alone. Phase 2 restores them over
+  REST.
+- Settings: `frappe_to_medusa_secret` becomes `frappe_webhook_secret` (value kept);
+  `medusa_public_url`, `sync_doctypes`, `erpnext_setup_at/report` added; `site_id`,
+  `frappe_receive_method`, `webhook_secret`, `products_doctype` dropped (`products_doctype`
+  backfills the first `sync_doctypes` entry, allow mode). Mapping `site_id`, `source_of_truth`,
+  `last_synced_at` and event `origin`, `correlation_id`, `site_id` dropped. `erpnext_reset_request`
+  dropped. (`Migration20260926143017`.)
+- Removed routes: `webhooks/erpnext-describe`, `admin/erpnext/reset/*`,
+  `admin/erpnext/mappings/sync-now`, `admin/erpnext/orders/{id}/request-return`.
+  `studio/plan-inbound` now takes a webhook-shaped body.
+- Env: `ERPNEXT_WEBHOOK_SECRET`, `ERPNEXT_FRAPPE_TO_MEDUSA_SECRET`, `ERPNEXT_RECEIVE_METHOD`,
+  `ERPNEXT_SITE_ID` are no longer read; `ERPNEXT_FRAPPE_WEBHOOK_SECRET` and `MEDUSA_BACKEND_URL`
+  are fallbacks for the new settings.
+- Fixed: "pull now (full)" never cleared the watermark; an inbound trash of a handle-keyed
+  product never matched (`disableByKey` with the raw item code); `products/unlinked` filtered on a
+  field a vanilla ERPNext does not have.
+- Dropped with medusync, consciously: the envelope and its replay window, the two-sided hard
+  reset, mapping-config sync, the describe channel, the `dry_run` test traffic, the handler-pack
+  events (stock, prices, fulfilment, returns, invoices, payments) and the return-request route.
+  Stock and prices return in Phase 3; orders, customers, invoices and payments in Phase 2.
+
 ## 0.1.2 — 2026-09-23
 
 - A link key is no longer mistaken for a missing field. The Frappe app moved the Medusa ids off

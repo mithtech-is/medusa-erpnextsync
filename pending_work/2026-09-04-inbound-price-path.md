@@ -1,5 +1,10 @@
 # Prices flowing Medusa → ERPNext
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 **Deferred from:** Phase 3 (entity breadth)
 **Belongs to:** a later phase, once the mapping studio (Phase 4) can dry-run it
 **Side:** both systems. This file is the ERPNext half; the plugin repo's

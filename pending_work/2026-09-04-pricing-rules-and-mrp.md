@@ -1,5 +1,10 @@
 # Percentage / discount Pricing Rules and MRP — deferred 2026-09-04
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 **Requirement.** Price lists sync bidirectionally with per-list direction.
 Rate-based tier prices and quantity ladders already sync from
 `handlers/commerce/pricing.py` (`variant.price.set`, `variant.tier_price.set`

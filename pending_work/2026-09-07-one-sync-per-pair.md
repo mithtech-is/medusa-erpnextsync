@@ -1,5 +1,10 @@
 # One sync per pair, and both lists read the same
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 **Raised:** 2026-09-07, looking at the two mapping lists side by side
 **Side:** both, and the identity that travels between them
 **Severity:** the two lists drifted apart and one sync showed up twice

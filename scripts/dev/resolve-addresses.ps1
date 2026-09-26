@@ -13,10 +13,12 @@
     1. picks the Windows->WSL address that actually answers on the Frappe port
        (falls back to the WSL IP when the bench is down),
     2. writes ERPNEXT_URL into the sandbox backend .env,
-    3. writes Medusync Settings.medusa_url on the Frappe site (bench execute),
-    4. optionally updates the plugin's erpnext_url via the Medusa admin API
-       (-MedusaAdminEmail / -MedusaAdminPassword, or env MEDUSA_ADMIN_EMAIL /
-       MEDUSA_ADMIN_PASSWORD) when Medusa is already running.
+    3. optionally writes the plugin's erpnext_url and medusa_public_url via
+       the Medusa admin API and re-runs "Set up ERPNext", which rewrites the
+       Webhook URLs on the Frappe side (-MedusaAdminEmail /
+       -MedusaAdminPassword, or env MEDUSA_ADMIN_EMAIL / MEDUSA_ADMIN_PASSWORD)
+       when Medusa is already running. Nothing is written on the bench
+       directly: the plugin owns what it created there.
 
 .EXAMPLE
   pwsh scripts/dev/resolve-addresses.ps1
@@ -96,36 +98,7 @@ if ([string]::IsNullOrWhiteSpace($BackendEnv)) {
   }
 }
 
-# ── 3. Medusync Site.medusa_url (Frappe side) ─────────────────────────────────
-# Every connected store is a Medusync Site record and delivery reads the URL
-# from there; the Single's connection fields are legacy and no longer used to
-# send anything. Every enabled site is updated, which is right while they all
-# point at one local Medusa — pass -NoWrite first if that is not true here.
-$script = @"
-#!/usr/bin/env bash
-set -e
-export PATH="`$HOME/.local/bin:`$PATH"
-cd $BenchPath/sites
-../env/bin/python - <<'PYEOF'
-import frappe
-frappe.init(site="$Site", sites_path=".")
-frappe.connect()
-rows = frappe.get_all("Medusync Site", filters={"enabled": 1}, fields=["name"])
-if not rows:
-    print("no enabled Medusync Site - create one in the Desk first")
-for row in rows:
-    frappe.db.set_value("Medusync Site", row.name, "medusa_url", "$medusaUrl", update_modified=False)
-    print("Medusync Site", row.name, "medusa_url =", "$medusaUrl")
-frappe.db.commit()
-frappe.clear_cache()
-PYEOF
-"@
-$tmp = Join-Path $env:TEMP "medusync-set-url.sh"
-[System.IO.File]::WriteAllText($tmp, ($script -replace "`r`n", "`n"))
-$tmpWsl = "/mnt/" + $tmp.Substring(0, 1).ToLower() + ($tmp.Substring(2) -replace "\\", "/")
-& wsl.exe -d $Distro -u $BenchUser -- bash $tmpWsl
-
-# ── 4. plugin erpnext_url (Medusa side, only when running + creds given) ─────
+# ── 3. plugin settings + Set up ERPNext (only when running + creds given) ────
 if ($MedusaAdminEmail -and $MedusaAdminPassword -and (Test-Port "127.0.0.1" $MedusaPort)) {
   try {
     $base = "http://127.0.0.1:${MedusaPort}"
@@ -133,11 +106,13 @@ if ($MedusaAdminEmail -and $MedusaAdminPassword -and (Test-Port "127.0.0.1" $Med
       -Body (@{ email = $MedusaAdminEmail; password = $MedusaAdminPassword } | ConvertTo-Json)
     $headers = @{ Authorization = "Bearer $($auth.token)" }
     Invoke-RestMethod -Method Post -Uri "$base/admin/erpnext/settings" -Headers $headers -ContentType "application/json" `
-      -Body (@{ erpnext_url = $erpnextUrl } | ConvertTo-Json) | Out-Null
-    Write-Host "plugin erpnext_setting.erpnext_url = $erpnextUrl"
+      -Body (@{ erpnext_url = $erpnextUrl; medusa_public_url = $medusaUrl } | ConvertTo-Json) | Out-Null
+    Write-Host "plugin erpnext_setting: erpnext_url = $erpnextUrl, medusa_public_url = $medusaUrl"
+    $setup = Invoke-RestMethod -Method Post -Uri "$base/admin/erpnext/setup" -Headers $headers
+    foreach ($item in $setup.report.items) { Write-Host ("  {0,-12} {1,-40} {2}" -f $item.kind, $item.name, $item.action) }
   } catch {
-    Write-Warning "could not update the plugin setting via the admin API: $($_.Exception.Message)"
+    Write-Warning "could not update the plugin via the admin API: $($_.Exception.Message)"
   }
 } else {
-  Write-Host "plugin erpnext_url not updated (Medusa not running or no admin credentials); the env fallback ERPNEXT_URL applies when the setting row is empty."
+  Write-Host "plugin settings not updated (Medusa not running or no admin credentials); the env fallback ERPNEXT_URL applies when the setting row is empty. Re-run Set up ERPNext from the admin so the Webhooks point at $medusaUrl."
 }

@@ -1,5 +1,10 @@
 # A real two-panel mapper, and parity between the two sides
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 **Raised:** 2026-09-07, from looking at both mapping pages side by side
 **Belongs to:** the next block of operator-facing work
 **Side:** both, and they are in very different places.

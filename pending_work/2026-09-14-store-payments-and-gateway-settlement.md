@@ -1,5 +1,10 @@
 # Store payments and gateway settlement
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 Raised 14 September 2026. **Not started.** Payment recording is switched
 off on the store's Medusync Site (`record_payments = 0`, `mode_of_payment`
 cleared) so orders and invoices can sync without it. Turning it back on

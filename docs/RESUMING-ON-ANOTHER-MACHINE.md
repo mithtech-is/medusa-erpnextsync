@@ -7,17 +7,14 @@ different computer, having forgotten which half lives where.
 
 | | Where | In git |
 |---|---|---|
-| This plugin | a Medusa 2.19 project's plugin folder | ✅ `mithtech-is/medusa-erpnextsync` |
-| The Frappe app | `frappe-bench/apps/medusync` | ✅ `suparikoli/medusync` |
+| This plugin | a Medusa 2.19+ project's plugin folder | ✅ `mithtech-is/medusa-erpnextsync` |
 | The Medusa project you test against | wherever you put it | ❌ yours, local only |
 | The Frappe bench and its site | wherever you put it | ❌ never was |
 
-Both applications are entirely in git. **Neither stack is.** That is the
-important sentence: a new machine has the code and none of the environment,
-and rebuilding the environment is most of the work.
-
-Both repos carry everything on their default branch — `master` for the
-Frappe app, `main` for the plugin.
+The plugin is entirely in git. **Neither stack is.** That is the important
+sentence: a new machine has the code and none of the environment, and
+rebuilding the environment is most of the work. Nothing of ours is
+installed on the bench: what the plugin needs there it creates itself.
 
 ## What you can do with only the repos
 
@@ -30,39 +27,25 @@ npm run typecheck     # tsc, app and specs
 npm test              # vitest — no database, no Medusa
 ```
 
-The pure modules carry the rules worth being sure about — the envelope, the
-mapping engine, echo suppression, the reset secrets, the circuit breaker,
-the mapping signature, the order-payment merge — and none of them needs a
-running anything.
-
-The Frappe app's tests are the opposite: they are integration tests and need
-a bench with a site.
+The pure modules carry the rules worth being sure about — the webhook
+signature and plan, the selection filter, the setup builders, the mapping
+engine, echo suppression, the circuit breaker, the mapping signature — and
+none of them needs a running anything.
 
 ## What a full environment needs
 
-**Frappe side.** A bench on Frappe/ERPNext **v16** (the app declares
-`required_apps = ["erpnext"]` and there are no v15 shims), a site, then:
+**Frappe side.** A bench on Frappe/ERPNext **v16** with a site, its
+workers running, and an API key for a user with **System Manager**. That is
+all; the field and the webhooks are created by the plugin.
 
-```bash
-bench get-app https://github.com/suparikoli/medusync.git
-bench --site <site> install-app medusync
-bench --site <site> migrate
-bench --site <site> run-tests --app medusync    # ~300 tests
-```
-
-No `set-config` step: a fresh site gets the `commerce` handler pack, which
-is what a site without an opinion wants. `after_migrate` installs the three
-shipped mappings, switched off, and runs the drift check. Both report rather
-than fail.
-
-**Medusa side.** Any Medusa 2.19 project. The plugin is consumed through
-Medusa's yalc flow, not npm:
+**Medusa side.** Any Medusa 2.19+ project. Locally the plugin is consumed
+through Medusa's yalc flow (or a packed tarball):
 
 ```bash
 # in the plugin
 npx medusa plugin:build && npx medusa plugin:publish
 # in the Medusa project
-npx yalc update medusa-plugin-erpnext     # REQUIRED — publish alone does not move it
+npx yalc update @mithtech-medusa/plugin-erpnext   # REQUIRED — publish alone does not move it
 pnpm install
 pnpm exec medusa db:migrate
 ```
@@ -72,22 +55,17 @@ previous build so a newly imported module is simply missing at boot.
 
 ## Pairing the two
 
-1. **ERPNext:** create a **Medusync Site**. The Site ID travels in every
-   message and cannot change once records are correlated. Generate two long
-   random strings for its Inbound and Outbound secrets.
-2. **Medusa:** ERPNext page → settings. Cross them over — our Inbound Secret
-   is the store's `webhook_secret` (it signs what Medusa sends *to* us); our
-   Outbound Secret is its `frappe_to_medusa_secret` (it verifies what we send
-   *to* Medusa).
-3. Set `erpnext_url` on the Medusa side and `medusa_url` on the Site.
-4. Test **both** directions: `POST /admin/erpnext/ping` and, on the Frappe
-   desk, **Medusync Settings → Test connection to Medusa**. They use
-   different secrets and prove different things; one green does not imply
-   the other.
+1. **Medusa:** ERPNext page → Settings. ERPNext URL, API key and secret,
+   the store's public URL (what ERPNext can reach), the selection DocTypes
+   (`Item`, allow list, unless you know otherwise). Save.
+2. **Test connection** proves the API key. **Set up ERPNext** creates the
+   `medusa_sync` field and the two Webhooks and reports each one.
+3. **ERPNext:** set *Sync to Medusa* on one document. **Webhook Request
+   Log** shows the delivery; the product appears in Medusa; ERPNext →
+   Events shows the row.
 
-An inbound request is attributed to a store **by its signature**, not by any
-header, so a store cannot claim to be another. The one exception is the
-legacy Single secret — see `pending_work/` and question Q19.
+Nothing is typed twice: the secret is generated here and written into the
+Webhook rows by the setup.
 
 ## If the two halves are on different machines or in a VM
 
@@ -98,25 +76,19 @@ macOS machine none of that applies and `localhost` works.
 
 ## Where to start reading
 
-- `docs/OPERATIONS.md` — running it, in both repos.
-- This file is kept identical in both; it describes the pair, not one side.
+- `docs/OPERATIONS.md` — running it.
 - `pending_work/00-QUESTIONS-ANSWER-THESE-FIRST.md` — every open decision.
-- `README.md` — the wire contract, the studio, the reset, the defaults.
+- `README.md` — what Set up ERPNext creates, the link table, the studio.
 
 ## What a fresh install looks like
 
 So that a difference from this is recognised as a difference, not assumed
 to be a bug:
 
-- Three shipped default mappings — customer, catalogue, orders — installed
-  and **switched off**. They stay off until a mapping is rehearsed in the
-  studio; that gate is deliberate and is the whole point of Phase 4.
-- The `commerce` handler pack loaded, because the site config says nothing.
-  It is stock levels, prices, delivery notes, invoices and order metadata.
-- No Medusync Site, so nothing is delivered anywhere. Create one, pair it,
-  then map its warehouses and price lists — neither has a default, because
-  neither can be guessed.
-- Empty `Medusync Log` and `erpnext_sync_event`. Both fill from first use
-  and are pruned on the retention in the settings.
-- The legacy Single secret **on**, which is the shipped default and matters
-  only to a site upgrading from before there were Sites.
+- No mappings until **Reseed canonical mappings** or the wizard makes them;
+  the shipped defaults arrive **switched off** and stay off until rehearsed.
+- No `medusa_sync` field and no Webhooks on ERPNext until **Set up ERPNext**
+  runs; the pull of a selection DocType fails until then and says so.
+- Empty `erpnext_sync_event` and `erpnext_link`. Both fill from first use;
+  the log is pruned on the retention in the settings.
+- Pushes paused: every push mapping logs `paused` and sends nothing.

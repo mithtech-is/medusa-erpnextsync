@@ -1,9 +1,10 @@
 # Running both halves locally
 
-The connector is two applications that only prove anything together. This is
-how to get both up and how to move a change from one into the other. Two
-things are version-controlled: this plugin, and the Frappe app `medusync`.
-The Medusa project and the bench you test against are yours and disposable.
+The connector is one application that only proves anything against a live
+ERPNext. This is how to get both up and how to move a change from the
+plugin into the store. One thing is version-controlled: this plugin. The
+Medusa project and the bench you test against are yours and disposable;
+nothing is installed on the bench.
 
 Written against a Windows + WSL2 setup, because that is the awkward case —
 the addressing section is the only part that is. On one Linux or macOS
@@ -13,9 +14,8 @@ machine, `localhost` works everywhere and you can skip it.
 
 | Piece | Git |
 |---|---|
-| Plugin `medusa-plugin-erpnext` (this repo) | `mithtech-is/medusa-erpnextsync`, branch `main` |
-| Frappe app `medusync` | `suparikoli/medusync`, branch `master` |
-| A Medusa 2.19 project to install the plugin into | yours |
+| Plugin `@mithtech-medusa/plugin-erpnext` (this repo) | `mithtech-is/medusa-erpnextsync`, branch `main` |
+| A Medusa 2.19+ project to install the plugin into | yours |
 | A Frappe bench with ERPNext v16 and a site | yours |
 
 If the bench belongs to another user, every bench command goes through them:
@@ -53,12 +53,13 @@ every WSL restart**, so:
 pwsh scripts/dev/resolve-addresses.ps1 -BackendEnv <path-to-your-.env>
 ```
 
-It writes `ERPNEXT_URL` into the Medusa project's `.env` and the `medusa_url`
-of every enabled **Medusync Site**, and prints what it chose. It prefers
-`127.0.0.1` for the Frappe side because that survives a WSL restart. Pass
-`-MedusaAdminEmail` / `-MedusaAdminPassword` (or set `MEDUSA_ADMIN_EMAIL` /
-`MEDUSA_ADMIN_PASSWORD`) while Medusa is up to also update the plugin's
-setting row through the admin API. `-NoWrite` just prints.
+It writes `ERPNEXT_URL` into the Medusa project's `.env` and prints what it
+chose. It prefers `127.0.0.1` for the Frappe side because that survives a
+WSL restart. Pass `-MedusaAdminEmail` / `-MedusaAdminPassword` (or set
+`MEDUSA_ADMIN_EMAIL` / `MEDUSA_ADMIN_PASSWORD`) while Medusa is up to also
+write `erpnext_url` and `medusa_public_url` into the plugin's settings and
+re-run **Set up ERPNext**, which rewrites the Webhook URLs on the Frappe
+side. `-NoWrite` just prints.
 
 Windows `netstat` shows `:8000` / `:9000` as LISTENING through `wslrelay`
 even when the bench is down. `ss -ltnp` inside WSL is the truth.
@@ -79,9 +80,10 @@ pwsh scripts/dev/resolve-addresses.ps1 -BackendEnv <path>
 pnpm exec medusa db:migrate
 pnpm dev
 
-# 5. smoke — both directions, they prove different things
-#   Medusa admin → ERPNext page → Test connection
-#   Frappe desk  → Medusync Settings → Test connection to Medusa
+# 5. smoke
+#   Medusa admin → ERPNext page → Test connection, then Set up ERPNext
+#   Frappe desk  → Webhook list shows "Medusa Sync: Item on_update/on_trash"
+#   select Sync to Medusa on an Item → Webhook Request Log gets a row → the product appears
 ```
 
 ## Stopping
@@ -101,7 +103,10 @@ is taken. That is what the last two patterns are for.
 
 A Medusa project consumes a local plugin through Medusa's yalc flow —
 `package.json` ends up with
-`"medusa-plugin-erpnext": "file:.yalc/medusa-plugin-erpnext"`.
+`"@mithtech-medusa/plugin-erpnext": "file:.yalc/@mithtech-medusa/plugin-erpnext"`.
+A pnpm workspace whose Docker build has no registry (Splendx) takes a
+tarball instead: `npm run build && npm pack`, copy it under the project's
+`vendor/`, point `package.json` at it, `pnpm install`.
 
 ```bash
 # in the plugin
@@ -111,7 +116,7 @@ npx medusa plugin:build
 npx medusa plugin:publish        # -> the local yalc STORE
 
 # in the Medusa project
-npx yalc update medusa-plugin-erpnext   # store -> ./.yalc  (REQUIRED)
+npx yalc update @mithtech-medusa/plugin-erpnext   # store -> ./.yalc  (REQUIRED)
 pnpm install                            # .yalc -> node_modules
 pnpm exec medusa db:migrate             # when the plugin adds migrations
 ```
@@ -131,30 +136,14 @@ bundle separately, a change to the plugin's admin UI needs the bundle rebuilt:
 `MEDUSA_BACKEND_URL=http://127.0.0.1:7001 npx medusa build --admin-only`.
 `plugin:build` does not touch it.
 
-## Frappe dev loop
+## The Frappe side
 
-```bash
-wsl -d Ubuntu -u <user> -- bash -lc 'cd ~/frappe-bench && bench --site <site> migrate'
-wsl -d Ubuntu -u <user> -- bash -lc 'cd ~/frappe-bench && bench --site <site> run-tests --app medusync'
-```
-
-`hooks.py` changes need a full `bench start` restart. Plain `.py` edits reload
-in the web process, but the **worker** can keep a stale module until it is
-restarted — which is exactly where a queued delivery runs.
-
-Handler packs are chosen per site in `sites/<site>/site_config.json`:
-
-```json
-"medusync_handler_packs": ["commerce"]
-```
-
-Absent means `commerce`, which is what a site without an opinion wants.
-
-Each connected Medusa store is a **Medusync Site** record in the Desk holding
-that store's URL and its own pair of shared secrets. The plugin's matching
-`site_id` is on its settings page, and the two must be equal: every envelope
-names its site, and each side uses that to recognise its own change coming
-home.
+There is no code of ours on the bench. **Set up ERPNext** creates, over
+REST, a Custom Field `Item-medusa_sync` and two Webhooks; you can see them
+in the Desk under Customize Form and Webhook, and every delivery under
+**Webhook Request Log**. Webhook deliveries run on a background worker, so
+the bench's workers must be up (`bench start`, or the launchd/systemd unit
+that owns them).
 
 Writing into a WSL app from Windows tools over `\\wsl.localhost\…` fails on
 permissions when the files belong to another user. Write to a Windows folder

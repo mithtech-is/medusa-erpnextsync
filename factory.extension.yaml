@@ -1,9 +1,9 @@
 schemaVersion: 1
 id: erpnext
 kind: plugin
-title: ERPNext two-way sync
-summary: Products, customers, orders and stock synchronised with an ERPNext site; ERPNext is source of truth for stock and price.
-provides: [erp-sync, erp-catalogue-pull, erp-order-push, erp-customer-push]
+title: ERPNext catalogue sync
+summary: Products kept in step with an ERPNext site over Frappe core Webhooks and a scheduled pull; ERPNext is source of truth. Nothing is installed on ERPNext. Pushes to ERPNext are paused in this release.
+provides: [erp-sync, erp-catalogue-pull]
 requires: []
 optional: []
 conflictsWith: []
@@ -15,12 +15,10 @@ config:
   options: {}
 env:
   - { key: ERPNEXT_URL, hint: "fallback; primary config is the admin ERPNext settings page" }
-  - { key: ERPNEXT_WEBHOOK_SECRET, hint: "Medusa -> Frappe HMAC" }
-  - { key: ERPNEXT_FRAPPE_TO_MEDUSA_SECRET, hint: "Frappe -> Medusa HMAC" }
-  - { key: ERPNEXT_API_KEY }
+  - { key: ERPNEXT_API_KEY, hint: "Frappe API user; System Manager for Set up ERPNext" }
   - { key: ERPNEXT_API_SECRET }
-  - { key: ERPNEXT_RECEIVE_METHOD }
-  - { key: ERPNEXT_SITE_ID }
+  - { key: ERPNEXT_FRAPPE_WEBHOOK_SECRET, hint: "fallback for the Frappe webhook secret; Set up ERPNext generates and stores one" }
+  - { key: MEDUSA_BACKEND_URL, hint: "fallback for the Medusa public URL the Webhooks POST to" }
   - { key: INVENTORY_LOCATION_ID }
 storefront: none
 verify:

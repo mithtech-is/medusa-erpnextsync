@@ -1,5 +1,10 @@
 # Questions — answer these first
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 Every topic in this folder is blocked on a decision below. None has been
 guessed at, because guessing here produces work that gets thrown away.
 

@@ -1,5 +1,10 @@
 # A field dictionary that both sides share
 
+> **Status 2026-09-26:** medusync is retired. ERPNext → Medusa runs on Frappe core Webhooks and
+> the `medusa_sync` field (see `README.md`); pushes to ERPNext are paused until Phase 2 rebuilds
+> them over REST. Where this note names `Medusync *` doctypes, `medusync/*.py` or the envelope, it
+> describes the old design; the decisions it records still stand.
+
 **Raised:** 2026-09-07 — "a dictionary of equivalent fields that also syncs,
 so when users select something it auto-maps the required fields"
 **Belongs to:** with the mapper work; it is what makes a picker useful
