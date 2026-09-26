@@ -82,7 +82,7 @@ Side effect to decide on: with Stock Settings → *Auto Insert Item Price If Mis
 store's rate as an Item Price. Phase 3 (prices) should own that; until then the setting
 decides.
 
-## Local e2e, 2026-09-26 night — complete (plugin 0.3.0-dev6)
+## Local e2e, 2026-09-26 night — complete (plugin 0.3.0-dev6; released as 0.3.0 the same night)
 
 The user enabled server scripts bench-wide (`bench set-config -g server_script_enabled true`,
 web workers reloaded). Then, on fixerp: order #2 → Sales Order `SAL-ORD-2026-00271` (draft,

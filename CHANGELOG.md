@@ -3,7 +3,7 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-09-26
 
 **Medusa → ERPNext is back, over plain Frappe REST.** Nothing is installed on ERPNext.
 
