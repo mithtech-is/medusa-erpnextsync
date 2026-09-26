@@ -1,6 +1,7 @@
 import { MedusaContainer } from "@medusajs/framework/types"
 import { ERPNEXT_MODULE } from "../modules/erpnext"
 import { OUTBOUND_PAUSED } from "../modules/erpnext/outbound"
+import { owedRetry } from "../modules/erpnext/retry-policy"
 
 /**
  * F3 — retry cron for failed erpnext_sync_event rows.
@@ -84,10 +85,10 @@ export default async function retryEvents(container: MedusaContainer) {
         }
         // A paused push is not a failure to recover from.
         if (row.direction !== "inbound" && OUTBOUND_PAUSED) continue
-        // An inbound row that was skipped on purpose (not selected, no
-        // mapping) is not owed a replay; a failed write is, and so is a
-        // row a crash left "pending" long enough ago.
-        if (row.direction === "inbound" && row.status !== "failed" && row.status !== "pending") continue
+        // A row skipped on purpose (not selected, no mapping, an echo, an
+        // unchanged payload) is not owed a replay; a failed write is, and
+        // so is a row a crash left "pending" long enough ago.
+        if (!owedRetry(row)) continue
         try {
             if (row.direction === "inbound") {
                 // The signature was verified when the row was written; the
@@ -103,7 +104,7 @@ export default async function retryEvents(container: MedusaContainer) {
                 const result = await erpnext.retryEvent(row.event_id, container, {
                     probe: !breakerOpen,
                 })
-                if (result?.ok) recovered += 1
+                if (result?.ok && result?.status === "success") recovered += 1
             }
             processed += 1
         } catch (err: any) {

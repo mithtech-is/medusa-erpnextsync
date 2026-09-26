@@ -68,6 +68,7 @@ import {
 } from "./push-rest"
 import { runErpnextSetup, type SetupReport } from "./erpnext-setup"
 import { mergeDoctypeMeta } from "./doctype-meta"
+import { SUPERSEDED_MESSAGE, supersededByLater } from "./retry-policy"
 import {
     DEFAULT_PRODUCT_POLICY,
     decideProductPush,
@@ -690,6 +691,20 @@ class ErpnextModuleService extends MedusaService({
         }
         if (OUTBOUND_PAUSED) return pausedResult()
         if (row.mapping_id) {
+            // A newer push of the same record has its own row; this one
+            // holds an older snapshot and is not resent (retry-policy.ts).
+            if (row.entity_ref && row.created_at) {
+                const later = await this.listErpnextSyncEvents(
+                    { entity_ref: row.entity_ref, mapping_id: row.mapping_id, created_at: { $gt: row.created_at } } as any,
+                    { take: 5 },
+                )
+                if (supersededByLater(row, later)) {
+                    await this.updateErpnextSyncEvents([
+                        { id: row.id, status: "skipped", action: "superseded", last_error: SUPERSEDED_MESSAGE },
+                    ])
+                    return { ok: true, status: "skipped", reason: "superseded" }
+                }
+            }
             const [mapping] = await this.listErpnextMappings(
                 { id: row.mapping_id },
                 { take: 1 },
@@ -3118,7 +3133,14 @@ class ErpnextModuleService extends MedusaService({
         const targetUrl = `${rest.cfg.erpnext_url}/api/resource/${encodeURIComponent(args.mapping.doctype)}`
         const row = await this.upsertEventRow(
             { event: args.event, event_id: args.event_id, data: args.record },
-            { status: "pending", last_error: null, target_url: targetUrl, mapping_id: args.mapping.id, payload_hash: payloadHash },
+            {
+                status: "pending",
+                last_error: null,
+                target_url: targetUrl,
+                mapping_id: args.mapping.id,
+                payload_hash: payloadHash,
+                entity_ref: entityRef,
+            },
         )
         try {
             const ctx: PushContext = {
