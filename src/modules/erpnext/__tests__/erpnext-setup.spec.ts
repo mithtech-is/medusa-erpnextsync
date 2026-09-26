@@ -106,6 +106,10 @@ function fakeClient(gets: Record<string, FrappeResult>, writes: Array<{ method: 
             writes.push({ method: "PUT", path, body })
             return { ok: true, status: 200, data: body }
         },
+        async delete(path) {
+            writes.push({ method: "DELETE", path, body: null })
+            return { ok: true, status: 202, data: null }
+        },
     }
     return { client, writes }
 }
