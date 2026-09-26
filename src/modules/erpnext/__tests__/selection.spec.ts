@@ -10,6 +10,7 @@ import {
     normalizeSyncDoctypes,
     parseRecordDirection,
     pushAllowedByRecord,
+    reconcileDecision,
     resolveProductsDoctype,
     selectionDefault,
     selectionOf,
@@ -146,5 +147,16 @@ describe("which DocType holds the catalogue", () => {
             ]),
         ).toBe("Thing")
         expect(resolveProductsDoctype([], [])).toBe("Item")
+    })
+})
+
+describe("what the hourly reconcile does with a linked document", () => {
+    it("keeps one still moving ERPNext → Medusa, drafts a deselected or missing one, leaves a Medusa-owned one alone", () => {
+        expect(reconcileDecision(DIRECTION_ERPNEXT_TO_MEDUSA)).toBe("keep")
+        expect(reconcileDecision(DIRECTION_BOTH)).toBe("keep")
+        expect(reconcileDecision("")).toBe("draft")
+        expect(reconcileDecision(null)).toBe("draft")
+        expect(reconcileDecision(undefined)).toBe("draft")
+        expect(reconcileDecision(DIRECTION_MEDUSA_TO_ERPNEXT)).toBe("owned")
     })
 })

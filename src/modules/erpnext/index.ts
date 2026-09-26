@@ -42,6 +42,7 @@ import {
     isSyncDoctype,
     normalizeSyncDoctypes,
     pushAllowedByRecord,
+    reconcileDecision,
     resolveProductsDoctype,
     withSelectionFilter,
     type SyncDoctype,
@@ -3982,8 +3983,10 @@ class ErpnextModuleService extends MedusaService({
 
     /**
      * The safety net under the webhooks: every active link whose document
-     * is no longer ticked — unticked while we were down, trashed, renamed —
-     * gets its product drafted. Runs from the hourly reconciliation.
+     * no longer moves ERPNext → Medusa — deselected while we were down,
+     * trashed, renamed — gets its product drafted. A document that became
+     * Medusa → ERPNext is Medusa's own and is left alone; its new direction
+     * is noted so a push reads the current answer. Runs hourly.
      */
     async reconcileSelection(container: any): Promise<{
         checked: number
@@ -4025,8 +4028,8 @@ class ErpnextModuleService extends MedusaService({
                 skip += links.length
                 const names = links.map((l) => String(l.erpnext_name))
                 const qs = new URLSearchParams()
-                qs.set("fields", JSON.stringify(["name"]))
-                qs.set("filters", JSON.stringify([["name", "in", names], [SELECTION_FIELD, "=", 1]]))
+                qs.set("fields", JSON.stringify(["name", SELECTION_FIELD]))
+                qs.set("filters", JSON.stringify([["name", "in", names]]))
                 qs.set("limit_page_length", String(names.length))
                 try {
                     const res = await fetch(
@@ -4043,18 +4046,31 @@ class ErpnextModuleService extends MedusaService({
                         break
                     }
                     const parsed = JSON.parse(text)
-                    const still = new Set(
-                        (Array.isArray(parsed?.data) ? parsed.data : []).map((r: any) => String(r?.name)),
-                    )
+                    // What ERPNext says now, per document. A name it does not
+                    // return is gone (trashed, renamed) and reads as undefined.
+                    const values = new Map<string, unknown>()
+                    for (const r of Array.isArray(parsed?.data) ? parsed.data : []) {
+                        values.set(String(r?.name), r?.[SELECTION_FIELD] ?? "")
+                    }
                     report.checked += links.length
                     for (const link of links) {
-                        if (still.has(String(link.erpnext_name))) continue
+                        const value = values.get(String(link.erpnext_name))
+                        const decision = reconcileDecision(value)
+                        const seen = value === undefined ? undefined : String(value ?? "")
+                        if (decision !== "draft") {
+                            if (seen !== undefined && seen !== (link.remote_direction ?? "")) {
+                                await this.updateErpnextLinks([{ id: link.id, remote_direction: seen }])
+                            }
+                            continue
+                        }
                         const out = await entity.disableByKey(container, "id", link.medusa_id)
                         if (out.ok === false) {
                             report.errors.push({ mapping: mapping.name, name: link.erpnext_name, error: out.error })
                             continue
                         }
-                        await this.updateErpnextLinks([{ id: link.id, state: "drafted" }])
+                        await this.updateErpnextLinks([
+                            { id: link.id, state: "drafted", ...(seen !== undefined ? { remote_direction: seen } : {}) },
+                        ])
                         await this.upsertInboundEventRow(
                             {
                                 event: "frappe.reconcile",

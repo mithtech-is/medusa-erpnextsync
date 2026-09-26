@@ -184,6 +184,23 @@ export function pushAllowedByRecord(
 }
 
 /**
+ * What the hourly reconcile does with one linked document, given the
+ * `medusa_sync` value ERPNext reports for it now — or `undefined` when
+ * ERPNext no longer has a document of that name (trashed, renamed).
+ *
+ *   keep   — still moving ERPNext → Medusa; note the value, touch nothing
+ *   owned  — Medusa → ERPNext: Medusa's own record, never drafted
+ *   draft  — deselected or gone: the product comes off sale
+ */
+export function reconcileDecision(value: unknown | undefined): "keep" | "owned" | "draft" {
+    if (value === undefined) return "draft"
+    const d = parseRecordDirection(value)
+    if (allowsPull(d)) return "keep"
+    if (d === "medusa_to_erpnext") return "owned"
+    return "draft"
+}
+
+/**
  * Which DocType "link this product to an existing document" searches.
  * The enabled product mapping says so; failing that, the first selection
  * DocType; failing that, Item.
