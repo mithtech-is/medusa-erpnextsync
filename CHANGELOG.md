@@ -3,7 +3,7 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## 0.4.0 — unreleased
+## 0.4.0 — 2026-09-27
 
 **Stock and prices, ERPNext → Medusa.** ERPNext owns both; nothing is written back.
 
