@@ -55,9 +55,12 @@ creating the inventory item and its link that the pull had never made; "AMF PANE
 Phase 1 product has no variant). A new Item Price (2,500 INR) on fixerp became the variant's
 price through the webhook (price set created and linked), 2,500 → 2,600 followed, a Material
 Receipt of 1 Nos (MAT-STE-00002, submitted then cancelled) moved the level 0 → 1 → 0 through
-the Stock Ledger Entry webhook. The API user cannot delete an Item Price on fixerp
-(PermissionError); the on_trash path was exercised by deleting the test price as
-Administrator.
+the Stock Ledger Entry webhook. **Not exercised: `Item Price on_trash`.** The API user may not
+delete an Item Price on fixerp (PermissionError), and Administrator cannot either: the still
+installed medusync app linked the test price to a "Medusync Log" row on creation, and Frappe
+refuses to delete a linked document. That is a Phase 4 matter (medusync is still running its
+handlers on fixerp); the removal path is covered by unit tests only.
 
-Left on fixerp: the cancelled Stock Entry MAT-STE-00002; the five Webhooks. The clone keeps the
-inventory item/level and the price set for "STANDARD PANEL WORK".
+Left on fixerp: Item Price `gnfu5f007t` (STANDARD PANEL WORK, Standard Selling, 2,600 INR) and
+its Medusync Log row; the cancelled Stock Entry MAT-STE-00002; the five Webhooks. The clone
+keeps the inventory item/level and the price set for "STANDARD PANEL WORK".
