@@ -3867,7 +3867,7 @@ class ErpnextModuleService extends MedusaService({
      */
     private async variantForItem(scope: any, itemCode: string): Promise<any | null> {
         const query: any = scope.resolve(ContainerRegistrationKeys.QUERY)
-        const fields = ["id", "sku", "product_id", "manage_inventory", "inventory_items.inventory_item_id", "price_set.id"]
+        const fields = ["id", "sku", "title", "product_id", "manage_inventory", "inventory_items.inventory_item_id", "price_set.id"]
         const link = await this.findLink("Item", itemCode, "product")
         if (link?.medusa_id) {
             const { data } = await query.graph({ entity: "variant", fields, filters: { product_id: link.medusa_id } })
@@ -3913,10 +3913,23 @@ class ErpnextModuleService extends MedusaService({
         const inventory: any = scope.resolve(Modules.INVENTORY)
         let inventoryItemId: string | null = variant.inventory_items?.[0]?.inventory_item_id ?? null
         if (!inventoryItemId) {
+            // A product the pull created has a variant but no inventory
+            // item behind it (the module upsert does not make one, the
+            // way the product workflow would). Make one and tie it to the
+            // variant, so the level has somewhere to live.
             const [byItemSku] = await inventory.listInventoryItems({ sku: variant.sku ?? sku }, { take: 1 })
             inventoryItemId = byItemSku?.id ?? null
+            if (!inventoryItemId) {
+                const created = await inventory.createInventoryItems({ sku: variant.sku ?? sku, title: variant.title ?? sku })
+                inventoryItemId = created?.id ?? null
+            }
+            if (!inventoryItemId) return { ok: true, action: "skipped", reason: `variant ${sku} has no inventory item` }
+            const link: any = scope.resolve(ContainerRegistrationKeys.LINK)
+            await link.create({
+                [Modules.PRODUCT]: { variant_id: variant.id },
+                [Modules.INVENTORY]: { inventory_item_id: inventoryItemId },
+            })
         }
-        if (!inventoryItemId) return { ok: true, action: "skipped", reason: `variant ${sku} has no inventory item` }
         const [level] = await inventory.listInventoryLevels(
             { inventory_item_id: inventoryItemId, location_id: locationId },
             { take: 1 },
@@ -3977,17 +3990,21 @@ class ErpnextModuleService extends MedusaService({
     async refreshStockAndPrices(
         scope: any,
         itemCodes: string[],
-    ): Promise<{ skipped?: string; stock: number; prices: number; failed: number }> {
+    ): Promise<{ skipped?: string; stock: number; prices: number; failed: number; notes: string[] }> {
         const cfg = await this.getActiveConfig()
         const codes = Array.from(new Set(itemCodes.filter(Boolean)))
-        if (!codes.length || (!cfg.sync_stock && !cfg.sync_prices)) return { skipped: "off", stock: 0, prices: 0, failed: 0 }
+        if (!codes.length || (!cfg.sync_stock && !cfg.sync_prices)) return { skipped: "off", stock: 0, prices: 0, failed: 0, notes: [] }
         const rest = await this.restClient()
-        if (!rest) return { skipped: "not-configured", stock: 0, prices: 0, failed: 0 }
+        if (!rest) return { skipped: "not-configured", stock: 0, prices: 0, failed: 0, notes: [] }
         let stock = 0
         let prices = 0
         let failed = 0
-        const note = (r: any) => {
-            if (r?.ok === false) failed += 1
+        const notes: string[] = []
+        const note = (r: any, what: string) => {
+            if (r?.ok === false) {
+                failed += 1
+                if (notes.length < 25) notes.push(`${what}: ${r.error}`)
+            } else if (r?.action === "skipped" && notes.length < 25) notes.push(`${what}: ${r.reason}`)
         }
         if (cfg.sync_stock && cfg.erpnext_warehouse && cfg.medusa_stock_location_id) {
             const bins = await rest.client.get("/api/resource/Bin", {
@@ -4014,7 +4031,7 @@ class ErpnextModuleService extends MedusaService({
                 for (const code of codes) {
                     const qty = sellableQty(binByCode.get(code) ?? null, safetyFor(safetyByCode.get(code), cfg.erpnext_safety_stock))
                     const r = await this.writeStockLevel(scope, code, cfg.medusa_stock_location_id, qty)
-                    note(r)
+                    note(r, `stock ${code}`)
                     if (r?.ok && r.action !== "skipped") stock += 1
                 }
             }
@@ -4048,23 +4065,26 @@ class ErpnextModuleService extends MedusaService({
                         const plan = planItemPrice({ event: "on_update", doc, priceList, today })
                         if (plan.action === "skip") continue
                         const r = await this.applyVariantPrice(scope, plan)
-                        note(r)
+                        note(r, `price ${plan.item_code}`)
                         if (r?.ok && r.action !== "skipped") prices += 1
                     }
                 }
             }
         }
-        return { stock, prices, failed }
+        return { stock, prices, failed, notes }
     }
 
     /** The hourly safety net: every linked Item, 200 at a time. */
-    async reconcileStockAndPrices(scope: any): Promise<{ skipped?: string; items: number; stock: number; prices: number; failed: number }> {
+    async reconcileStockAndPrices(
+        scope: any,
+    ): Promise<{ skipped?: string; items: number; stock: number; prices: number; failed: number; notes: string[] }> {
         const cfg = await this.getActiveConfig()
-        if (!cfg.enable_sync || (!cfg.sync_stock && !cfg.sync_prices)) return { skipped: "off", items: 0, stock: 0, prices: 0, failed: 0 }
+        if (!cfg.enable_sync || (!cfg.sync_stock && !cfg.sync_prices)) return { skipped: "off", items: 0, stock: 0, prices: 0, failed: 0, notes: [] }
         let items = 0
         let stock = 0
         let prices = 0
         let failed = 0
+        const notes: string[] = []
         for (let offset = 0; ; offset += 200) {
             const links: any[] = await this.listErpnextLinks(
                 { medusa_entity: "product", state: "active" } as any,
@@ -4079,9 +4099,10 @@ class ErpnextModuleService extends MedusaService({
             stock += out.stock
             prices += out.prices
             failed += out.failed
+            for (const n of out.notes) if (notes.length < 25) notes.push(n)
             if (links.length < 200) break
         }
-        return { items, stock, prices, failed }
+        return { items, stock, prices, failed, notes }
     }
 
     /**
