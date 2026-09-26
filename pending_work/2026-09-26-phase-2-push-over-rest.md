@@ -58,3 +58,26 @@ breaker (`breaker.ts`) around the connection.
    Customer.
 4. Open: should a push create an Item under `medusa_product_policy = create`, now that nothing
    on ERPNext validates it beyond Frappe's own rules?
+
+## Local e2e, 2026-09-26 evening (fixerp + Splendx worktree, plugin 0.3.0-dev5)
+
+Verified: a customer mapping with fixed values (`source`, `account_manager`,
+`default_currency`, `market_segment`, `industry` — fixerp Property Setters) and Settings
+customer group / territory creates Customer `CRN-01622` with its Shipping Address;
+the rehearsal now refuses to pass while those fields are unmapped; the order mapping takes
+fixed values for fixerp's `custom_sales_type` / `custom_sub`; `payment.captured` re-enters
+as `order.payment_captured` (row written, push attempted); the Customer POST takes ~28 s and
+a Sales Order POST 17–50 s on fixerp, inside the 90 s write timeout.
+
+**Blocked:** every Sales Order / Sales Invoice write on fixerp answers
+`HTTP 403 … Server Scripts are disabled`: fixerp has *Sales Order Before Save* and *Sales
+Invoice Before Save* Server Scripts and the local bench has no `server_script_enabled` in
+`sites/common_site_config.json` (Frappe 16 ignores the site-level key; a web-worker reload
+is needed after setting it because the common config is cached per process). Enabling it is
+the user's call — it enables scripts for all five sites on that bench. Until then the SO / SI
+/ cancel paths are exercised only up to ERPNext's validation.
+
+Side effect to decide on: with Stock Settings → *Auto Insert Item Price If Missing* on
+(fixerp: on), the first Sales Order for an Item with no Standard Selling price records the
+store's rate as an Item Price. Phase 3 (prices) should own that; until then the setting
+decides.

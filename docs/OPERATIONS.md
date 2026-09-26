@@ -70,6 +70,31 @@ DocType; the pair is its identity and there is one per pair.
   Item stops an order (`failed`, naming the SKUs) rather than shipping it
   short; link the product or create the Item and retry the event.
 
+### When a push is refused
+
+- **"Value missing for Customer: …"** — the site made those fields mandatory
+  (a Property Setter, or a Custom Field). The rehearsal names them, reading
+  the DocType, its Custom Fields and its Property Setters; the push fills a
+  Customer's name, type and contact and a Sales Order's party, dates,
+  currency and lines itself, and Settings fill customer group, territory
+  and company. Everything else needs a pair or a fixed value on the mapping
+  (a Link needs a name that exists on that site — the value picker lists
+  them).
+- **`HTTP 403: … Server Scripts are disabled`** — the site has a Server
+  Script on that DocType (fixerp has *Sales Order Before Save* and *Sales
+  Invoice Before Save*) and the bench has not enabled scripts. Frappe 15+
+  reads the switch from `common_site_config.json` only:
+  `bench set-config -g server_script_enabled true`, then restart the web
+  workers. Nothing is created until then; ERPNext rolls the request back.
+- **"Item Price added for … in Price List - Standard Selling"** is not an
+  error: with Stock Settings → *Auto Insert Item Price If Missing* on,
+  ERPNext records the store's line rate as an Item Price in the selling
+  price list the first time an Item is sold at a price it has no entry for.
+  Turn the setting off on ERPNext if the store's prices must not seed the
+  price list.
+- A write waits up to 90 s: ERPNext validates and names a Customer or a
+  Sales Order before it answers, and a busy site takes 20–50 s.
+
 ### Trying one before trusting it
 
 ```
@@ -93,6 +118,12 @@ would do with it. None of the three writes anything.
 | skipped | deliberately not applied; `last_error` says why (not selected, no mapping, paused) |
 | failed | a write failed; the retry job replays it |
 | poison | gave up; a row from before the webhook era, or too many attempts |
+
+The retry job (every 5 minutes) replays `failed` and stale `pending` rows
+only — a `skipped` row records a decision. Each push writes its own row
+with a snapshot of the record, so an older failed row for the same record
+and mapping is marked `superseded` when a newer one exists rather than
+resending the older snapshot next to a live push.
 
 Inbound rows carry `event_id = frappe:<event>:<doctype>:<name>:<modified>`,
 so Frappe's own retries of one delivery land on one row. Replaying one:

@@ -29,6 +29,17 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
 - Money is in the currency's major unit (Medusa 2); the old ÷100 is gone.
 - Presets: customers keyed `email ↔ email_id`; orders keyed `display_id ↔ po_no` and
   listening to `order.payment_captured`; the `medusa_*_id` pairs are gone.
+- The push rehearsal reads the site's Property Setters as well as its Custom Fields, so a
+  standard field the site made mandatory is named before the first write fails; it no longer
+  asks for fields the push fills itself (a Customer's name and type, a Sales Order's party,
+  dates, currency and lines, the Settings-backed company, customer group and territory).
+- An order whose customer mapping push fails stops with that error instead of falling
+  through to a bare Customer create.
+- The retry job replays `failed` and stale `pending` rows only, and marks an older failed
+  push row `superseded` when a newer row exists for the same record and mapping. Push rows
+  carry `entity_ref`.
+- An event with no push mapping is logged and skipped (`no-mapping`), not reported as paused.
+- A write waits up to 90 s for ERPNext's answer (reads keep the configured timeout).
 
 ## 0.2.0 — 2026-09-26
 
