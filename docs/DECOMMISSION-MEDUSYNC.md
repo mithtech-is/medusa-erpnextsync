@@ -57,6 +57,6 @@ Counts on fixerp (2026-09-26): Medusync Log 240, Site 1, Inclusion 29.
 | medusync-vanilla.localhost | frappe16 | **uninstalled 2026-09-26** |
 | frappe16.localhost | frappe16 | **uninstalled 2026-09-27** |
 | new-mithtech-polemarch.localhost | frappe16 | **uninstalled 2026-09-27** |
-| erp.splendax.com (production, 49.13.233.158) | production bench | installed; the old secret pairing was abandoned mid-way — do not finish it |
+| erp.splendax.com (production, 49.13.233.158) | production bench | installed, **Enable Sync switched off 2026-09-27**; plugin 0.4.0 wired (field + 7 Webhooks, 3 mappings enabled). Uninstall + `bench migrate` still to run on that bench, then archive the repo |
 
 Each row is a separate yes.

@@ -1,5 +1,11 @@
 # Production checklist (erp.splendax.com ↔ splendax.com)
 
+> **Done 2026-09-27:** Splendx `4a45806` (plugin 0.4.0) is live on medusplendax; settings, Set up
+> ERPNext (field + 7 Webhooks), the three mappings (Catalogue pull, Customers push, Orders push)
+> rehearsed and enabled; stock from "Stores - SGPL" to the Bengaluru location, prices from
+> Standard Selling. Production ERPNext had no custom mandatory fields and no SO/SI server scripts.
+> Left: `bench uninstall-app medusync` on the ERPNext bench, then the GitHub archive.
+
 Everything below is read from what the local run against fixerp (a copy of production data)
 needed. Do it in this order; nothing here is run by the plugin on its own.
 
