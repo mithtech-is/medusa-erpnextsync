@@ -35,15 +35,17 @@ export function pairUidOf(row: { medusa_entity: string; doctype: string }): stri
     return pairUid(row.medusa_entity, row.doctype)
 }
 
-/** Union by Frappe field; the base wins a collision. */
+/** Union by target: the Frappe field, or the Medusa path for a pull-fixed
+ *  pair that has none. The base wins a collision. */
 export function mergeFieldPairs(
     base: MappingFieldPair[],
     extra: MappingFieldPair[],
 ): MappingFieldPair[] {
-    const taken = new Set((base ?? []).map((p) => p.erpnext_field))
+    const keyOf = (p: MappingFieldPair) => p.erpnext_field || (p.medusa_path ? `medusa:${p.medusa_path}` : "")
+    const taken = new Set((base ?? []).map(keyOf).filter(Boolean))
     return [
         ...(base ?? []),
-        ...(extra ?? []).filter((p) => p.erpnext_field && !taken.has(p.erpnext_field)),
+        ...(extra ?? []).filter((p) => keyOf(p) && !taken.has(keyOf(p))),
     ]
 }
 

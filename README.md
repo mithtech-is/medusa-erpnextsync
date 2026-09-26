@@ -69,11 +69,15 @@ signature covers.
 The conditions, exactly as installed:
 
 ```python
-# on_update
-doc.get("medusa_sync") in ("ERPNext → Medusa", "Both") or (doc.get_doc_before_save() and doc.get_doc_before_save().get("medusa_sync") in ("ERPNext → Medusa", "Both"))
+# on_update — moves ERPNext → Medusa now or did before this save, or the field changed at all
+doc.get("medusa_sync") in ("ERPNext → Medusa", "Both") or (doc.get_doc_before_save() and (doc.get_doc_before_save().get("medusa_sync") in ("ERPNext → Medusa", "Both") or doc.get("medusa_sync") != doc.get_doc_before_save().get("medusa_sync")))
 # on_trash
 doc.get("medusa_sync") in ("ERPNext → Medusa", "Both")
 ```
+
+A change of the field is delivered even between `Medusa → ERPNext` and
+blank, so the link always holds the direction ERPNext last showed; such a
+delivery is logged and skipped, never applied.
 
 **A document only narrows its mapping.** A pull-only mapping never pushes
 a `Both` document; a two-way mapping never pushes an `ERPNext → Medusa`

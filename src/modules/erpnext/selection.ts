@@ -171,7 +171,10 @@ export function effectiveDirection(
 export function pushAllowedByRecord(
     link: { remote_direction?: string | null } | null | undefined,
 ): { allowed: true } | { allowed: false; reason: string } {
-    if (!link) return { allowed: true }
+    // No link, or a link whose document ERPNext has never shown us a
+    // direction for (made by hand, or pulled from a DocType outside
+    // selection): nothing to narrow by.
+    if (!link || link.remote_direction === null || link.remote_direction === undefined) return { allowed: true }
     const d = parseRecordDirection(link.remote_direction)
     if (allowsPush(d)) return { allowed: true }
     return {

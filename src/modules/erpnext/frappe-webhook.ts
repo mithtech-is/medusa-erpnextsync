@@ -1,6 +1,6 @@
 import crypto from "crypto"
 import { z } from "zod"
-import { allowsPull, selectionOf } from "./selection"
+import { allowsPull, parseRecordDirection, selectionOf } from "./selection"
 
 /**
  * The inbound side of a Frappe core Webhook.
@@ -99,6 +99,27 @@ export type FrappePlan =
     | { action: "skip"; reason: string }
 
 /**
+ * Has a later delivery for the same document already applied? Replaying
+ * an older body would put back what the later one changed. Rows are
+ * matched by DocType and name; "later" is the document's `modified`,
+ * which Frappe formats so that string order is time order.
+ */
+export function supersededBy(
+    body: FrappeWebhookBody,
+    rows: Array<{ status?: string | null; payload?: any }>,
+): boolean {
+    const mine = String(body.doc?.modified ?? "")
+    for (const r of rows ?? []) {
+        if (r?.status !== "success") continue
+        const p = r.payload
+        if (!p || p.doctype !== body.doctype || String(p.name) !== body.name) continue
+        const theirs = String(p.doc?.modified ?? "")
+        if (theirs && mine && theirs > mine) return true
+    }
+    return false
+}
+
+/**
  * What one webhook means for one mapping.
  *
  * The document's `medusa_sync` says which way it moves. ERPNext → Medusa
@@ -146,6 +167,11 @@ export function planFrappeEvent(args: {
     }
 
     if (!allowsPull(direction)) {
+        // A document that was Medusa-owned and is now unselected: ERPNext
+        // stopped syncing it either way, and the product is still Medusa's.
+        if (link && parseRecordDirection(link.remote_direction) === "medusa_to_erpnext") {
+            return { action: "skip", reason: "was Medusa → ERPNext, now unselected; product untouched" }
+        }
         if (link?.medusa_id) return { action: "draft", by: "link", medusa_id: link.medusa_id, key, reason: "deselected in ERPNext" }
         if (key) return { action: "draft", by: "key", key, reason: "deselected in ERPNext; no link, matched by key" }
         return { action: "skip", reason: "not selected and never synced" }

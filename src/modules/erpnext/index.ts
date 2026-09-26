@@ -47,7 +47,7 @@ import {
     withSelectionFilter,
     type SyncDoctype,
 } from "./selection"
-import { FrappeWebhookBody, frappeEventId, planFrappeEvent } from "./frappe-webhook"
+import { FrappeWebhookBody, frappeEventId, planFrappeEvent, supersededBy } from "./frappe-webhook"
 import { makeFrappeClient } from "./frappe-client"
 import { runErpnextSetup, type SetupReport } from "./erpnext-setup"
 import {
@@ -1294,15 +1294,18 @@ class ErpnextModuleService extends MedusaService({
         if (!args.product_id || !itemCode) {
             return { ok: false, message: "product_id and item_code are both required" }
         }
+        const cfg = await this.getActiveConfig()
+        const underSelection = isSyncDoctype(doctype, cfg.sync_doctypes)
         const lookup = await this.pullDoctype(doctype, {
             filters: [["name", "=", itemCode]],
-            fields: ["name"],
+            fields: underSelection ? ["name", SELECTION_FIELD] : ["name"],
             limit: 1,
         })
         if (!lookup.ok) {
             return { ok: false, message: lookup.message ?? "could not reach ERPNext" }
         }
-        if (!(lookup.items ?? [])[0]) {
+        const item = (lookup.items ?? [])[0]
+        if (!item) {
             return { ok: false, message: `${doctype} "${itemCode}" does not exist` }
         }
         // Must not already belong to a different product — silently
@@ -1327,6 +1330,7 @@ class ErpnextModuleService extends MedusaService({
             medusa_entity: "product",
             medusa_id: args.product_id,
             state: "active",
+            ...(underSelection ? { remote_direction: String(item[SELECTION_FIELD] ?? "") } : {}),
         })
         return { ok: true, item_code: itemCode, product_id: args.product_id }
     }
@@ -3555,6 +3559,23 @@ class ErpnextModuleService extends MedusaService({
         if (!cfg.enable_sync) {
             return { ok: true, status: "skipped", event_id, message: "sync disabled" }
         }
+        // Frappe delivers again when we answer slowly. The same delivery
+        // already applied is answered as applied; one still being applied
+        // is answered as taken, not applied twice.
+        const [existing] = await this.listErpnextSyncEvents(
+            { event_id, direction: "inbound" } as any,
+            { take: 1 },
+        )
+        if (existing?.status === "success") {
+            return { ok: true, status: "success", event_id, message: "already applied" }
+        }
+        if (
+            existing?.status === "pending" &&
+            existing.last_attempt_at &&
+            Date.now() - new Date(existing.last_attempt_at).getTime() < IN_FLIGHT_MS
+        ) {
+            return { ok: true, status: "skipped", event_id, message: "already being applied" }
+        }
         const mappings = (await this.listEnabledPullMappings()).filter(
             (m: any) => m.doctype === body.doctype,
         )
@@ -3618,10 +3639,13 @@ class ErpnextModuleService extends MedusaService({
         for (const mapping of candidates) {
             const entity = getMedusaEntity(mapping.medusa_entity)
             if (!entity) {
+                // A configuration gap, not a delivery failure: a retry
+                // cannot make an entity appear.
                 results.push({
                     mapping: mapping.name,
-                    ok: false,
-                    error: `no registry entry for '${mapping.medusa_entity}'`,
+                    ok: true,
+                    action: "skipped",
+                    reason: `no registry entry for '${mapping.medusa_entity}'`,
                 })
                 continue
             }
@@ -3746,6 +3770,34 @@ class ErpnextModuleService extends MedusaService({
     ): Promise<{ ok: boolean; status: "success" | "failed"; error?: string; poison?: boolean }> {
         const parsed = FrappeWebhookBody.safeParse(row?.payload)
         const attempts = (row?.attempts ?? 0) + 1
+        if (parsed.success) {
+            // A later delivery for the same document that already applied
+            // wins: replaying this older body would put back what it changed.
+            let later: any[] = []
+            try {
+                later = await this.listErpnextSyncEvents(
+                    {
+                        direction: "inbound",
+                        status: "success",
+                        event_id: { $like: `frappe:%:${parsed.data.doctype}:${parsed.data.name}:%` },
+                    } as any,
+                    { take: 50 },
+                )
+            } catch {
+                later = []
+            }
+            if (supersededBy(parsed.data, later)) {
+                const error = "superseded by a later delivery for the same document; not replayed"
+                await this.updateErpnextSyncEvents({
+                    id: row.id,
+                    status: "skipped",
+                    last_error: error,
+                    attempts,
+                    last_attempt_at: new Date(),
+                })
+                return { ok: true, status: "success", error }
+            }
+        }
         if (!parsed.success) {
             const error = "not replayable: the payload is from the retired medusync protocol"
             await this.updateErpnextSyncEvents({
@@ -4012,20 +4064,24 @@ class ErpnextModuleService extends MedusaService({
         for (const mapping of mappings) {
             const entity = getMedusaEntity(mapping.medusa_entity)
             if (!entity?.disableByKey) continue
-            let skip = 0
-            for (;;) {
-                let links: any[] = []
-                try {
-                    links = await this.listErpnextLinks(
-                        { doctype: mapping.doctype, medusa_entity: mapping.medusa_entity, state: "active" } as any,
+            // Every link first, then the work: drafting while paging by
+            // offset would shift the unread rows under the cursor.
+            const all: any[] = []
+            try {
+                for (let skip = 0; ; skip += PAGE) {
+                    const page = await this.listErpnextLinks(
+                        { doctype: mapping.doctype, medusa_entity: mapping.medusa_entity } as any,
                         { take: PAGE, skip, order: { id: "ASC" } },
                     )
-                } catch (err: any) {
-                    report.errors.push({ mapping: mapping.name, error: describeError(err) })
-                    break
+                    all.push(...page)
+                    if (page.length < PAGE) break
                 }
-                if (!links.length) break
-                skip += links.length
+            } catch (err: any) {
+                report.errors.push({ mapping: mapping.name, error: describeError(err) })
+                continue
+            }
+            for (let i = 0; i < all.length; i += PAGE) {
+                const links = all.slice(i, i + PAGE)
                 const names = links.map((l) => String(l.erpnext_name))
                 const qs = new URLSearchParams()
                 qs.set("fields", JSON.stringify(["name", SELECTION_FIELD]))
@@ -4052,11 +4108,20 @@ class ErpnextModuleService extends MedusaService({
                     for (const r of Array.isArray(parsed?.data) ? parsed.data : []) {
                         values.set(String(r?.name), r?.[SELECTION_FIELD] ?? "")
                     }
-                    report.checked += links.length
                     for (const link of links) {
                         const value = values.get(String(link.erpnext_name))
                         const decision = reconcileDecision(value)
                         const seen = value === undefined ? undefined : String(value ?? "")
+                        // The direction ERPNext shows is noted on every link,
+                        // drafted ones included, so a push reads the current
+                        // answer. Only an active link can be drafted here.
+                        if (link.state !== "active") {
+                            if (seen !== undefined && seen !== (link.remote_direction ?? "")) {
+                                await this.updateErpnextLinks([{ id: link.id, remote_direction: seen }])
+                            }
+                            continue
+                        }
+                        report.checked += 1
                         if (decision !== "draft") {
                             if (seen !== undefined && seen !== (link.remote_direction ?? "")) {
                                 await this.updateErpnextLinks([{ id: link.id, remote_direction: seen }])
@@ -4085,7 +4150,6 @@ class ErpnextModuleService extends MedusaService({
                     report.errors.push({ mapping: mapping.name, error: describeError(err) })
                     break
                 }
-                if (links.length < PAGE) break
             }
         }
         return report
@@ -4114,6 +4178,10 @@ const DEFAULT_PHONE_REGION = "IN"
 /** Set up ERPNext waits this long for one call: a Custom Field POST
  *  alters the DocType's table before it answers. */
 const SETUP_TIMEOUT_MS = 180_000
+
+/** A pending inbound row younger than this is a delivery still being
+ *  applied; Frappe's retry of it is answered without a second apply. */
+const IN_FLIGHT_MS = 120_000
 
 /** Two upper-case letters, or the default. */
 function phoneRegionOf(row: any): string {
@@ -4258,42 +4326,42 @@ function clampInt(n: number, min: number, max: number) {
 function validateFieldMappings(raw: any[]): MappingFieldPair[] {
     if (!Array.isArray(raw)) return []
     const out: MappingFieldPair[] = []
+    const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined)
     for (const r of raw) {
         if (!r || typeof r !== "object") continue
         const medusa_path = String(r.medusa_path ?? "").trim()
         const erpnext_field = String(r.erpnext_field ?? "").trim()
-        if (!erpnext_field) continue
-        // A fixed-value pair carries no Medusa path by design; every other
-        // pair still needs one, or it would silently write nothing.
         const hasConstant = r.constant !== undefined
-        if (!medusa_path && !hasConstant) continue
-        const pair: MappingFieldPair = {
-            medusa_path,
-            erpnext_field,
-        }
-        if (hasConstant) {
-            pair.constant = r.constant
-        }
-        if (r.direction && ["push", "pull", "both"].includes(r.direction)) {
+        const hasConstantPull = r.constant_pull !== undefined
+        // A pair needs a target on at least one side and something to write
+        // to it: a push-fixed pair has an ERPNext field and no Medusa path,
+        // a pull-fixed pair has a Medusa path and no ERPNext field, and an
+        // ordinary pair has both.
+        const pushShape = Boolean(erpnext_field) && (Boolean(medusa_path) || hasConstant)
+        const pullShape = Boolean(medusa_path) && (Boolean(erpnext_field) || hasConstantPull)
+        if (!pushShape && !pullShape) continue
+        const pair: MappingFieldPair = { medusa_path, erpnext_field }
+        if (hasConstant) pair.constant = r.constant
+        if (hasConstantPull) pair.constant_pull = r.constant_pull
+        if (r.direction && ["push", "pull", "both", "none"].includes(r.direction)) {
             pair.direction = r.direction
         }
         // A composite template ("{first_name} {last_name}") joins several
         // Medusa fields into one Frappe column and has no inverse. Pin it
-        // to push here rather than trusting the form: a row left on
-        // "both" would otherwise look pull-capable in the list view and
-        // in the dry-run output, even though the engine skips it.
+        // to push here rather than trusting the form.
         if (isTemplatePath(medusa_path)) {
             pair.direction = "push"
         }
-        if (typeof r.transform === "string" && r.transform.trim()) {
-            pair.transform = r.transform.trim()
-        }
-        if (r.default !== undefined) {
-            pair.default = r.default
-        }
-        if (typeof r.required === "boolean") {
-            pair.required = r.required
-        }
+        const shared = text(r.transform)
+        if (shared) pair.transform = shared
+        const push = text(r.transform_push)
+        if (push) pair.transform_push = push
+        const pull = text(r.transform_pull)
+        if (pull) pair.transform_pull = pull
+        if (r.default !== undefined) pair.default = r.default
+        if (r.default_push !== undefined) pair.default_push = r.default_push
+        if (r.default_pull !== undefined) pair.default_pull = r.default_pull
+        if (typeof r.required === "boolean") pair.required = r.required
         out.push(pair)
     }
     return out
@@ -4322,7 +4390,7 @@ function uniqueFrappeFields(pairs: MappingFieldPair[], keyField: string, extra: 
 }
 
 /** Internals reachable from the unit tests, which do not boot a container. */
-export const __test__ = { uniqueFrappeFields }
+export const __test__ = { uniqueFrappeFields, validateFieldMappings }
 
 export default Module(ERPNEXT_MODULE, {
     service: ErpnextModuleService,

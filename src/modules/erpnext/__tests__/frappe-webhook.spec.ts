@@ -6,6 +6,7 @@ import {
     parseFrappeWebhookBody,
     planFrappeEvent,
     safeEq,
+    supersededBy,
     verifyFrappeSignature,
 } from "../frappe-webhook"
 
@@ -155,6 +156,17 @@ describe("what one webhook means for one mapping", () => {
         ).toMatchObject({ action: "skip" })
     })
 
+    it("a document that was Medusa-owned and is now unselected is left alone", () => {
+        const plan = planFrappeEvent({
+            event: "on_update",
+            doc: { item_code: "ABC", medusa_sync: "" },
+            mapping,
+            link: { medusa_id: "prod_1", state: "active", remote_direction: M2E },
+        })
+        expect(plan.action).toBe("skip")
+        if (plan.action === "skip") expect(plan.reason).toMatch(/untouched/)
+    })
+
     it("a Medusa-owned document is never drafted, whatever ERPNext does to its copy", () => {
         const owned = { item_code: "ABC", medusa_sync: M2E }
         const link = { medusa_id: "prod_1", state: "active" }
@@ -191,5 +203,22 @@ describe("what one webhook means for one mapping", () => {
         expect(planFrappeEvent({ event: "on_update", doc: { medusa_sync: E2M }, mapping, link: null })).toMatchObject({
             action: "skip",
         })
+    })
+})
+
+describe("replaying a stored delivery", () => {
+    const body = { event: "on_update" as const, doctype: "Item", name: "SKU-1", doc: { modified: "2026-09-26 10:00:00.000000" } }
+    it("is refused when a later delivery for the same document already applied", () => {
+        expect(
+            supersededBy(body, [
+                { status: "success", payload: { doctype: "Item", name: "SKU-1", doc: { modified: "2026-09-26 11:00:00.000000" } } },
+            ]),
+        ).toBe(true)
+    })
+    it("goes ahead when the later rows are for other documents, older, or not applied", () => {
+        expect(supersededBy(body, [{ status: "success", payload: { doctype: "Item", name: "SKU-2", doc: { modified: "2026-09-26 11:00:00" } } }])).toBe(false)
+        expect(supersededBy(body, [{ status: "success", payload: { doctype: "Item", name: "SKU-1", doc: { modified: "2026-09-26 09:00:00" } } }])).toBe(false)
+        expect(supersededBy(body, [{ status: "failed", payload: { doctype: "Item", name: "SKU-1", doc: { modified: "2026-09-26 11:00:00" } } }])).toBe(false)
+        expect(supersededBy(body, [])).toBe(false)
     })
 })

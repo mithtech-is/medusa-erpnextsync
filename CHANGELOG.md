@@ -19,7 +19,11 @@ Webhooks and a `medusa_sync` Check field; nothing is installed on ERPNext.
   Medusa → ERPNext document is never drafted. A push reads the direction ERPNext last showed
   (kept on the link) and skips `record-direction` for anything but Medusa → ERPNext or Both.
 - The pull ANDs `["medusa_sync","in",["ERPNext → Medusa","Both"]]` into every mapping on a
-  selection DocType.
+  selection DocType. The `on_update` webhook also fires on any change of the field, so the link
+  always holds the direction ERPNext last showed; a document that was Medusa-owned and is now
+  unselected is left alone. A delivery already applied, or still being applied, is not applied
+  twice; the retry job replays only failed inbound rows and refuses a body a later delivery for
+  the same document has superseded.
 - New `erpnext_link` table maps `(doctype, name, entity) → medusa_id` with the document's last
   direction; an hourly reconcile drafts the products of linked documents that no longer move
   ERPNext → Medusa.

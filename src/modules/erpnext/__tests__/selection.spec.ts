@@ -124,15 +124,16 @@ describe("whether a push may leave for a record", () => {
         if (verdict.allowed === false) expect(verdict.reason).toMatch(/record-direction/)
     })
 
-    it("a deselected record never pushes either", () => {
+    it("a record ERPNext showed as blank never pushes either", () => {
         expect(pushAllowedByRecord({ remote_direction: "" }).allowed).toBe(false)
-        expect(pushAllowedByRecord({ remote_direction: null }).allowed).toBe(false)
     })
 
-    it("Medusa → ERPNext and Both push; a record ERPNext has never seen is the mapping's call", () => {
+    it("Medusa → ERPNext and Both push; a record whose direction was never observed is the mapping's call", () => {
         expect(pushAllowedByRecord({ remote_direction: DIRECTION_MEDUSA_TO_ERPNEXT }).allowed).toBe(true)
         expect(pushAllowedByRecord({ remote_direction: DIRECTION_BOTH }).allowed).toBe(true)
         expect(pushAllowedByRecord(null).allowed).toBe(true)
+        expect(pushAllowedByRecord({ remote_direction: null }).allowed).toBe(true)
+        expect(pushAllowedByRecord({}).allowed).toBe(true)
     })
 })
 

@@ -47,10 +47,10 @@ describe("what Set up ERPNext creates", () => {
         expect(webhookJsonTemplate("on_trash")).not.toContain(".__")
     })
 
-    it("conditions that fire for a document that moves, or moved, ERPNext → Medusa", () => {
+    it("conditions that fire for a document that moves, or moved, ERPNext → Medusa, or whose field changed", () => {
         const tuple = '("ERPNext → Medusa", "Both")'
         expect(ON_UPDATE_CONDITION).toBe(
-            `doc.get("medusa_sync") in ${tuple} or (doc.get_doc_before_save() and doc.get_doc_before_save().get("medusa_sync") in ${tuple})`,
+            `doc.get("medusa_sync") in ${tuple} or (doc.get_doc_before_save() and (doc.get_doc_before_save().get("medusa_sync") in ${tuple} or doc.get("medusa_sync") != doc.get_doc_before_save().get("medusa_sync")))`,
         )
         expect(ON_TRASH_CONDITION).toBe(`doc.get("medusa_sync") in ${tuple}`)
     })

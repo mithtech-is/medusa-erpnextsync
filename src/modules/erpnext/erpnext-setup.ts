@@ -50,10 +50,12 @@ export const CUSTOM_FIELD_LABEL = "Sync to Medusa"
 const PULL_TUPLE = `("${DIRECTION_ERPNEXT_TO_MEDUSA}", "${DIRECTION_BOTH}")`
 
 /** Fires for a document that moves ERPNext → Medusa now or did before
- *  this save. `get_doc_before_save()` is None on insert and on the blank
- *  document Frappe validates the condition against; `and` short-circuits. */
+ *  this save, and for any change of the field (so a document that stops
+ *  being Medusa-owned is noticed). `get_doc_before_save()` is None on
+ *  insert and on the blank document Frappe validates the condition
+ *  against; `and` short-circuits. */
 export const ON_UPDATE_CONDITION =
-    `doc.get("medusa_sync") in ${PULL_TUPLE} or (doc.get_doc_before_save() and doc.get_doc_before_save().get("medusa_sync") in ${PULL_TUPLE})`
+    `doc.get("medusa_sync") in ${PULL_TUPLE} or (doc.get_doc_before_save() and (doc.get_doc_before_save().get("medusa_sync") in ${PULL_TUPLE} or doc.get("medusa_sync") != doc.get_doc_before_save().get("medusa_sync")))`
 
 export const ON_TRASH_CONDITION = `doc.get("medusa_sync") in ${PULL_TUPLE}`
 

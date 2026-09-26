@@ -49,6 +49,20 @@ describe("folding two mappings for one pair", () => {
         ])
     })
 
+    it("keeps a pull-fixed pair, which has no Frappe field, by its Medusa path", () => {
+        const merged = mergeFieldPairs(
+            [{ medusa_path: "status", erpnext_field: "", direction: "pull", constant_pull: "published" }],
+            [
+                { medusa_path: "status", erpnext_field: "", direction: "pull", constant_pull: "draft" },
+                { medusa_path: "metadata.source", erpnext_field: "", direction: "pull", constant_pull: "erpnext" },
+            ],
+        )
+        expect(merged.map((p) => [p.medusa_path, p.constant_pull])).toEqual([
+            ["status", "published"],
+            ["metadata.source", "erpnext"],
+        ])
+    })
+
     it("unions the events without repeating one", () => {
         expect(mergeEvents(["order.placed"], ["order.canceled", "order.placed"])).toEqual([
             "order.placed",
