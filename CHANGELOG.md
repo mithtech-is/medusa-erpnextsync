@@ -48,6 +48,11 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   also checks the invoice's mandatory fields when Settings want one.
 - A failed or empty Country read is no longer cached; delivery is promised a week from now when
   the order is older than today.
+- A product counts as linked when `erpnext_link` says so, not only by the older metadata key. A
+  retry row from before `entity_ref` existed still names its record through its payload.
+- Known gaps, said so in Settings: store-side invoice numbering and "record payments" are read
+  but not honoured by the REST push (ERPNext names its own invoices; a Payment Entry needs a
+  submitted invoice, and documents stay drafts).
 
 ## 0.2.0 — 2026-09-26
 

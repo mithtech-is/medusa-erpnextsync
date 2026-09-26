@@ -946,7 +946,7 @@ const SettingsTab: React.FC<{
             Invoice numbers:{" "}
             <strong>
               {view.invoice_numbering === "store"
-                ? `this store, ${view.store_invoice_prefix ?? "(no prefix)"}… next ${view.store_invoice_next}`
+                ? `this store, ${view.store_invoice_prefix ?? "(no prefix)"}… next ${view.store_invoice_next} (not yet honoured by the push: ERPNext names its own invoices)`
                 : "ERPNext"}
             </strong>
           </Text>
@@ -955,7 +955,8 @@ const SettingsTab: React.FC<{
             <strong>{view.invoice_numbering !== "store" && view.send_invoice_to_store ? "yes" : "no"}</strong>
           </Text>
           <Text size="small">
-            Store payments booked in ERPNext: <strong>{view.record_payments ? "yes" : "no"}</strong>
+            Store payments booked in ERPNext:{" "}
+            <strong>{view.record_payments ? "yes (not yet built: a Payment Entry needs a submitted invoice)" : "no"}</strong>
           </Text>
         </div>
       </section>

@@ -695,6 +695,10 @@ class ErpnextModuleService extends MedusaService({
         if (row.mapping_id) {
             // A newer push of the same record has its own row; this one
             // holds an older snapshot and is not resent (retry-policy.ts).
+            if (!row.entity_ref && row.payload?.id != null) {
+                const [m] = await this.listErpnextMappings({ id: row.mapping_id }, { take: 1 })
+                if (m?.medusa_entity) row.entity_ref = `${m.medusa_entity}:${String(row.payload.id)}`
+            }
             if (row.entity_ref && row.created_at) {
                 const later = await this.listErpnextSyncEvents(
                     { entity_ref: row.entity_ref, mapping_id: row.mapping_id, created_at: { $gt: row.created_at } } as any,
@@ -2917,10 +2921,15 @@ class ErpnextModuleService extends MedusaService({
         // history behind it; the operator says whether it may create one,
         // must be attached to an existing one first, or must not travel.
         if (args.mapping.medusa_entity === "product") {
+            // A product is linked when erpnext_link says so, or when it
+            // still carries the older metadata key from before the table.
+            const linked =
+                isLinked(args.record) ||
+                (args.record?.id != null && Boolean((await this.remoteNameFor("product", String(args.record.id)))?.erpnext_name))
             const verdict = decideProductPush({
                 policy: cfg.medusa_product_policy,
                 event: args.event,
-                linked: isLinked(args.record),
+                linked,
             })
             if (verdict.allow === false) {
                 const reason = verdict.reason
