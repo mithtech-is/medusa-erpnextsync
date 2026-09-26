@@ -36,9 +36,12 @@ type SettingsView = {
   exists: boolean
   enable_sync: boolean
   erpnext_url: string | null
-  frappe_receive_method: string
-  webhook_secret_masked: string | null
-  frappe_to_medusa_secret_masked: string | null
+  medusa_public_url: string | null
+  frappe_webhook_secret_masked: string | null
+  sync_doctypes: Array<{ doctype: string; mode: "allow" | "deny" }>
+  erpnext_setup_at: string | null
+  erpnext_setup_report: SetupReport | null
+  outbound_paused: boolean
   erpnext_api_key_masked: string | null
   erpnext_api_secret_masked: string | null
   request_timeout_ms: number
@@ -67,9 +70,29 @@ type SettingsView = {
   updated_by_user_id: string | null
   env_fallback: {
     erpnext_url: string | null
-    webhook_secret_present: boolean
+    frappe_webhook_secret_present: boolean
+    medusa_public_url: string | null
   }
 }
+
+type SetupItem = {
+  kind: "custom_field" | "webhook"
+  doctype: string
+  name: string
+  action: "created" | "updated" | "unchanged" | "error"
+  detail?: string
+  error?: string
+}
+
+type SetupReport = {
+  at: string
+  ok: boolean
+  public_url: string
+  inbound_url: string
+  items: SetupItem[]
+}
+
+type SetupResult = { ok: boolean; message?: string; report?: SetupReport }
 
 type EventRow = {
   id: string
@@ -137,15 +160,24 @@ const ErpnextPage = () => {
         )}
       </div>
       <Text size="small" className="text-ui-fg-subtle mb-4">
-        Bidirectional sync with the Frappe sync app. Push fires on
-        every Medusa event automatically; the buttons here are for
-        back-fill or replay. Pull is read-only — review then decide what
-        to write back into Medusa.
+        ERPNext → Medusa through Frappe's own webhooks and a scheduled
+        pull: tick <strong>Sync to Medusa</strong> on a document and it
+        lands here; untick or delete it and its product goes to draft.
+        Set up ERPNext, under Settings, installs the tick box and the
+        webhooks.
       </Text>
 
       {error && (
         <div className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-red-700">
           <Text>{error}</Text>
+        </div>
+      )}
+      {view?.outbound_paused && (
+        <div className="mb-4 rounded border border-ui-tag-orange-border bg-ui-tag-orange-bg px-3 py-2">
+          <Text size="small">
+            Pushes to ERPNext are paused in this release: push mappings are
+            evaluated and logged, nothing leaves. ERPNext → Medusa is live.
+          </Text>
         </div>
       )}
 
@@ -183,13 +215,13 @@ const SettingsTab: React.FC<{
 }> = ({ view, onSaved }) => {
   const [enableSync, setEnableSync] = useState(view.enable_sync)
   const [url, setUrl] = useState(view.erpnext_url ?? "")
-  const [receiveMethod, setReceiveMethod] = useState(
-    view.frappe_receive_method ?? "",
-  )
-  // Three secret fields. Empty = leave-as-is, null sentinel = clear,
+  const [publicUrl, setPublicUrl] = useState(view.medusa_public_url ?? "")
+  const [syncDoctypes, setSyncDoctypes] = useState<
+    Array<{ doctype: string; mode: "allow" | "deny" }>
+  >(view.sync_doctypes?.length ? view.sync_doctypes : [{ doctype: "Item", mode: "allow" }])
+  // Secret fields. Empty = leave-as-is, null sentinel = clear,
   // value = update. Mirrors how Medusa's own settings pages behave.
-  const [webhookSecret, setWebhookSecret] = useState("")
-  const [frappeToMedusaSecret, setFrappeToMedusaSecret] = useState("")
+  const [frappeWebhookSecret, setFrappeWebhookSecret] = useState("")
   const [apiKey, setApiKey] = useState("")
   const [apiSecret, setApiSecret] = useState("")
   const [timeoutMs, setTimeoutMs] = useState(view.request_timeout_ms)
@@ -202,24 +234,22 @@ const SettingsTab: React.FC<{
   const [logRetentionDays, setLogRetentionDays] = useState(
     view.log_retention_days ?? 180,
   )
-  /** A freshly generated secret, shown once so it can be copied into
-   *  Frappe. Cleared on save — we never re-display a stored secret. */
-  const [freshSecret, setFreshSecret] = useState<
-    { field: "webhook" | "f2m"; value: string } | null
-  >(null)
+  /** A freshly generated secret, shown once. Cleared on save — a stored
+   *  secret is never re-displayed. */
+  const [freshSecret, setFreshSecret] = useState<string | null>(null)
 
-  /** 32 random bytes as hex, from the browser's CSPRNG. Generating here
-   *  rather than asking the operator to invent one removes the two ways
-   *  this goes wrong: a weak secret, and a typo when transcribing the
-   *  same value into two systems. */
-  const generateSecret = (field: "webhook" | "f2m") => {
+  /** 32 random bytes as hex, from the browser's CSPRNG. Set up ERPNext
+   *  generates one on the server when none is saved; this button is for
+   *  rotating it, or for somebody who maintains the Webhooks by hand. */
+  const generateSecret = () => {
     const bytes = new Uint8Array(32)
     crypto.getRandomValues(bytes)
     const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
-    if (field === "webhook") setWebhookSecret(hex)
-    else setFrappeToMedusaSecret(hex)
-    setFreshSecret({ field, value: hex })
+    setFrappeWebhookSecret(hex)
+    setFreshSecret(hex)
   }
+  const [settingUp, setSettingUp] = useState(false)
+  const [setupResult, setSetupResult] = useState<SetupResult | null>(null)
   const [invoiceStorage, setInvoiceStorage] = useState<"local" | "s3">(view.invoice_storage ?? "local")
   const [localDir, setLocalDir] = useState(view.invoice_local_dir ?? "")
   const [s3Bucket, setS3Bucket] = useState(view.s3_bucket ?? "")
@@ -244,9 +274,11 @@ const SettingsTab: React.FC<{
   useEffect(() => {
     setEnableSync(view.enable_sync)
     setUrl(view.erpnext_url ?? "")
-    setReceiveMethod(view.frappe_receive_method ?? "")
-    setWebhookSecret("")
-    setFrappeToMedusaSecret("")
+    setPublicUrl(view.medusa_public_url ?? "")
+    setSyncDoctypes(
+      view.sync_doctypes?.length ? view.sync_doctypes : [{ doctype: "Item", mode: "allow" }],
+    )
+    setFrappeWebhookSecret("")
     setApiKey("")
     setApiSecret("")
     setTimeoutMs(view.request_timeout_ms)
@@ -267,7 +299,7 @@ const SettingsTab: React.FC<{
     setNotes(view.notes ?? "")
   }, [view])
 
-  const save = async () => {
+  const save = async (): Promise<boolean> => {
     setSaving(true)
     setErr(null)
     setFlash(null)
@@ -275,7 +307,10 @@ const SettingsTab: React.FC<{
       const body: Record<string, unknown> = {
         enable_sync: enableSync,
         erpnext_url: url.trim() || null,
-        frappe_receive_method: receiveMethod.trim() || null,
+        medusa_public_url: publicUrl.trim() || null,
+        sync_doctypes: syncDoctypes
+          .filter((d) => d.doctype.trim())
+          .map((d) => ({ doctype: d.doctype.trim(), mode: d.mode })),
         request_timeout_ms: timeoutMs,
         auto_retry_failed: autoRetry,
         auto_retry_max_attempts: retryMax,
@@ -296,9 +331,7 @@ const SettingsTab: React.FC<{
       // Only include secret fields if user typed something — empty
       // string would mean "leave as-is" but the API treats absent the
       // same way, so just don't send them.
-      if (webhookSecret) body.webhook_secret = webhookSecret
-      if (frappeToMedusaSecret)
-        body.frappe_to_medusa_secret = frappeToMedusaSecret
+      if (frappeWebhookSecret) body.frappe_webhook_secret = frappeWebhookSecret
       if (apiKey) body.erpnext_api_key = apiKey
       if (apiSecret) body.erpnext_api_secret = apiSecret
 
@@ -313,12 +346,44 @@ const SettingsTab: React.FC<{
       onSaved(data)
       setFlash("Saved")
       setTimeout(() => setFlash(null), 2500)
+      return true
     } catch (e) {
       setErr(e instanceof Error ? e.message : "save_failed")
+      return false
     } finally {
       setSaving(false)
     }
   }
+
+  /** Save first — the server sets up from the saved row — then create or
+   *  update the field and the webhooks in ERPNext, and reload the view
+   *  so the report and "last set up" show. */
+  const setupErpnext = async () => {
+    setSetupResult(null)
+    if (!(await save())) return
+    setSettingUp(true)
+    try {
+      const res = await fetch("/admin/erpnext/setup", {
+        method: "POST",
+        credentials: "include",
+      })
+      const body = (await res.json()) as SetupResult
+      setSetupResult(body)
+      const again = await fetch("/admin/erpnext/settings", { credentials: "include" })
+      if (again.ok) onSaved(await again.json())
+    } catch (e) {
+      setSetupResult({ ok: false, message: e instanceof Error ? e.message : "setup_failed" })
+    } finally {
+      setSettingUp(false)
+    }
+  }
+  const setupBlocker = !(url.trim() || view.env_fallback.erpnext_url)
+    ? "Set the ERPNext URL first"
+    : !(view.erpnext_api_key_masked || apiKey)
+      ? "Set the API key and secret first (System Manager)"
+      : !syncDoctypes.some((d) => d.doctype.trim())
+        ? "Add at least one doctype"
+        : null
 
   const ping = async () => {
     setPinging(true)
@@ -367,85 +432,53 @@ const SettingsTab: React.FC<{
           </div>
 
           <div>
-            <Label>Frappe receive method</Label>
+            <Label>Medusa public URL</Label>
             <Input
-              value={receiveMethod}
-              onChange={(e) => setReceiveMethod(e.target.value)}
-              placeholder="medusync.api.receive"
+              value={publicUrl}
+              onChange={(e) => setPublicUrl(e.target.value)}
+              placeholder={view.env_fallback.medusa_public_url ?? "https://shop.example.com"}
             />
             <Text size="small" className="text-ui-fg-subtle">
-              Whitelisted Frappe method that receives pushes. The mapped
-              push appends <code>_mapped</code>. Leave blank to use the
-              default (<code>medusync.api.receive</code>).
+              Where ERPNext reaches this store. The webhooks POST to{" "}
+              <code>
+                {(publicUrl.trim() || view.env_fallback.medusa_public_url || "<url>").replace(/\/+$/, "")}
+                /webhooks/erpnext-inbound
+              </code>
+              {view.env_fallback.medusa_public_url && !publicUrl.trim()
+                ? ". Blank uses MEDUSA_BACKEND_URL."
+                : "."}
             </Text>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Label>Medusa → Frappe secret</Label>
-                  {view.webhook_secret_masked ? (
+                  <Label>Frappe webhook secret</Label>
+                  {view.frappe_webhook_secret_masked ? (
                     <StatusBadge color="green">set</StatusBadge>
+                  ) : view.env_fallback.frappe_webhook_secret_present ? (
+                    <StatusBadge color="blue">from env</StatusBadge>
                   ) : (
                     <StatusBadge color="grey">not set</StatusBadge>
                   )}
                 </div>
-                <Button
-                  size="small"
-                  variant="transparent"
-                  onClick={() => generateSecret("webhook")}
-                >
+                <Button size="small" variant="transparent" onClick={generateSecret}>
                   Generate
                 </Button>
               </div>
               <Input
                 type="password"
                 placeholder={
-                  view.webhook_secret_masked ?? "Not set — click Generate"
+                  view.frappe_webhook_secret_masked ?? "Not set — Set up ERPNext generates one"
                 }
-                value={webhookSecret}
-                onChange={(e) => setWebhookSecret(e.target.value)}
+                value={frappeWebhookSecret}
+                onChange={(e) => setFrappeWebhookSecret(e.target.value)}
               />
               <Text size="small" className="text-ui-fg-subtle">
-                Signs pushes going OUT to Frappe. Click Generate, save,
-                then copy it into <strong>Medusa Settings → Medusa
-                Webhook Secret</strong> (or Medusync Settings → Inbound
-                Secret) on the Frappe side. You never need to invent one
-                or type it in twice.
-              </Text>
-            </div>
-            <div>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Label>Frappe → Medusa secret</Label>
-                  {view.frappe_to_medusa_secret_masked ? (
-                    <StatusBadge color="green">set</StatusBadge>
-                  ) : (
-                    <StatusBadge color="grey">not set</StatusBadge>
-                  )}
-                </div>
-                <Button
-                  size="small"
-                  variant="transparent"
-                  onClick={() => generateSecret("f2m")}
-                >
-                  Generate
-                </Button>
-              </div>
-              <Input
-                type="password"
-                placeholder={
-                  view.frappe_to_medusa_secret_masked ??
-                  "Not set — click Generate"
-                }
-                value={frappeToMedusaSecret}
-                onChange={(e) => setFrappeToMedusaSecret(e.target.value)}
-              />
-              <Text size="small" className="text-ui-fg-subtle">
-                Verifies pushes coming IN from Frappe. Generate here, then
-                copy it into the Medusync Site's <strong>Outbound
-                Secret</strong> on the ERPNext side.
+                Signs every webhook ERPNext sends here. Set up ERPNext
+                generates it when empty and writes it into the Webhook rows
+                itself; copy it only if you maintain the webhooks by hand.
               </Text>
             </div>
             <div>
@@ -477,7 +510,8 @@ const SettingsTab: React.FC<{
                 onChange={(e) => setApiSecret(e.target.value)}
               />
               <Text size="small" className="text-ui-fg-subtle">
-                Token-auth for REST pulls + the seeders.
+                Token auth for the pull, field reads and Set up ERPNext
+                (which needs the System Manager role).
               </Text>
             </div>
           </div>
@@ -532,6 +566,136 @@ const SettingsTab: React.FC<{
       </section>
 
       <section className="rounded border border-ui-border-base p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <Heading level="h2">Selection and ERPNext setup</Heading>
+          <Button
+            size="small"
+            variant="secondary"
+            onClick={() => setSyncDoctypes([...syncDoctypes, { doctype: "", mode: "allow" }])}
+          >
+            <Plus /> Add a doctype
+          </Button>
+        </div>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          Every doctype listed here gets a <strong>Sync to Medusa</strong>{" "}
+          tick box and two webhooks. Only ticked documents reach the
+          store; unticking or deleting one drafts its product.{" "}
+          <strong>Allow list</strong>: new documents start unticked — tick
+          the few to sync. <strong>Deny list</strong>: new documents start
+          ticked — untick the exemptions; the first setup ticks every
+          existing document too. Changing the mode later affects new
+          documents only.
+        </Text>
+        <div className="space-y-2">
+          {syncDoctypes.map((row, i) => (
+            <div key={i} className="grid grid-cols-1 items-end gap-2 md:grid-cols-[1fr_220px_auto]">
+              <div>
+                <Label>DocType</Label>
+                <Input
+                  value={row.doctype}
+                  onChange={(e) =>
+                    setSyncDoctypes(
+                      syncDoctypes.map((r, j) => (j === i ? { ...r, doctype: e.target.value } : r)),
+                    )
+                  }
+                  placeholder="Item"
+                />
+              </div>
+              <div>
+                <Label>Mode</Label>
+                <Select
+                  value={row.mode}
+                  onValueChange={(v) =>
+                    setSyncDoctypes(
+                      syncDoctypes.map((r, j) =>
+                        j === i ? { ...r, mode: v as "allow" | "deny" } : r,
+                      ),
+                    )
+                  }
+                >
+                  <Select.Trigger>
+                    <Select.Value />
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="allow">Allow list — default unticked</Select.Item>
+                    <Select.Item value="deny">Deny list — default ticked</Select.Item>
+                  </Select.Content>
+                </Select>
+              </div>
+              <Button
+                size="small"
+                variant="transparent"
+                disabled={syncDoctypes.length <= 1}
+                onClick={() => setSyncDoctypes(syncDoctypes.filter((_, j) => j !== i))}
+              >
+                <Trash />
+              </Button>
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button
+            onClick={setupErpnext}
+            disabled={settingUp || saving || Boolean(setupBlocker)}
+            variant="primary"
+          >
+            {settingUp ? "Setting up…" : "Set up ERPNext"}
+          </Button>
+          {setupBlocker && (
+            <Text size="small" className="text-ui-fg-subtle">
+              {setupBlocker}
+            </Text>
+          )}
+          {view.erpnext_setup_at && (
+            <Text size="small" className="text-ui-fg-subtle">
+              Last set up {new Date(view.erpnext_setup_at).toLocaleString()}
+              {view.erpnext_setup_report?.inbound_url ? ` · ${view.erpnext_setup_report.inbound_url}` : ""}
+            </Text>
+          )}
+        </div>
+        {(setupResult ?? (view.erpnext_setup_report ? { ok: view.erpnext_setup_report.ok, report: view.erpnext_setup_report } : null)) && (() => {
+          const shown = setupResult ?? { ok: view.erpnext_setup_report!.ok, report: view.erpnext_setup_report! }
+          return (
+            <div
+              className={`mt-3 rounded border px-3 py-2 ${
+                shown.ok ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"
+              }`}
+            >
+              {shown.message && <Text size="small">{shown.message}</Text>}
+              {shown.report && (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-ui-fg-subtle">
+                      <th className="py-1 pr-2">Kind</th>
+                      <th className="py-1 pr-2">Name</th>
+                      <th className="py-1 pr-2">Result</th>
+                      <th className="py-1">Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shown.report.items.map((it, i) => (
+                      <tr key={i}>
+                        <td className="py-1 pr-2">{it.kind === "custom_field" ? "Custom Field" : "Webhook"}</td>
+                        <td className="py-1 pr-2 font-mono">{it.name}</td>
+                        <td className="py-1 pr-2">
+                          <StatusBadge
+                            color={it.action === "error" ? "red" : it.action === "unchanged" ? "grey" : "green"}
+                          >
+                            {it.action}
+                          </StatusBadge>
+                        </td>
+                        <td className="py-1">{it.error ?? it.detail ?? ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )
+        })()}
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
         <Heading level="h2" className="mb-3">
           Retry & timeouts
         </Heading>
@@ -578,30 +742,19 @@ const SettingsTab: React.FC<{
       {freshSecret && (
         <section className="rounded border border-ui-tag-green-border bg-ui-tag-green-bg p-4">
           <Heading level="h2" className="mb-2">
-            New secret generated — copy it into Frappe now
+            New secret generated
           </Heading>
           <Text className="mb-2 text-xs">
-            Shown once. It is stored masked, so this is the only chance to
-            copy it. Save this page first, then paste it on the Frappe
-            side at{" "}
-            {freshSecret.field === "webhook" ? (
-              <>
-                <strong>Medusa Settings → Medusa Webhook Secret</strong> (or{" "}
-                <strong>Medusync Settings → Inbound Secret</strong>)
-              </>
-            ) : (
-              <>
-                <strong>Medusync Settings → Outbound Secret</strong>
-              </>
-            )}
-            . Until both sides match, that direction returns 401.
+            Shown once; it is stored masked. Save, then run Set up ERPNext
+            and it is written into every Webhook row for you. Copy it only
+            if you maintain the webhooks by hand (Webhook → Webhook Secret).
           </Text>
           <div className="flex gap-2">
-            <Input readOnly value={freshSecret.value} className="font-mono text-xs" />
+            <Input readOnly value={freshSecret} className="font-mono text-xs" />
             <Button
               size="small"
               variant="secondary"
-              onClick={() => navigator.clipboard?.writeText(freshSecret.value)}
+              onClick={() => navigator.clipboard?.writeText(freshSecret)}
             >
               Copy
             </Button>
@@ -679,7 +832,8 @@ const SettingsTab: React.FC<{
       <section className="rounded border border-ui-border-base p-4">
         <Heading level="h2">Orders and invoices</Heading>
         <Text size="small" className="text-ui-fg-subtle mb-3">
-          Chosen in ERPNext on this store's Medusync Site and sent here when it is saved.
+          What the push to ERPNext does with an order. Pushes are paused in
+          this release; these settings are kept for when they resume.
         </Text>
         <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
           <Text size="small">
@@ -1798,8 +1952,8 @@ type Direction = "push" | "pull" | "both"
  * differs per direction, so say it at the point of choosing.
  */
 const DIRECTION_HELP: Record<Direction, string> = {
-  push: "Medusa events write into ERPNext over the REST API. Needs only the API key in Settings — nothing installed on ERPNext.",
-  pull: "A cron polls ERPNext every 5 min for rows changed since the last run. Needs only the API key. For instant updates instead of 5-minute ones, enable the mapping on the ERPNext side so medusync pushes as documents change.",
+  push: "Medusa events write into ERPNext over the REST API. Paused in this release: the mapping is evaluated and logged, nothing leaves.",
+  pull: "The webhooks Set up ERPNext installs deliver each ticked document as it changes, and a cron polls every 5 min for ticked rows changed since the last run. Needs only the API key.",
   both: "Both of the above on the same record. Per-field overrides below decide which side owns each field — set a field to one-way to stop the other side overwriting it.",
 }
 
@@ -2530,33 +2684,6 @@ const MappingList: React.FC<{
     refresh()
   }
 
-  // A mapping travels when it is saved and nothing else moves the list,
-  // so an ERPNext connected later reads a shorter list until this runs.
-  const [syncing, setSyncing] = useState(false)
-  const [syncNote, setSyncNote] = useState<string | null>(null)
-  const syncNow = async () => {
-    setSyncing(true)
-    setSyncNote(null)
-    try {
-      const res = await fetch("/admin/erpnext/mappings/sync-now", {
-        method: "POST",
-        credentials: "include",
-      })
-      const body = await res.json()
-      if (!res.ok || body?.ok === false) throw new Error(body?.message || "sync_failed")
-      const failed = (body.failed ?? []) as Array<{ name: string; error: string }>
-      setSyncNote(
-        `${body.pushed} mapping${body.pushed === 1 ? "" : "s"} sent to ERPNext` +
-          (failed.length ? ` · ${failed.length} failed: ${failed.map((f) => f.name).join(", ")}` : ""),
-      )
-      refresh()
-    } catch (e: any) {
-      setSyncNote(friendlyErpError(e?.message ?? "sync_failed"))
-    } finally {
-      setSyncing(false)
-    }
-  }
-
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
@@ -2568,12 +2695,8 @@ const MappingList: React.FC<{
           <Button size="small" variant="secondary" onClick={onNew}>
             Advanced editor
           </Button>
-          <Button size="small" variant="secondary" onClick={syncNow} disabled={syncing} title="Send every mapping to ERPNext so both lists read the same">
-            {syncing ? "Sending…" : "Send all to ERPNext"}
-          </Button>
         </div>
       </div>
-      {syncNote && <Text className="mb-3 text-xs text-ui-fg-subtle">{syncNote}</Text>}
       {error && <Text className="text-ui-fg-error mb-3">{error}</Text>}
       {!items && <Text>Loading…</Text>}
       {items && items.length === 0 && (
@@ -3082,18 +3205,22 @@ const MappingEditor: React.FC<{
     setBusy(true)
     setError(null)
     try {
-      const sample: Record<string, any> = { doctype: draft.doctype }
+      const sample: Record<string, any> = { doctype: draft.doctype, name: "sample", medusa_sync: 1 }
       for (const pair of (draft.field_mappings ?? []) as any[]) {
         if (!pair.erpnext_field) continue
         sample[pair.erpnext_field] = `sample ${pair.erpnext_field}`
       }
+      // Shaped like a Frappe Webhook delivery: the whole document under
+      // `doc`, ticked, as an on_update.
       const res = await fetch("/admin/erpnext/studio/plan-inbound", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          event: String(draft.events?.[0] ?? `${draft.doctype}.updated`).trim(),
-          data: sample,
+          event: "on_update",
+          doctype: draft.doctype,
+          name: sample.name,
+          doc: sample,
         }),
       })
       setTestResult(await res.json())
