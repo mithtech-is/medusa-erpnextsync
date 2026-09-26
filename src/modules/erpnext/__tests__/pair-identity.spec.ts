@@ -6,22 +6,16 @@ import {
     pairUidOf,
     pickKeeper,
     scrubDoctype,
-} from "../mapping-sync"
+} from "../pair-identity"
 
 /**
  * A sync is its pair. One Medusa entity and one DocType is one mapping,
  * whichever side created it and whatever it was called, so the identity
- * is derived from the pair rather than generated. `medusync/tests/
- * test_pair_identity.py` is the other half and derives the same strings.
+ * is derived from the pair rather than generated.
  */
 describe("the pair identity", () => {
     it("is derived from the entity and the doctype", () => {
         expect(pairUid("order", "Sales Order")).toBe("pair:order:sales_order")
-    })
-
-    it("includes the store when the mapping is pinned to one", () => {
-        expect(pairUid("order", "Sales Order", "shop-1")).toBe("pair:order:sales_order:shop-1")
-        expect(pairUid("order", "Sales Order", null)).toBe("pair:order:sales_order")
     })
 
     it("scrubs a doctype the same way the Frappe side does", () => {
@@ -30,7 +24,7 @@ describe("the pair identity", () => {
     })
 
     it("reads the pair off a mapping row", () => {
-        expect(pairUidOf({ medusa_entity: "product", doctype: "Item", site_id: null })).toBe(
+        expect(pairUidOf({ medusa_entity: "product", doctype: "Item" })).toBe(
             "pair:product:item",
         )
     })
