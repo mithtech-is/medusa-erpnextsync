@@ -217,6 +217,8 @@ export function buildSalesOrderDoc(args: {
     defaults: PushDefaults
     has: HasField
     timezone?: string | null
+    /** Injectable clock, for tests. */
+    now?: Date
 }): SalesOrderBuild {
     const { order, customerName, defaults, has } = args
     const items = Array.isArray(order?.items) ? order.items : []
@@ -225,7 +227,10 @@ export function buildSalesOrderDoc(args: {
     const lines: any[] = []
     const placed = order?.created_at ? new Date(order.created_at) : new Date()
     const transaction_date = formatInZone(placed, args.timezone, false)
-    const delivery_date = formatInZone(new Date(placed.getTime() + 7 * 24 * 3600 * 1000), args.timezone, false)
+    // A week from now, or from the order when it is newer than now: an
+    // order pushed late still promises a delivery in the future.
+    const from = Math.max(placed.getTime(), args.now?.getTime() ?? Date.now())
+    const delivery_date = formatInZone(new Date(from + 7 * 24 * 3600 * 1000), args.timezone, false)
     for (const li of items) {
         const code = args.itemCodeFor(li)
         if (!code) {
@@ -283,6 +288,92 @@ export function buildSalesOrderDoc(args: {
     }
     if (has("medusa_order_id") && order?.id) doc.medusa_order_id = order.id
     return { ok: true, doc, notes }
+}
+
+/** One row of a Sales Order's items table, as ERPNext returns it. */
+export type SalesOrderItemRow = { name: string; item_code: string }
+
+/**
+ * The Sales Invoice, built like the Sales Order rather than mapped from
+ * it: ERPNext's `make_sales_invoice` only maps a submitted order, and the
+ * store leaves its documents as drafts. Each line names the draft order's
+ * row (`sales_order` / `so_detail`) so ERPNext ties the two once both are
+ * submitted. The mapping's payload lands on the invoice where the field
+ * exists there too.
+ */
+export function buildSalesInvoiceDoc(args: {
+    order: any
+    customerName: string
+    itemCodeFor: (line: any) => string | null
+    addresses: { billing?: string | null; shipping?: string | null }
+    defaults: PushDefaults
+    has: HasField
+    timezone?: string | null
+    now?: Date
+    soName?: string | null
+    soItems?: SalesOrderItemRow[] | null
+    payload?: Record<string, any> | null
+}): SalesOrderBuild {
+    const built = buildSalesOrderDoc(args)
+    if (built.ok === false) return built
+    const doc: Record<string, any> = { ...built.doc }
+    delete doc.order_type
+    delete doc.delivery_date
+    doc.items = (doc.items as any[]).map((it) => {
+        const { delivery_date: _dd, ...rest } = it
+        return rest
+    })
+    const today = formatInZone(args.now ?? new Date(), args.timezone, false)
+    doc.posting_date = today
+    doc.due_date = today
+    doc.set_posting_time = 1
+    if (args.soName && Array.isArray(args.soItems)) {
+        const pool = [...args.soItems]
+        for (const it of doc.items) {
+            const i = pool.findIndex((r) => r?.item_code === it.item_code)
+            if (i < 0) continue
+            const [row] = pool.splice(i, 1)
+            it.sales_order = args.soName
+            it.so_detail = row.name
+        }
+    }
+    for (const [k, v] of Object.entries(args.payload ?? {})) {
+        if (k === "items" || !args.has(k)) continue
+        doc[k] = v
+    }
+    return { ok: true, doc, notes: built.notes }
+}
+
+/** Frappe's bookkeeping keys on a child row; never sent back. */
+const CHILD_META_KEYS = new Set([
+    "name",
+    "owner",
+    "creation",
+    "modified",
+    "modified_by",
+    "parent",
+    "parentfield",
+    "parenttype",
+    "idx",
+    "docstatus",
+    "doctype",
+    "__islocal",
+    "__unsaved",
+])
+
+/**
+ * A Sales Taxes and Charges Template's rows, ahead of whatever the
+ * document already carries (the shipping charge). ERPNext expands the
+ * template itself only for a new document with no tax rows at all, so a
+ * document that books shipping, or an update, would otherwise lose the
+ * template's GST rows.
+ */
+export function withTemplateTaxes(doc: Record<string, any>, templateRows: any[] | null | undefined): Record<string, any> {
+    const rows = (templateRows ?? [])
+        .filter((r) => r && typeof r === "object")
+        .map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CHILD_META_KEYS.has(k))))
+    if (!rows.length) return doc
+    return { ...doc, taxes: [...rows, ...(Array.isArray(doc.taxes) ? doc.taxes : [])] }
 }
 
 /** Has the order been paid in full? Captured payments cover the total,
@@ -362,6 +453,9 @@ export function transportFilledFields(doctype: string, defaults: Partial<PushDef
             "contact_email",
             "debit_to",
             "against_income_account",
+            "base_net_total",
+            "grand_total",
+            "base_grand_total",
         ]) out.add(f)
         if (defaults.company) out.add("company")
         if (defaults.taxesTemplate) out.add("taxes_and_charges")

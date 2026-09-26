@@ -55,6 +55,7 @@ import {
     addressesOfOrder,
     buildAddressDoc,
     buildCustomerDoc,
+    buildSalesInvoiceDoc,
     buildSalesOrderDoc,
     directionForCreated,
     isOwnWrite,
@@ -62,6 +63,7 @@ import {
     transportFilledFields,
     wantsSalesInvoice,
     wantsSalesOrder,
+    withTemplateTaxes,
     type AddressInput,
     type HasField,
     type PushDefaults,
@@ -2692,6 +2694,10 @@ class ErpnextModuleService extends MedusaService({
                 mapping.doctype,
                 rest ? await this.pushDefaults(rest.client) : {},
             )
+            // The push renders the terms text from a `tc_name` pair, the
+            // way ERPNext's form does.
+            const namesTerms = (mapping.field_mappings as MappingFieldPair[]).some((p) => p?.erpnext_field === "tc_name")
+            if (namesTerms) filled.add("terms")
             const unmet = unmetRequired({
                 direction: "push",
                 fields: mapping.field_mappings as MappingFieldPair[],
@@ -2707,6 +2713,32 @@ class ErpnextModuleService extends MedusaService({
                         unmet.map((f) => `'${f.label || f.name}'`).join(", ") +
                         ". Map each one, or give it a fixed value.",
                 )
+            }
+            // An order that also becomes a Sales Invoice once paid must
+            // satisfy the invoice's own mandatory fields with the same
+            // pairs; fixed values land on both documents.
+            const settingsRow: any = mapping.doctype === "Sales Order" ? await this.findSettingsRow() : null
+            if (settingsRow && wantsSalesInvoice(settingsRow.order_document)) {
+                const siMeta = await this.getDoctypeMeta("Sales Invoice")
+                const siFilled = transportFilledFields("Sales Invoice", rest ? await this.pushDefaults(rest.client) : {})
+                if (namesTerms) siFilled.add("terms")
+                const siUnmet = siMeta.ok
+                    ? unmetRequired({
+                          direction: "push",
+                          fields: mapping.field_mappings as MappingFieldPair[],
+                          mappingDirection: mapping.direction as MappingDirection,
+                          required: (siMeta.fields ?? [])
+                              .filter((f) => f.reqd && !f.fetch_from && !f.default && !siFilled.has(f.fieldname))
+                              .map((f) => ({ name: f.fieldname, label: f.label })),
+                      })
+                    : []
+                if (siUnmet.length) {
+                    warnings.push(
+                        "The Sales Invoice raised once the order is paid will not accept a record without " +
+                            siUnmet.map((f) => `'${f.label || f.name}'`).join(", ") +
+                            ". Give each one a fixed value on this mapping.",
+                    )
+                }
             }
         }
         await this.recordMappingTest(args.mapping_id, warnings.length === 0, {
@@ -3250,9 +3282,43 @@ class ErpnextModuleService extends MedusaService({
             for (const r of countries) {
                 if (r?.code && r?.name) map.set(String(r.code).toLowerCase(), String(r.name))
             }
+            // A failed or empty read is not an answer; caching it would
+            // say "no such country" for a day.
+            if (!map.size) return null
             _countryCache = { map, expiresAt: now + 24 * 60 * 60 * 1000 }
         }
         return _countryCache.map.get(wanted) ?? null
+    }
+
+    /** A Sales Taxes and Charges Template's rows, cached for an hour. */
+    private async templateTaxes(client: FrappeClient, name: string | null | undefined): Promise<any[]> {
+        if (!name) return []
+        const now = Date.now()
+        const hit = _taxTemplateCache.get(name)
+        if (hit && hit.expiresAt > now) return hit.rows
+        const res = await client.get(`/api/resource/Sales%20Taxes%20and%20Charges%20Template/${encodeURIComponent(name)}`)
+        if (res.ok !== true) return []
+        const rows: any[] = Array.isArray(res.data?.taxes) ? res.data.taxes : []
+        _taxTemplateCache.set(name, { rows, expiresAt: now + 60 * 60 * 1000 })
+        return rows
+    }
+
+    /**
+     * What ERPNext's form does on its own: expand the taxes template and
+     * render the Terms and Conditions text from `tc_name`. Neither happens
+     * for a REST write on its own (the template only on a brand-new
+     * document with no tax rows; the terms never).
+     */
+    private async completeSalesDoc(client: FrappeClient, doc: Record<string, any>, defaults: PushDefaults): Promise<Record<string, any>> {
+        let out = withTemplateTaxes(doc, await this.templateTaxes(client, defaults.taxesTemplate))
+        if (out.tc_name && !out.terms) {
+            const res = await client.post(
+                "/api/method/erpnext.setup.doctype.terms_and_conditions.terms_and_conditions.get_terms_and_conditions",
+                { template_name: out.tc_name, doc: JSON.stringify(out) },
+            )
+            if (res.ok === true && typeof res.data === "string" && res.data.trim()) out = { ...out, terms: res.data }
+        }
+        return out
     }
 
     /** Where documents land: the settings, else ERPNext's own defaults. */
@@ -3582,7 +3648,7 @@ class ErpnextModuleService extends MedusaService({
             }
             if (!soName) {
                 if (!existing && mapping.allow_create === false) return { ok: true, status: "skipped", reason: "create not allowed by the mapping" }
-                const doc = { ...build.doc, ...ctx.payload, items: build.doc.items }
+                const doc = await this.completeSalesDoc(client, { ...build.doc, ...ctx.payload, items: build.doc.items }, defaults)
                 const written = await this.writeRemote(client, "Sales Order", existing, doc)
                 if (written.ok === false) return written
                 soName = written.name
@@ -3627,7 +3693,14 @@ class ErpnextModuleService extends MedusaService({
     ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
         const { client, record: order } = ctx
         let doc: Record<string, any> | null = null
+        // ERPNext maps an invoice from a Sales Order only once the order is
+        // submitted; a draft order is referenced line by line instead.
+        let soDoc: any = null
         if (soName) {
+            const state = await client.get(`/api/resource/Sales%20Order/${encodeURIComponent(soName)}`)
+            if (state.ok === true) soDoc = state.data
+        }
+        if (soName && Number(soDoc?.docstatus) === 1) {
             const mapped = await client.post("/api/method/erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice", {
                 source_name: soName,
             })
@@ -3637,9 +3710,11 @@ class ErpnextModuleService extends MedusaService({
             for (const it of Array.isArray(doc.items) ? doc.items : []) {
                 for (const k of ["name", "__islocal", "__unsaved", "parent", "docstatus"]) delete it[k]
             }
+            doc.posting_date = formatInZone(new Date(), timezone, false)
+            doc.set_posting_time = 1
         } else {
             const has = await this.hasFieldFn("Sales Invoice")
-            const build = buildSalesOrderDoc({
+            const build = buildSalesInvoiceDoc({
                 order,
                 customerName,
                 itemCodeFor: (li) => lineCodes.get(String(li?.id ?? li?.title)) ?? null,
@@ -3647,15 +3722,13 @@ class ErpnextModuleService extends MedusaService({
                 defaults,
                 has,
                 timezone,
+                soName: soDoc ? soName : null,
+                soItems: Array.isArray(soDoc?.items) ? soDoc.items : null,
+                payload: ctx.payload,
             })
             if (build.ok === false) return { ok: false, error: build.reason }
-            doc = { ...build.doc }
-            delete doc.order_type
-            delete doc.delivery_date
-            for (const it of doc.items) delete it.delivery_date
+            doc = await this.completeSalesDoc(client, build.doc, defaults)
         }
-        doc.posting_date = formatInZone(new Date(), timezone, false)
-        doc.set_posting_time = 1
         const written = await this.writeRemote(client, "Sales Invoice", null, doc)
         if (written.ok === false) return { ok: false, error: written.error }
         await this.recordLink({
@@ -4730,6 +4803,7 @@ let _tzCache: { value: string | null; expiresAt: number } | null = null
 let _apiUserCache: { value: string | null; expiresAt: number } | null = null
 /** ERPNext Country names by ISO code, per process. */
 let _countryCache: { map: Map<string, string>; expiresAt: number } | null = null
+const _taxTemplateCache = new Map<string, { rows: any[]; expiresAt: number }>()
 /** ERPNext's own defaults for pushed documents, per process. */
 let _defaultsCache: { company: string | null; priceList: string | null; expiresAt: number } | null = null
 

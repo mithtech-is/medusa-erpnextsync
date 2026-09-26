@@ -4,6 +4,7 @@ import {
     addressesOfOrder,
     buildAddressDoc,
     buildCustomerDoc,
+    buildSalesInvoiceDoc,
     buildSalesOrderDoc,
     customerDisplayName,
     directionForCreated,
@@ -14,6 +15,7 @@ import {
     transportFilledFields,
     wantsSalesInvoice,
     wantsSalesOrder,
+    withTemplateTaxes,
 } from "../push-rest"
 
 const has = (fields: string[]) => (f: string) => fields.includes(f)
@@ -200,5 +202,74 @@ describe("transportFilledFields", () => {
         expect(so.has("taxes_and_charges")).toBe(false)
         expect(transportFilledFields("Sales Order", {}).has("company")).toBe(false)
         expect(transportFilledFields("Item", { company: "Mith" }).size).toBe(0)
+    })
+})
+
+describe("the Sales Invoice built against a draft Sales Order", () => {
+    const order = {
+        id: "order_1",
+        display_id: 7,
+        created_at: "2026-09-13T08:00:00Z",
+        currency_code: "inr",
+        total: 3537.64,
+        items: [
+            { id: "li_1", title: "Bolt", quantity: 2, unit_price: 1499, total: 2998, tax_total: 539.64, variant: { sku: "BOLT-1" } },
+        ],
+    }
+    const defaults = { company: "Fixcent", priceList: "Standard Selling" }
+    const has = (fields: string[]) => (f: string) => fields.includes(f)
+    const itemCodeFor = (li: any) => (li?.variant?.sku === "BOLT-1" ? "BOLT-1" : null)
+    const now = new Date("2026-09-26T10:00:00Z")
+
+    it("drops the order-only fields, dates itself today and names the draft order's rows", () => {
+        const out = buildSalesInvoiceDoc({
+            order, customerName: "Rao Traders", itemCodeFor, addresses: {}, defaults, has: has(["custom_sales_type"]), timezone: "Asia/Kolkata", now,
+            soName: "SAL-ORD-2026-00271", soItems: [{ name: "row1", item_code: "BOLT-1" }],
+            payload: { custom_sales_type: "Service & Sales", contact_email: "x@y.z", items: [] },
+        })
+        expect(out.ok).toBe(true)
+        if (out.ok === false) return
+        expect(out.doc.order_type).toBeUndefined()
+        expect(out.doc.delivery_date).toBeUndefined()
+        expect(out.doc).toMatchObject({ posting_date: "2026-09-26", due_date: "2026-09-26", set_posting_time: 1, po_no: "#7", customer: "Rao Traders", custom_sales_type: "Service & Sales" })
+        expect(out.doc.contact_email).toBeUndefined()
+        expect(out.doc.items).toEqual([{ item_code: "BOLT-1", item_name: "Bolt", qty: 2, rate: 1499, sales_order: "SAL-ORD-2026-00271", so_detail: "row1" }])
+    })
+
+    it("leaves a line unlinked when the order has no row for it, and links nothing without an order", () => {
+        const out = buildSalesInvoiceDoc({ order, customerName: "c", itemCodeFor, addresses: {}, defaults, has: has([]), now, soName: "SO-1", soItems: [{ name: "r9", item_code: "OTHER" }] })
+        if (out.ok === false) throw new Error(out.reason)
+        expect(out.doc.items[0].sales_order).toBeUndefined()
+        const bare = buildSalesInvoiceDoc({ order, customerName: "c", itemCodeFor, addresses: {}, defaults, has: has([]), now })
+        if (bare.ok === false) throw new Error(bare.reason)
+        expect(bare.doc.items[0].so_detail).toBeUndefined()
+    })
+
+    it("promises delivery a week from now when the order is older than today", () => {
+        const so = buildSalesOrderDoc({ order, customerName: "c", itemCodeFor, addresses: {}, defaults, has: has([]), timezone: "Asia/Kolkata", now })
+        if (so.ok === false) throw new Error(so.reason)
+        expect(so.doc.transaction_date).toBe("2026-09-13")
+        expect(so.doc.delivery_date).toBe("2026-10-03")
+    })
+})
+
+describe("withTemplateTaxes", () => {
+    it("puts the template's rows ahead of the shipping row, stripped of Frappe's row bookkeeping", () => {
+        const doc = { customer: "c", taxes: [{ charge_type: "Actual", account_head: "Freight - F", tax_amount: 100 }] }
+        const out = withTemplateTaxes(doc, [
+            { name: "abc", idx: 1, parent: "T", parenttype: "Sales Taxes and Charges Template", doctype: "Sales Taxes and Charges", charge_type: "On Net Total", account_head: "Output Tax CGST - F", rate: 9, description: "CGST" },
+            { name: "def", idx: 2, charge_type: "On Net Total", account_head: "Output Tax SGST - F", rate: 9, description: "SGST" },
+        ])
+        expect(out.taxes).toEqual([
+            { charge_type: "On Net Total", account_head: "Output Tax CGST - F", rate: 9, description: "CGST" },
+            { charge_type: "On Net Total", account_head: "Output Tax SGST - F", rate: 9, description: "SGST" },
+            { charge_type: "Actual", account_head: "Freight - F", tax_amount: 100 },
+        ])
+        expect(doc.taxes).toHaveLength(1)
+    })
+    it("leaves the document alone without a template", () => {
+        const doc = { customer: "c" }
+        expect(withTemplateTaxes(doc, null)).toBe(doc)
+        expect(withTemplateTaxes(doc, [])).toBe(doc)
     })
 })
