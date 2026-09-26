@@ -1,4 +1,4 @@
-import { Module, MedusaService } from "@medusajs/framework/utils"
+import { ContainerRegistrationKeys, Module, MedusaService, Modules } from "@medusajs/framework/utils"
 import crypto from "crypto"
 import { ErpnextSyncEvent } from "./models/sync-event"
 import { ErpnextSetting } from "./models/setting"
@@ -71,6 +71,16 @@ import {
 import { runErpnextSetup, type SetupReport } from "./erpnext-setup"
 import { mergeDoctypeMeta } from "./doctype-meta"
 import { SUPERSEDED_MESSAGE, supersededByLater } from "./retry-policy"
+import {
+    ITEM_PRICE_DOCTYPE,
+    STOCK_DOCTYPES,
+    isStockOrPriceDoctype,
+    planItemPrice,
+    safetyFor,
+    sellableQty,
+    stockPairsOf,
+    type PricePlan,
+} from "./stock-prices"
 import {
     DEFAULT_PRODUCT_POLICY,
     decideProductPush,
@@ -210,6 +220,12 @@ type SaveSettingsInput = {
     erpnext_territory?: string | null
     erpnext_shipping_account?: string | null
     erpnext_taxes_template?: string | null
+    /** Stock and prices, ERPNext → Medusa (Phase 3). */
+    sync_stock?: boolean
+    sync_prices?: boolean
+    erpnext_warehouse?: string | null
+    medusa_stock_location_id?: string | null
+    erpnext_safety_stock?: number | null
     erpnext_api_key?: string | null
     erpnext_api_secret?: string | null
     request_timeout_ms?: number
@@ -241,6 +257,11 @@ type ActiveConfig = {
     /** What the last Set up ERPNext did, or null before the first. */
     erpnext_setup_report: SetupReport | null
     request_timeout_ms: number
+    sync_stock: boolean
+    sync_prices: boolean
+    erpnext_warehouse: string | null
+    medusa_stock_location_id: string | null
+    erpnext_safety_stock: number
     auto_retry_failed: boolean
     auto_retry_max_attempts: number
     auto_retry_min_interval_minutes: number
@@ -852,6 +873,7 @@ class ErpnextModuleService extends MedusaService({
             erpnext_setup_report: row.erpnext_setup_report ?? null,
             phone_region: phoneRegionOf(row),
             ...pushSettingsView(row),
+            ...stockSettingsView(row),
             request_timeout_ms: row.request_timeout_ms,
             auto_retry_failed: row.auto_retry_failed,
             auto_retry_max_attempts: row.auto_retry_max_attempts,
@@ -909,6 +931,14 @@ class ErpnextModuleService extends MedusaService({
         }
         for (const key of PUSH_SETTING_KEYS) {
             if (key in input) patch[key] = String((input as any)[key] ?? "").trim() || null
+        }
+        for (const key of ["erpnext_warehouse", "medusa_stock_location_id"] as const) {
+            if (key in input) patch[key] = String((input as any)[key] ?? "").trim() || null
+        }
+        if (input.sync_stock !== undefined) patch.sync_stock = Boolean(input.sync_stock)
+        if (input.sync_prices !== undefined) patch.sync_prices = Boolean(input.sync_prices)
+        if (input.erpnext_safety_stock !== undefined) {
+            patch.erpnext_safety_stock = Math.max(0, Math.floor(Number(input.erpnext_safety_stock) || 0))
         }
         applySecret(patch, "erpnext_api_key", input.erpnext_api_key)
         applySecret(patch, "erpnext_api_secret", input.erpnext_api_secret)
@@ -1003,6 +1033,11 @@ class ErpnextModuleService extends MedusaService({
             medusa_public_url: publicUrlOf(row?.medusa_public_url ?? process.env.MEDUSA_BACKEND_URL ?? null),
             erpnext_setup_report: (row?.erpnext_setup_report as SetupReport | null) ?? null,
             request_timeout_ms: row?.request_timeout_ms ?? DEFAULT_TIMEOUT_MS,
+            sync_stock: Boolean(row?.sync_stock),
+            sync_prices: Boolean(row?.sync_prices),
+            erpnext_warehouse: row?.erpnext_warehouse || null,
+            medusa_stock_location_id: row?.medusa_stock_location_id || null,
+            erpnext_safety_stock: Number(row?.erpnext_safety_stock) || 0,
             auto_retry_failed: row?.auto_retry_failed ?? true,
             auto_retry_max_attempts: row?.auto_retry_max_attempts ?? 5,
             auto_retry_min_interval_minutes:
@@ -3768,6 +3803,277 @@ class ErpnextModuleService extends MedusaService({
         return { ok: true, name: written.name }
     }
 
+    // ── Stock and prices, ERPNext → Medusa (Phase 3) ─────────────────
+
+    /**
+     * A Stock Ledger Entry, a Sales Order submit/cancel or an Item Price
+     * arriving from ERPNext (see stock-prices.ts for the rules).
+     */
+    private async applyStockPriceEvent(
+        body: FrappeWebhookBody,
+        scope: any,
+    ): Promise<{ via: "frappe"; event: string; results: any[] }> {
+        const cfg = await this.getActiveConfig()
+        const results: any[] = []
+        if (STOCK_DOCTYPES.has(body.doctype)) {
+            if (!cfg.sync_stock) {
+                results.push({ ok: true, action: "skipped", reason: "stock sync is off in Settings" })
+            } else {
+                const pairs = stockPairsOf(body, cfg.erpnext_warehouse)
+                if (!pairs.length) {
+                    results.push({
+                        ok: true,
+                        action: "skipped",
+                        reason: `nothing at warehouse ${cfg.erpnext_warehouse ?? "(not set)"}`,
+                    })
+                }
+                for (const pair of pairs) results.push(await this.applyStockLevel(scope, pair.item_code))
+            }
+        }
+        if (body.doctype === ITEM_PRICE_DOCTYPE) {
+            if (!cfg.sync_prices) {
+                results.push({ ok: true, action: "skipped", reason: "price sync is off in Settings" })
+            } else {
+                const rest = await this.restClient()
+                const priceList = rest ? (await this.pushDefaults(rest.client)).priceList : null
+                const plan = planItemPrice({
+                    event: body.event,
+                    doc: body.doc,
+                    priceList,
+                    today: formatInZone(new Date(), await this.siteTimezone(), false),
+                })
+                results.push(
+                    plan.action === "skip"
+                        ? { ok: true, action: "skipped", reason: plan.reason }
+                        : await this.applyVariantPrice(scope, plan),
+                )
+            }
+        }
+        return { via: "frappe", event: body.event, results }
+    }
+
+    /**
+     * The variant an Item's stock and price belong to: through the link
+     * (the product's variant with the Item code as SKU, else its only
+     * variant — a product linked by hand keeps its own SKU), else any
+     * variant carrying the code as its SKU (a pulled product).
+     */
+    private async variantForItem(scope: any, itemCode: string): Promise<any | null> {
+        const query: any = scope.resolve(ContainerRegistrationKeys.QUERY)
+        const fields = ["id", "sku", "product_id", "manage_inventory", "inventory_items.inventory_item_id", "price_set.id"]
+        const link = await this.findLink("Item", itemCode, "product")
+        if (link?.medusa_id) {
+            const { data } = await query.graph({ entity: "variant", fields, filters: { product_id: link.medusa_id } })
+            const variants: any[] = Array.isArray(data) ? data : []
+            const bySku = variants.find((v) => v.sku === itemCode)
+            if (bySku) return bySku
+            if (variants.length === 1) return variants[0]
+        }
+        const { data } = await query.graph({ entity: "variant", fields, filters: { sku: itemCode } })
+        return data?.[0] ?? null
+    }
+
+    /** Read the Bin at the store's warehouse and write the sellable level. */
+    private async applyStockLevel(scope: any, itemCode: string): Promise<any> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.erpnext_warehouse || !cfg.medusa_stock_location_id) {
+            return { ok: true, action: "skipped", reason: "warehouse or stock location not set in Settings" }
+        }
+        const rest = await this.restClient()
+        if (!rest) return { ok: true, action: "skipped", reason: "ERPNext not configured" }
+        const bins = await rest.client.get("/api/resource/Bin", {
+            filters: JSON.stringify([
+                ["item_code", "=", itemCode],
+                ["warehouse", "=", cfg.erpnext_warehouse],
+            ]),
+            fields: JSON.stringify(["actual_qty", "reserved_qty"]),
+        })
+        if (bins.ok === false) return { ok: false, error: `Bin ${itemCode}: ${bins.error}` }
+        const item = await rest.client.get("/api/method/frappe.client.get_value", {
+            doctype: "Item",
+            filters: itemCode,
+            fieldname: "safety_stock",
+        })
+        const safety = safetyFor(item.ok === true ? item.data?.safety_stock : 0, cfg.erpnext_safety_stock)
+        const qty = sellableQty(Array.isArray(bins.data) ? bins.data[0] : null, safety)
+        return this.writeStockLevel(scope, itemCode, cfg.medusa_stock_location_id, qty)
+    }
+
+    /** Set the stocked quantity of the variant with this SKU at the location. */
+    private async writeStockLevel(scope: any, sku: string, locationId: string, qty: number): Promise<any> {
+        const variant = await this.variantForItem(scope, sku)
+        if (!variant) return { ok: true, action: "skipped", reason: `no variant for Item ${sku}` }
+        const inventory: any = scope.resolve(Modules.INVENTORY)
+        let inventoryItemId: string | null = variant.inventory_items?.[0]?.inventory_item_id ?? null
+        if (!inventoryItemId) {
+            const [byItemSku] = await inventory.listInventoryItems({ sku: variant.sku ?? sku }, { take: 1 })
+            inventoryItemId = byItemSku?.id ?? null
+        }
+        if (!inventoryItemId) return { ok: true, action: "skipped", reason: `variant ${sku} has no inventory item` }
+        const [level] = await inventory.listInventoryLevels(
+            { inventory_item_id: inventoryItemId, location_id: locationId },
+            { take: 1 },
+        )
+        if (level) {
+            if (Number(level.stocked_quantity) === qty) {
+                return { entity: "inventory_level", id: variant.id, ok: true, action: "unchanged", detail: `${sku}: ${qty}` }
+            }
+            await inventory.updateInventoryLevels([{ inventory_item_id: inventoryItemId, location_id: locationId, stocked_quantity: qty }])
+            return { entity: "inventory_level", id: variant.id, ok: true, action: "updated", detail: `${sku}: ${qty}` }
+        }
+        await inventory.createInventoryLevels([{ inventory_item_id: inventoryItemId, location_id: locationId, stocked_quantity: qty }])
+        return { entity: "inventory_level", id: variant.id, ok: true, action: "created", detail: `${sku}: ${qty}` }
+    }
+
+    /** Set or remove the variant's base price in one currency. */
+    private async applyVariantPrice(scope: any, plan: Exclude<PricePlan, { action: "skip" }>): Promise<any> {
+        const variant = await this.variantForItem(scope, plan.item_code)
+        if (!variant) return { ok: true, action: "skipped", reason: `no variant for Item ${plan.item_code}` }
+        const pricing: any = scope.resolve(Modules.PRICING)
+        let priceSetId: string | null = variant.price_set?.id ?? null
+        if (!priceSetId) {
+            if (plan.action === "remove") return { ok: true, action: "skipped", reason: `variant ${plan.item_code} has no prices` }
+            const created = await pricing.createPriceSets({ prices: [] })
+            priceSetId = created.id
+            const link: any = scope.resolve(ContainerRegistrationKeys.LINK)
+            await link.create({ [Modules.PRODUCT]: { variant_id: variant.id }, [Modules.PRICING]: { price_set_id: priceSetId } })
+        }
+        // The base price: this currency, no price list, no rules.
+        const prices: any[] = await pricing.listPrices(
+            { price_set_id: [priceSetId], currency_code: plan.currency },
+            { take: 50 },
+        )
+        const base = prices.find((p) => !p.price_list_id && !(p.rules_count > 0))
+        if (plan.action === "remove") {
+            if (!base) return { entity: "variant", id: variant.id, ok: true, action: "unchanged", detail: `${plan.item_code}: no ${plan.currency} price` }
+            await pricing.softDeletePrices([base.id])
+            return { entity: "variant", id: variant.id, ok: true, action: "removed", detail: `${plan.item_code}: ${plan.currency} price` }
+        }
+        if (base) {
+            if (Number(base.amount) === plan.amount) {
+                return { entity: "variant", id: variant.id, ok: true, action: "unchanged", detail: `${plan.item_code}: ${plan.amount} ${plan.currency}` }
+            }
+            await pricing.updatePrices([{ id: base.id, amount: plan.amount }])
+            return { entity: "variant", id: variant.id, ok: true, action: "updated", detail: `${plan.item_code}: ${plan.amount} ${plan.currency}` }
+        }
+        await pricing.addPrices({ priceSetId, prices: [{ amount: plan.amount, currency_code: plan.currency }] })
+        return { entity: "variant", id: variant.id, ok: true, action: "created", detail: `${plan.item_code}: ${plan.amount} ${plan.currency}` }
+    }
+
+    /**
+     * Stock and prices for a batch of Items in a few reads: the Bins at
+     * the store's warehouse, the Items' safety stock, and the selling
+     * prices on the store's list. An Item with no Bin has never been
+     * stocked there and is written as 0; an Item with no price on the
+     * list keeps whatever price the variant has.
+     */
+    async refreshStockAndPrices(
+        scope: any,
+        itemCodes: string[],
+    ): Promise<{ skipped?: string; stock: number; prices: number; failed: number }> {
+        const cfg = await this.getActiveConfig()
+        const codes = Array.from(new Set(itemCodes.filter(Boolean)))
+        if (!codes.length || (!cfg.sync_stock && !cfg.sync_prices)) return { skipped: "off", stock: 0, prices: 0, failed: 0 }
+        const rest = await this.restClient()
+        if (!rest) return { skipped: "not-configured", stock: 0, prices: 0, failed: 0 }
+        let stock = 0
+        let prices = 0
+        let failed = 0
+        const note = (r: any) => {
+            if (r?.ok === false) failed += 1
+        }
+        if (cfg.sync_stock && cfg.erpnext_warehouse && cfg.medusa_stock_location_id) {
+            const bins = await rest.client.get("/api/resource/Bin", {
+                filters: JSON.stringify([
+                    ["warehouse", "=", cfg.erpnext_warehouse],
+                    ["item_code", "in", codes],
+                ]),
+                fields: JSON.stringify(["item_code", "actual_qty", "reserved_qty"]),
+                limit_page_length: String(codes.length),
+            })
+            const safeties = await rest.client.get("/api/resource/Item", {
+                filters: JSON.stringify([["name", "in", codes]]),
+                fields: JSON.stringify(["name", "safety_stock"]),
+                limit_page_length: String(codes.length),
+            })
+            if (bins.ok === false) failed += 1
+            else {
+                const binByCode = new Map<string, any>()
+                for (const b of Array.isArray(bins.data) ? bins.data : []) binByCode.set(String(b.item_code), b)
+                const safetyByCode = new Map<string, unknown>()
+                for (const i of safeties.ok === true && Array.isArray(safeties.data) ? safeties.data : []) {
+                    safetyByCode.set(String(i.name), i.safety_stock)
+                }
+                for (const code of codes) {
+                    const qty = sellableQty(binByCode.get(code) ?? null, safetyFor(safetyByCode.get(code), cfg.erpnext_safety_stock))
+                    const r = await this.writeStockLevel(scope, code, cfg.medusa_stock_location_id, qty)
+                    note(r)
+                    if (r?.ok && r.action !== "skipped") stock += 1
+                }
+            }
+        }
+        if (cfg.sync_prices) {
+            const priceList = (await this.pushDefaults(rest.client)).priceList
+            if (priceList) {
+                const rows = await rest.client.get("/api/resource/Item%20Price", {
+                    filters: JSON.stringify([
+                        ["price_list", "=", priceList],
+                        ["item_code", "in", codes],
+                        ["selling", "=", 1],
+                    ]),
+                    fields: JSON.stringify([
+                        "item_code",
+                        "price_list",
+                        "currency",
+                        "price_list_rate",
+                        "selling",
+                        "customer",
+                        "packing_unit",
+                        "valid_from",
+                        "valid_upto",
+                    ]),
+                    limit_page_length: String(codes.length * 4),
+                })
+                if (rows.ok === false) failed += 1
+                else {
+                    const today = formatInZone(new Date(), await this.siteTimezone(), false)
+                    for (const doc of Array.isArray(rows.data) ? rows.data : []) {
+                        const plan = planItemPrice({ event: "on_update", doc, priceList, today })
+                        if (plan.action === "skip") continue
+                        const r = await this.applyVariantPrice(scope, plan)
+                        note(r)
+                        if (r?.ok && r.action !== "skipped") prices += 1
+                    }
+                }
+            }
+        }
+        return { stock, prices, failed }
+    }
+
+    /** The hourly safety net: every linked Item, 200 at a time. */
+    async reconcileStockAndPrices(scope: any): Promise<{ skipped?: string; items: number; stock: number; prices: number; failed: number }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync || (!cfg.sync_stock && !cfg.sync_prices)) return { skipped: "off", items: 0, stock: 0, prices: 0, failed: 0 }
+        let items = 0
+        let stock = 0
+        let prices = 0
+        let failed = 0
+        for (let offset = 0; ; offset += 200) {
+            const links: any[] = await this.listErpnextLinks(
+                { medusa_entity: "product", state: "active" } as any,
+                { take: 200, skip: offset, order: { erpnext_name: "ASC" } },
+            )
+            if (!links.length) break
+            const out = await this.refreshStockAndPrices(scope, links.map((l) => String(l.erpnext_name)))
+            items += links.length
+            stock += out.stock
+            prices += out.prices
+            failed += out.failed
+            if (links.length < 200) break
+        }
+        return { items, stock, prices, failed }
+    }
+
     /**
      * A delete or cancel in Medusa. Nothing is ever deleted in ERPNext on
      * Medusa's say-so: a Customer or Item is disabled, a draft Sales Order
@@ -4047,6 +4353,15 @@ class ErpnextModuleService extends MedusaService({
                 ...(link.remote_direction !== null ? { remote_direction: link.remote_direction } : {}),
             })
         }
+        // The pulled Items' stock and prices come along, so a product is
+        // sellable at the right level and price from its first pull.
+        if (linksToRecord.length && mapping.medusa_entity === "product") {
+            try {
+                await this.refreshStockAndPrices(args.container, linksToRecord.map((l) => l.erpnext_name))
+            } catch (err: any) {
+                console.warn("[erpnext-pull] stock/price refresh failed:", describeError(err))
+            }
+        }
 
         const newWatermark = maxModified
             ? new Date(maxModified.replace(" ", "T") + "Z")
@@ -4206,10 +4521,11 @@ class ErpnextModuleService extends MedusaService({
         ) {
             return { ok: true, status: "skipped", event_id, message: "already being applied" }
         }
-        const mappings = (await this.listEnabledPullMappings()).filter(
-            (m: any) => m.doctype === body.doctype,
-        )
-        if (!mappings.length) {
+        const stockOrPrice = isStockOrPriceDoctype(body.doctype)
+        const mappings = stockOrPrice
+            ? []
+            : (await this.listEnabledPullMappings()).filter((m: any) => m.doctype === body.doctype)
+        if (!stockOrPrice && !mappings.length) {
             const message = `no enabled pull mapping for ${body.doctype}`
             await this.upsertInboundEventRow(
                 { event: eventName, event_id, data: body },
@@ -4222,7 +4538,9 @@ class ErpnextModuleService extends MedusaService({
             { status: "pending", last_error: null },
         )
         try {
-            const outcome = await this.applyFrappeEvent(body, args.scope, mappings)
+            const outcome = stockOrPrice
+                ? await this.applyStockPriceEvent(body, args.scope)
+                : await this.applyFrappeEvent(body, args.scope, mappings)
             const failed = outcome.results.filter((r: any) => r.ok === false)
             const message = failed.length
                 ? String(failed[0].error ?? "failed").slice(0, ERROR_TRUNCATE)
@@ -4654,12 +4972,15 @@ class ErpnextModuleService extends MedusaService({
             token: creds,
             timeoutMs: Math.max(cfg.request_timeout_ms, SETUP_TIMEOUT_MS),
         })
+        const sellingList = cfg.sync_prices ? (await this.pushDefaults(client)).priceList : null
         const report = await runErpnextSetup({
             client,
             doctypes: cfg.sync_doctypes,
             publicUrl,
             secret,
             previous: cfg.erpnext_setup_report,
+            stock: cfg.sync_stock && cfg.erpnext_warehouse ? { warehouse: cfg.erpnext_warehouse } : null,
+            prices: cfg.sync_prices && sellingList ? { priceList: sellingList } : null,
         })
         if (row) {
             await this.updateErpnextSettings([
@@ -4919,6 +5240,17 @@ function pushSettingsView(row: any) {
     const out: Record<string, string | null> = {}
     for (const key of PUSH_SETTING_KEYS) out[key] = row?.[key] ?? null
     return out
+}
+
+/** Stock and prices, as the settings page shows them. */
+function stockSettingsView(row: any) {
+    return {
+        sync_stock: Boolean(row?.sync_stock),
+        sync_prices: Boolean(row?.sync_prices),
+        erpnext_warehouse: row?.erpnext_warehouse ?? null,
+        medusa_stock_location_id: row?.medusa_stock_location_id ?? null,
+        erpnext_safety_stock: Number(row?.erpnext_safety_stock) || 0,
+    }
 }
 
 /** The invoice and storage part of the settings view. Secrets masked. */

@@ -49,6 +49,11 @@ type SettingsView = {
   erpnext_territory: string | null
   erpnext_shipping_account: string | null
   erpnext_taxes_template: string | null
+  sync_stock: boolean
+  sync_prices: boolean
+  erpnext_warehouse: string | null
+  medusa_stock_location_id: string | null
+  erpnext_safety_stock: number
   outbound_paused: boolean
   erpnext_api_key_masked: string | null
   erpnext_api_secret_masked: string | null
@@ -253,6 +258,13 @@ const SettingsTab: React.FC<{
     erpnext_taxes_template: view.erpnext_taxes_template ?? "",
   })
   const [orderDocument, setOrderDocument] = useState(view.order_document ?? "Sales Order and Sales Invoice")
+  const [stockCfg, setStockCfg] = useState({
+    sync_stock: Boolean(view.sync_stock),
+    sync_prices: Boolean(view.sync_prices),
+    erpnext_warehouse: view.erpnext_warehouse ?? "",
+    medusa_stock_location_id: view.medusa_stock_location_id ?? "",
+    erpnext_safety_stock: String(view.erpnext_safety_stock ?? 0),
+  })
   /** A freshly generated secret, shown once. Cleared on save — a stored
    *  secret is never re-displayed. */
   const [freshSecret, setFreshSecret] = useState<string | null>(null)
@@ -316,6 +328,13 @@ const SettingsTab: React.FC<{
       erpnext_taxes_template: view.erpnext_taxes_template ?? "",
     })
     setOrderDocument(view.order_document ?? "Sales Order and Sales Invoice")
+    setStockCfg({
+      sync_stock: Boolean(view.sync_stock),
+      sync_prices: Boolean(view.sync_prices),
+      erpnext_warehouse: view.erpnext_warehouse ?? "",
+      medusa_stock_location_id: view.medusa_stock_location_id ?? "",
+      erpnext_safety_stock: String(view.erpnext_safety_stock ?? 0),
+    })
     setInvoiceStorage(view.invoice_storage ?? "local")
     setLocalDir(view.invoice_local_dir ?? "")
     setS3Bucket(view.s3_bucket ?? "")
@@ -349,6 +368,11 @@ const SettingsTab: React.FC<{
         phone_region: phoneRegion.trim().toUpperCase() || "IN",
         ...Object.fromEntries(Object.entries(pushCfg).map(([k, v]) => [k, v.trim() || null])),
         order_document: orderDocument,
+        sync_stock: stockCfg.sync_stock,
+        sync_prices: stockCfg.sync_prices,
+        erpnext_warehouse: stockCfg.erpnext_warehouse.trim() || null,
+        medusa_stock_location_id: stockCfg.medusa_stock_location_id.trim() || null,
+        erpnext_safety_stock: Math.max(0, Math.floor(Number(stockCfg.erpnext_safety_stock) || 0)),
         invoice_storage: invoiceStorage,
         invoice_local_dir: localDir.trim() || null,
         s3_bucket: s3Bucket.trim() || null,
@@ -928,6 +952,57 @@ const SettingsTab: React.FC<{
             </Select>
             <Text size="small" className="text-ui-fg-subtle">
               Documents are created as drafts; an ERPNext user submits them.
+            </Text>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Stock and prices from ERPNext</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          ERPNext owns both. A store may sell what is on hand at its warehouse
+          less what Sales Orders already promise less a safety buffer; the
+          level lands on the stock location below. A selling price on the
+          price list above becomes the variant's price in that currency.
+          Both arrive on Webhooks that Set up ERPNext creates once switched
+          on, and the hourly reconcile re-reads every linked Item.
+        </Text>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="flex items-center gap-2">
+            <Switch checked={stockCfg.sync_stock} onCheckedChange={(v) => setStockCfg((c) => ({ ...c, sync_stock: Boolean(v) }))} />
+            <Label>Move stock levels</Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch checked={stockCfg.sync_prices} onCheckedChange={(v) => setStockCfg((c) => ({ ...c, sync_prices: Boolean(v) }))} />
+            <Label>Move selling prices</Label>
+          </div>
+          <div />
+          <div>
+            <Label>ERPNext warehouse</Label>
+            <Input
+              value={stockCfg.erpnext_warehouse}
+              onChange={(e) => setStockCfg((c) => ({ ...c, erpnext_warehouse: e.target.value }))}
+              placeholder="Stores - ABC"
+            />
+          </div>
+          <div>
+            <Label>Medusa stock location id</Label>
+            <Input
+              value={stockCfg.medusa_stock_location_id}
+              onChange={(e) => setStockCfg((c) => ({ ...c, medusa_stock_location_id: e.target.value }))}
+              placeholder="sloc_…"
+            />
+          </div>
+          <div>
+            <Label>Safety stock held back</Label>
+            <Input
+              type="number"
+              min={0}
+              value={stockCfg.erpnext_safety_stock}
+              onChange={(e) => setStockCfg((c) => ({ ...c, erpnext_safety_stock: e.target.value }))}
+            />
+            <Text size="small" className="text-ui-fg-subtle">
+              An Item's own safety stock wins when it has one.
             </Text>
           </div>
         </div>

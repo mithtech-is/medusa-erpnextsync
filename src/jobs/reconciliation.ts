@@ -154,6 +154,18 @@ export default async function reconciliation(container: MedusaContainer) {
             err?.message,
         )
     }
+    // Stock and prices: re-read every linked Item's Bin and selling price,
+    // so a delivery that never reached us is caught within the hour.
+    try {
+        const r = await erpnext.reconcileStockAndPrices?.(container)
+        if (r && !r.skipped) {
+            console.log(
+                `[erpnext-recon] stock/prices: items=${r.items} stock=${r.stock} prices=${r.prices} failed=${r.failed}`,
+            )
+        }
+    } catch (err: any) {
+        console.warn("[erpnext-recon] stock/price reconcile failed:", err?.message)
+    }
 }
 
 /**

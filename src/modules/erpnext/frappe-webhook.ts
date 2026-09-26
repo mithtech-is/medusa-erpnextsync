@@ -48,7 +48,7 @@ export function verifyFrappeSignature(args: {
     return safeEq(presented, digest.toString("base64")) || safeEq(presented, digest.toString("hex"))
 }
 
-export const FrappeWebhookEvent = z.enum(["on_update", "on_trash"])
+export const FrappeWebhookEvent = z.enum(["on_update", "on_trash", "after_insert", "on_submit", "on_cancel"])
 export type FrappeWebhookEvent = z.infer<typeof FrappeWebhookEvent>
 
 const nameLike = z.union([z.string(), z.number()]).transform((v) => String(v))

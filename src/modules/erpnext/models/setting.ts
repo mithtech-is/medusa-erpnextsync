@@ -164,6 +164,18 @@ export const ErpnextSetting = model.define("erpnext_setting", {
     /** Sales Taxes and Charges Template applied to sales documents. */
     erpnext_taxes_template: model.text().nullable(),
 
+    // ── Stock and prices, ERPNext → Medusa (Phase 3) ─────────────────
+    /** Move stock levels from the warehouse below to the stock location. */
+    sync_stock: model.boolean().default(false),
+    /** Move selling prices on `erpnext_price_list` onto the variants. */
+    sync_prices: model.boolean().default(false),
+    /** The one ERPNext warehouse that feeds this store. */
+    erpnext_warehouse: model.text().nullable(),
+    /** The Medusa stock location the levels are written to. */
+    medusa_stock_location_id: model.text().nullable(),
+    /** Buffer held back from every level; an Item's own safety_stock wins when set. */
+    erpnext_safety_stock: model.number().default(0),
+
     // ── Orders and invoices (this store's choice; honoured by the push) ─
     /** "Sales Order" | "Sales Invoice" | "Sales Order and Sales Invoice". */
     order_document: model.text().nullable(),

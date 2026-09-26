@@ -61,6 +61,12 @@ const SaveSchema = z.object({
     erpnext_territory: z.string().nullable().optional(),
     erpnext_shipping_account: z.string().nullable().optional(),
     erpnext_taxes_template: z.string().nullable().optional(),
+    /** Stock and prices, ERPNext → Medusa. */
+    sync_stock: z.boolean().optional(),
+    sync_prices: z.boolean().optional(),
+    erpnext_warehouse: z.string().nullable().optional(),
+    medusa_stock_location_id: z.string().nullable().optional(),
+    erpnext_safety_stock: z.number().int().min(0).nullable().optional(),
     erpnext_api_key: z.string().nullable().optional(),
     erpnext_api_secret: z.string().nullable().optional(),
     request_timeout_ms: z.number().int().optional(),

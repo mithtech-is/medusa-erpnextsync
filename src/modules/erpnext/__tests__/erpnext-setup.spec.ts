@@ -4,6 +4,8 @@ import {
     ON_TRASH_CONDITION,
     ON_UPDATE_CONDITION,
     buildCustomField,
+    buildPriceWebhooks,
+    buildStockWebhooks,
     buildWebhook,
     customFieldName,
     ensureCustomField,
@@ -216,5 +218,48 @@ describe("making ERPNext match", () => {
         expect(report.ok).toBe(false)
         expect(report.items.every((i) => i.action === "error")).toBe(true)
         expect(writes).toHaveLength(0)
+    })
+})
+
+describe("stock and price webhooks", () => {
+    it("build one ledger and two order webhooks for the warehouse, and two for the price list", () => {
+        const stock = buildStockWebhooks({ warehouse: "Stores - F", publicUrl: "http://x", secret: "s" })
+        expect(stock.map((w) => [w.webhook_doctype, w.webhook_docevent, w.condition])).toEqual([
+            ["Stock Ledger Entry", "after_insert", 'doc.warehouse == "Stores - F"'],
+            ["Sales Order", "on_submit", ""],
+            ["Sales Order", "on_cancel", ""],
+        ])
+        const prices = buildPriceWebhooks({ priceList: "Standard Selling", publicUrl: "http://x", secret: "s" })
+        expect(prices.map((w) => [w.name, w.condition])).toEqual([
+            ["Medusa Sync: Item Price on_update", 'doc.price_list == "Standard Selling" and doc.selling == 1'],
+            ["Medusa Sync: Item Price on_trash", 'doc.price_list == "Standard Selling" and doc.selling == 1'],
+        ])
+        for (const w of [...stock, ...prices]) {
+            expect(w.request_url).toBe("http://x/webhooks/erpnext-inbound")
+            expect(w.enable_security).toBe(1)
+            expect(w.webhook_json).toContain(`"event":"${w.webhook_docevent}"`)
+        }
+    })
+
+    it("are created by the setup only when asked for", async () => {
+        const { client, writes } = fakeClient({})
+        const report = await runErpnextSetup({
+            client,
+            doctypes: [{ doctype: "Item", mode: "allow" }],
+            publicUrl: "http://x",
+            secret: "s",
+            stock: { warehouse: "Stores - F" },
+            prices: null,
+        })
+        const names = report.items.filter((i) => i.kind === "webhook").map((i) => i.name)
+        expect(names).toEqual([
+            "Medusa Sync: Item on_update",
+            "Medusa Sync: Item on_trash",
+            "Medusa Sync: Stock Ledger Entry after_insert",
+            "Medusa Sync: Sales Order on_submit",
+            "Medusa Sync: Sales Order on_cancel",
+        ])
+        expect(writes.filter((w) => w.method === "POST" && w.path.includes("Webhook"))).toHaveLength(5)
+        expect(report.ok).toBe(true)
     })
 })

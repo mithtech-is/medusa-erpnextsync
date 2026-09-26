@@ -9,6 +9,13 @@ import {
     type SyncDoctype,
     type SyncMode,
 } from "./selection"
+import {
+    ITEM_PRICE_DOCTYPE,
+    SALES_ORDER_DOCTYPE,
+    STOCK_LEDGER_DOCTYPE,
+    itemPriceCondition,
+    stockLedgerCondition,
+} from "./stock-prices"
 
 /**
  * "Set up ERPNext": everything this plugin needs on the ERPNext side,
@@ -41,7 +48,8 @@ import {
 
 export const INBOUND_PATH = "/webhooks/erpnext-inbound"
 
-export type WebhookEvent = "on_update" | "on_trash"
+export type WebhookEvent = "on_update" | "on_trash" | "after_insert" | "on_submit" | "on_cancel"
+/** The two a selection DocType gets. */
 export const WEBHOOK_EVENTS: WebhookEvent[] = ["on_update", "on_trash"]
 
 export const CUSTOM_FIELD_LABEL = "Sync to Medusa"
@@ -109,6 +117,8 @@ export function buildWebhook(args: {
     event: WebhookEvent
     publicUrl: string
     secret: string
+    /** Overrides the selection conditions; "" means no condition. */
+    condition?: string
 }): Record<string, any> {
     return {
         doctype: "Webhook",
@@ -121,7 +131,12 @@ export function buildWebhook(args: {
         request_method: "POST",
         request_structure: "JSON",
         webhook_json: webhookJsonTemplate(args.event),
-        condition: args.event === "on_trash" ? ON_TRASH_CONDITION : ON_UPDATE_CONDITION,
+        condition:
+            args.condition !== undefined
+                ? args.condition
+                : args.event === "on_trash"
+                  ? ON_TRASH_CONDITION
+                  : ON_UPDATE_CONDITION,
         enable_security: 1,
         webhook_secret: args.secret,
         timeout: 15,
@@ -318,12 +333,40 @@ function previousItem(report: SetupReport | null | undefined, kind: SetupItem["k
  * land in the report rather than throwing, so one DocType's trouble does
  * not hide what happened to the others.
  */
+/**
+ * Stock, ERPNext → Medusa: a ledger entry at the store's warehouse, and a
+ * Sales Order submit or cancel (reserved quantity moves with no ledger
+ * entry; the lines are filtered on arrival, since a condition cannot walk
+ * a child table without builtins).
+ */
+export function buildStockWebhooks(args: { warehouse: string; publicUrl: string; secret: string }): Record<string, any>[] {
+    const base = { publicUrl: args.publicUrl, secret: args.secret }
+    return [
+        buildWebhook({ ...base, doctype: STOCK_LEDGER_DOCTYPE, event: "after_insert", condition: stockLedgerCondition(args.warehouse) }),
+        buildWebhook({ ...base, doctype: SALES_ORDER_DOCTYPE, event: "on_submit", condition: "" }),
+        buildWebhook({ ...base, doctype: SALES_ORDER_DOCTYPE, event: "on_cancel", condition: "" }),
+    ]
+}
+
+/** Prices, ERPNext → Medusa: a selling price on the store's list. */
+export function buildPriceWebhooks(args: { priceList: string; publicUrl: string; secret: string }): Record<string, any>[] {
+    const base = { publicUrl: args.publicUrl, secret: args.secret }
+    return [
+        buildWebhook({ ...base, doctype: ITEM_PRICE_DOCTYPE, event: "on_update", condition: itemPriceCondition(args.priceList) }),
+        buildWebhook({ ...base, doctype: ITEM_PRICE_DOCTYPE, event: "on_trash", condition: itemPriceCondition(args.priceList) }),
+    ]
+}
+
 export async function runErpnextSetup(args: {
     client: FrappeClient
     doctypes: SyncDoctype[]
     publicUrl: string
     secret: string
     previous?: SetupReport | null
+    /** Stock sync is on and the store's warehouse is set. */
+    stock?: { warehouse: string } | null
+    /** Price sync is on and the selling price list is known. */
+    prices?: { priceList: string } | null
 }): Promise<SetupReport> {
     const items: SetupItem[] = []
     for (const { doctype, mode } of args.doctypes) {
@@ -345,6 +388,13 @@ export async function runErpnextSetup(args: {
                 await ensureWebhook(args.client, desired, previousItem(args.previous, "webhook", String(desired.name))),
             )
         }
+    }
+    const extra = [
+        ...(args.stock ? buildStockWebhooks({ warehouse: args.stock.warehouse, publicUrl: args.publicUrl, secret: args.secret }) : []),
+        ...(args.prices ? buildPriceWebhooks({ priceList: args.prices.priceList, publicUrl: args.publicUrl, secret: args.secret }) : []),
+    ]
+    for (const desired of extra) {
+        items.push(await ensureWebhook(args.client, desired, previousItem(args.previous, "webhook", String(desired.name))))
     }
     return {
         at: new Date().toISOString(),

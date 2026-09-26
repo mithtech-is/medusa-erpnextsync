@@ -87,7 +87,7 @@ describe("the webhook body", () => {
         const noDoc = parseFrappeWebhookBody(JSON.stringify({ event: "on_update", doctype: "Item", name: "x" }))
         expect(noDoc.ok).toBe(false)
         if (noDoc.ok === false) expect(noDoc.message).toMatch(/^doc:/)
-        const badEvent = parseFrappeWebhookBody(JSON.stringify({ event: "after_insert", doctype: "Item", name: "x", doc: {} }))
+        const badEvent = parseFrappeWebhookBody(JSON.stringify({ event: "on_change", doctype: "Item", name: "x", doc: {} }))
         expect(badEvent.ok).toBe(false)
         if (badEvent.ok === false) expect(badEvent.message).toMatch(/^event:/)
     })
