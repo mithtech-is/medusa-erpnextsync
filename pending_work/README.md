@@ -55,6 +55,7 @@ The working order is:
 | `2026-09-07-state-of-play.md` | where everything stood on 2026-09-07, before medusync was retired |
 | `2026-09-14-item-product-field-map.md` | the Item ↔ product field map |
 | `2026-09-14-store-payments-and-gateway-settlement.md` | Phase 2 — orders, invoices, payments over REST |
+| `2026-09-26-phase-2-push-over-rest.md` | Phase 2 — what the paused push has to restore, the seams ready for it, the questions |
 
 Wallet and credit line are a different kind of pending: they are not waiting
 on a decision so much as on two applications that do not exist yet. Their

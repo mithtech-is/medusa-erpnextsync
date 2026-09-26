@@ -85,8 +85,9 @@ export default async function retryEvents(container: MedusaContainer) {
         // A paused push is not a failure to recover from.
         if (row.direction !== "inbound" && OUTBOUND_PAUSED) continue
         // An inbound row that was skipped on purpose (not selected, no
-        // mapping) is not owed a replay; only a failed write is.
-        if (row.direction === "inbound" && row.status !== "failed") continue
+        // mapping) is not owed a replay; a failed write is, and so is a
+        // row a crash left "pending" long enough ago.
+        if (row.direction === "inbound" && row.status !== "failed" && row.status !== "pending") continue
         try {
             if (row.direction === "inbound") {
                 // The signature was verified when the row was written; the

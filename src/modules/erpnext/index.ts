@@ -813,8 +813,10 @@ class ErpnextModuleService extends MedusaService({
         return this.listErpnextSyncEvents(
             // A rehearsal that failed is information, not a delivery owed
             // to anyone. Retrying one would send a fabricated payload for
-            // real, which is the opposite of what a dry run is for.
-            { status: ["failed", "skipped"] as any, is_test: false } as any,
+            // real, which is the opposite of what a dry run is for. A row
+            // still "pending" is one a crash left mid-apply; the job's age
+            // check keeps a live one out.
+            { status: ["failed", "skipped", "pending"] as any, is_test: false } as any,
             { take: limit, order: { last_attempt_at: "ASC" } },
         )
     }

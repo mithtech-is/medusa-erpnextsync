@@ -34,6 +34,26 @@ condition did not fire (the document was not on ERPNext → Medusa or Both,
 before or after the save). A row with a 401 means the secret differs: rotate it here and run
 Set up ERPNext again.
 
+### When a webhook does not arrive
+
+- **No Webhook Request Log row on ERPNext:** the condition did not fire.
+  The document must be on ERPNext → Medusa or Both now or before the
+  save, or the field must have changed. `Set up ERPNext` shows whether
+  the webhooks exist and are enabled.
+- **A row exists, but only minutes later:** Frappe delivers webhooks from
+  its background worker (`default` queue). After a bench restart that
+  queue can hold hundreds of scheduled jobs; deliveries wait behind
+  them. `bench doctor` on the ERPNext side shows the queue; nothing on
+  this side is wrong.
+- **The row's response is a 401:** the secret differs. Rotate it here
+  (Generate) and run Set up ERPNext again.
+- **The row's response is a 400 about the raw body:** the Webhook lost
+  its `Content-Type: application/json` header row. Run Set up ERPNext.
+- **Set up ERPNext reports "unreachable" the first time on a big site:**
+  creating the field alters the DocType's table; on tens of thousands of
+  rows that takes a while. The plugin waits up to three minutes; run it
+  again if it still reports an error, the field is usually there.
+
 ## Mappings
 
 Mappings live here only. A mapping pairs one Medusa entity with one
