@@ -94,6 +94,18 @@ DocType; the pair is its identity and there is one per pair.
   price list.
 - A write waits up to 90 s: ERPNext validates and names a Customer or a
   Sales Order before it answers, and a busy site takes 20–50 s.
+- **The invoice's own mandatory fields** (fixerp: Terms and Conditions)
+  are checked by the order mapping's rehearsal when Settings raise a
+  Sales Invoice; a fixed value on the order mapping lands on both
+  documents. A `tc_name` pair is enough: the push renders the terms text
+  from it, as the form does.
+- **Taxes**: with a taxes template in Settings its rows are put on every
+  Sales Order and Sales Invoice ahead of the shipping charge, so the
+  ERPNext grand total equals the store's order total. Without one, the
+  documents carry no tax rows and ERPNext's total is the net amount.
+- The Sales Invoice is a draft that names the draft Sales Order's rows.
+  Submit the order first, then the invoice; ERPNext refuses the other way
+  round.
 
 ### Trying one before trusting it
 

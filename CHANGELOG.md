@@ -40,6 +40,14 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   carry `entity_ref`.
 - An event with no push mapping is logged and skipped (`no-mapping`), not reported as paused.
 - A write waits up to 90 s for ERPNext's answer (reads keep the configured timeout).
+- The Sales Invoice is built like the Sales Order and names the draft order's rows
+  (`sales_order` / `so_detail`) line by line, since ERPNext's `make_sales_invoice` maps only a
+  submitted order; a submitted order still goes through `make_sales_invoice`. Both documents get
+  the taxes template's rows expanded ahead of the shipping charge and the Terms and Conditions
+  text rendered from a `tc_name` pair, as ERPNext's form does. The rehearsal of an order mapping
+  also checks the invoice's mandatory fields when Settings want one.
+- A failed or empty Country read is no longer cached; delivery is promised a week from now when
+  the order is older than today.
 
 ## 0.2.0 — 2026-09-26
 

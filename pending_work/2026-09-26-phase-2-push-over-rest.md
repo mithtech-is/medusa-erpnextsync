@@ -81,3 +81,19 @@ Side effect to decide on: with Stock Settings → *Auto Insert Item Price If Mis
 (fixerp: on), the first Sales Order for an Item with no Standard Selling price records the
 store's rate as an Item Price. Phase 3 (prices) should own that; until then the setting
 decides.
+
+## Local e2e, 2026-09-26 night — complete (plugin 0.3.0-dev6)
+
+The user enabled server scripts bench-wide (`bench set-config -g server_script_enabled true`,
+web workers reloaded). Then, on fixerp: order #2 → Sales Order `SAL-ORD-2026-00271` (draft,
+GST rows from "Output GST In-state - FIPL", shipping as an Actual charge on "Freight and
+Forwarding Charges - FIPL", terms rendered from "Sales Invoice Terms & Condition", grand total
+18,218.02 = the store's total) and, the payment being captured, Sales Invoice `FI-SER-27-0125`
+(draft, lines naming the draft order's rows, `debit_to` filled by ERPNext, recorded in
+`erpnext_invoice`); order #1 → Customer `CRN-01623` + Sales Order `SAL-ORD-2026-00272`, then
+cancelled in Medusa → the draft was deleted on fixerp and the link dropped. Found and fixed on
+the way: `make_sales_invoice` needs a submitted order; a taxes template only expands on a new
+document with no tax rows; `terms` is never rendered from `tc_name` over REST; a failed Country
+read was cached for a day; a PUT that replaces `items` regenerates the child rows (harmless on
+a draft). Left on fixerp: two Customers, one Address, one SO, one SI, one Standard Selling Item
+Price (1,499) on "UPS INPUT PANEL -INDOOR-CU BUSBAR".
