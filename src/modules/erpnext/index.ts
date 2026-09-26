@@ -269,22 +269,28 @@ class ErpnextModuleService extends MedusaService({
 
 
     /**
-     * The legacy full-payload push. Paused — see ./outbound.ts. A row is
-     * still written so the event shows in the log and can be replayed once
-     * a transport exists again.
+     * The legacy full-payload push, which no longer has a transport: the
+     * connector is mapping-driven, so an event with no push mapping is
+     * logged and skipped. Kept because the bulk-push routes and the retry
+     * job still reach it for rows from before the mapping era.
      */
     async forwardEvent(args: ForwardArgs): Promise<ForwardResult> {
         const cfg = await this.getActiveConfig()
         if (!cfg.enable_sync) {
             return { ok: true, status: "skipped", reason: "sync-disabled" }
         }
-        await this.upsertEventRow(args, {
-            status: "skipped",
-            last_error: OUTBOUND_PAUSED_MESSAGE,
-            target_url: null,
-            action: "paused",
-        })
-        return pausedResult()
+        if (OUTBOUND_PAUSED) {
+            await this.upsertEventRow(args, {
+                status: "skipped",
+                last_error: OUTBOUND_PAUSED_MESSAGE,
+                target_url: null,
+                action: "paused",
+            })
+            return pausedResult()
+        }
+        const reason = `no push mapping handles ${args.event}; add one under Mappings`
+        await this.upsertEventRow(args, { status: "skipped", last_error: reason, target_url: null, action: "skipped" })
+        return { ok: true, status: "skipped", reason: "no-mapping" }
     }
 
     /** Where the connection stands, for the admin and for the retry job. */
@@ -3196,8 +3202,15 @@ class ErpnextModuleService extends MedusaService({
         const cfg = await this.getActiveConfig()
         const creds = await this.frappeApiCreds()
         if (!cfg.erpnext_url || !creds) return null
+        // A write runs ERPNext's validations and naming before it answers;
+        // a Customer or a Sales Order takes longer than a read. The push
+        // runs on the worker, so waiting costs nothing but the wait.
         return {
-            client: makeFrappeClient({ baseUrl: cfg.erpnext_url, token: creds, timeoutMs: cfg.request_timeout_ms }),
+            client: makeFrappeClient({
+                baseUrl: cfg.erpnext_url,
+                token: creds,
+                timeoutMs: Math.max(cfg.request_timeout_ms, PUSH_TIMEOUT_MS),
+            }),
             cfg,
         }
     }
@@ -4722,6 +4735,10 @@ const DEFAULT_PHONE_REGION = "IN"
 /** Set up ERPNext waits this long for one call: a Custom Field POST
  *  alters the DocType's table before it answers. */
 const SETUP_TIMEOUT_MS = 180_000
+
+/** A push waits this long for one write; ERPNext validates and names the
+ *  document before answering. */
+const PUSH_TIMEOUT_MS = 90_000
 
 /** A pending inbound row younger than this is a delivery still being
  *  applied; Frappe's retry of it is answered without a second apply. */
