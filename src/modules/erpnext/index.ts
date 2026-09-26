@@ -3957,10 +3957,13 @@ class ErpnextModuleService extends MedusaService({
                 ])
             }
         }
+        // Creating a Custom Field makes Frappe ALTER the DocType's table on
+        // the spot; on a 60k-row Item that is well past the ordinary request
+        // timeout, and a request that times out here still completes there.
         const client = makeFrappeClient({
             baseUrl: cfg.erpnext_url,
             token: creds,
-            timeoutMs: cfg.request_timeout_ms,
+            timeoutMs: Math.max(cfg.request_timeout_ms, SETUP_TIMEOUT_MS),
         })
         const report = await runErpnextSetup({
             client,
@@ -4091,6 +4094,10 @@ class ErpnextModuleService extends MedusaService({
 let _tzCache: { value: string | null; expiresAt: number } | null = null
 
 const DEFAULT_PHONE_REGION = "IN"
+
+/** Set up ERPNext waits this long for one call: a Custom Field POST
+ *  alters the DocType's table before it answers. */
+const SETUP_TIMEOUT_MS = 180_000
 
 /** Two upper-case letters, or the default. */
 function phoneRegionOf(row: any): string {
