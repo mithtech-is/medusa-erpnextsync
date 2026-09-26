@@ -1290,11 +1290,23 @@ class ErpnextModuleService extends MedusaService({
         // has no mapping at all.
         const mappings = args.entity ? await this.listEnabledPushMappingsForEntity(args.entity) : []
 
+        // The same record the live subscriber pushes: the registry's
+        // enriched fetch (payments, totals, product ids), not the bare row
+        // the route listed. Falls back to the row when hydration fails.
+        const descriptor = args.entity ? getMedusaEntity(args.entity) : null
         for (const it of args.items) {
             // Synthetic event id: prefix + entity id + timestamp. Lets the
             // far side dedupe but still distinguishes "live event" from
             // "manual replay" runs.
             const eventId = `manual_push:${args.event}:${it.id}:${Date.now()}`
+            let record = it.payload
+            if (descriptor && args.container) {
+                try {
+                    record = (await descriptor.fetchById(args.container, it.id)) ?? it.payload
+                } catch {
+                    record = it.payload
+                }
+            }
             let r: ForwardResult
             if (mappings.length) {
                 const outcomes: ForwardResult[] = []
@@ -1304,7 +1316,7 @@ class ErpnextModuleService extends MedusaService({
                             mapping,
                             event: args.event,
                             event_id: `${eventId}:${mapping.id}`,
-                            record: it.payload,
+                            record,
                             container: args.container,
                         }),
                     )
