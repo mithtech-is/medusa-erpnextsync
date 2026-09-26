@@ -11,6 +11,7 @@ import {
     money,
     orderFullyPaid,
     orderTotals,
+    transportFilledFields,
     wantsSalesInvoice,
     wantsSalesOrder,
 } from "../push-rest"
@@ -176,5 +177,28 @@ describe("echo and ownership", () => {
     it("a document a push creates is Medusa-owned, or Both for a two-way mapping", () => {
         expect(directionForCreated("push")).toBe("Medusa → ERPNext")
         expect(directionForCreated("both")).toBe("Both")
+    })
+})
+
+describe("transportFilledFields", () => {
+    it("names what the Customer push fills itself, and the settings-backed ones only when set", () => {
+        const bare = transportFilledFields("Customer", {})
+        expect(bare.has("customer_name")).toBe(true)
+        expect(bare.has("customer_type")).toBe(true)
+        expect(bare.has("customer_group")).toBe(false)
+        expect(bare.has("industry")).toBe(false)
+        const withDefaults = transportFilledFields("Customer", { customerGroup: "Individual", territory: "India" })
+        expect(withDefaults.has("customer_group")).toBe(true)
+        expect(withDefaults.has("territory")).toBe(true)
+    })
+
+    it("covers a sales document's party, dates, currency and lines", () => {
+        const so = transportFilledFields("Sales Order", { company: "Mith" })
+        for (const f of ["customer", "transaction_date", "delivery_date", "currency", "selling_price_list", "items", "company"]) {
+            expect(so.has(f)).toBe(true)
+        }
+        expect(so.has("taxes_and_charges")).toBe(false)
+        expect(transportFilledFields("Sales Order", {}).has("company")).toBe(false)
+        expect(transportFilledFields("Item", { company: "Mith" }).size).toBe(0)
     })
 })

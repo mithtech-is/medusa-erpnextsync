@@ -59,6 +59,7 @@ import {
     directionForCreated,
     isOwnWrite,
     orderFullyPaid,
+    transportFilledFields,
     wantsSalesInvoice,
     wantsSalesOrder,
     type AddressInput,
@@ -66,6 +67,7 @@ import {
     type PushDefaults,
 } from "./push-rest"
 import { runErpnextSetup, type SetupReport } from "./erpnext-setup"
+import { mergeDoctypeMeta } from "./doctype-meta"
 import {
     DEFAULT_PRODUCT_POLICY,
     decideProductPush,
@@ -1488,58 +1490,57 @@ class ErpnextModuleService extends MedusaService({
             return { ok: false, message: "erpnext_url / api credentials not configured" }
         }
         try {
-            // Frappe v15+ removed `frappe.client.get_meta`. The supported
-            // path is the standard REST resource endpoint, which returns
-            // the baseline DocType doc (including `.fields[]`) under
-            // `.data`. Works on v14 → v16 and needs no custom
-            // whitelisting on the Frappe side.
-            //
-            // BUT `/api/resource/DocType/<name>` returns ONLY the
-            // baseline DocType.fields[] — it does NOT include
-            // Custom Field rows (Frappe stores those in a separate
-            // `Custom Field` doctype keyed by `dt`). On a customized
-            // Customer doctype that means ~35 custom_* fields are
-            // missing from the picker — including
-            // `custom_is_mithtech_only` and all KYC fields.
-            //
-            // Fix: fan out two requests and merge. Custom Field wins
-            // on fieldname collision (same precedence as Frappe's
-            // in-process meta resolver).
-            const [baseRes, customRes] = await Promise.all([
+            // Frappe v15+ removed `frappe.client.get_meta`; the REST resource
+            // endpoint returns the DocType as shipped under `.data`. A site's
+            // customisations live elsewhere: Custom Field rows add columns
+            // (a customised Customer carries ~35 of them, the KYC fields
+            // included), and Property Setter rows change one property of a
+            // standard field — `reqd` above all, which decides whether a
+            // push write is accepted. Fan out three reads and merge them
+            // with Frappe's own precedence (see doctype-meta.ts).
+            const headers = { Authorization: `token ${apiCreds}` }
+            const listUrl = (doctype: string, filters: unknown[], fields: string[]) =>
+                `${cfg.erpnext_url}/api/resource/${encodeURIComponent(doctype)}?` +
+                new URLSearchParams({
+                    filters: JSON.stringify(filters),
+                    fields: JSON.stringify(fields),
+                    limit_page_length: "500",
+                }).toString()
+            const [baseRes, customRes, setterRes] = await Promise.all([
+                fetch(`${cfg.erpnext_url}/api/resource/DocType/${encodeURIComponent(cacheKey)}`, {
+                    method: "GET",
+                    headers,
+                    signal: AbortSignal.timeout(cfg.request_timeout_ms),
+                }),
                 fetch(
-                    `${cfg.erpnext_url}/api/resource/DocType/${encodeURIComponent(cacheKey)}`,
-                    {
-                        method: "GET",
-                        headers: { Authorization: `token ${apiCreds}` },
-                        signal: AbortSignal.timeout(cfg.request_timeout_ms),
-                    },
+                    listUrl(
+                        "Custom Field",
+                        [["dt", "=", cacheKey]],
+                        [
+                            "fieldname",
+                            "label",
+                            "fieldtype",
+                            "reqd",
+                            "options",
+                            "in_list_view",
+                            "hidden",
+                            "read_only",
+                            "default",
+                            "fetch_from",
+                        ],
+                    ),
+                    { method: "GET", headers, signal: AbortSignal.timeout(cfg.request_timeout_ms) },
                 ),
                 fetch(
-                    // NB: "Custom Field" has a space — must be URL-encoded
-                    // in the path segment. Node fetch doesn't auto-encode
-                    // path segments.
-                    `${cfg.erpnext_url}/api/resource/Custom%20Field?` +
-                        new URLSearchParams({
-                            filters: JSON.stringify([["dt", "=", cacheKey]]),
-                            fields: JSON.stringify([
-                                "fieldname",
-                                "label",
-                                "fieldtype",
-                                "reqd",
-                                "options",
-                                "in_list_view",
-                                "hidden",
-                                "read_only",
-                                "default",
-                                "fetch_from",
-                            ]),
-                            limit_page_length: "500",
-                        }).toString(),
-                    {
-                        method: "GET",
-                        headers: { Authorization: `token ${apiCreds}` },
-                        signal: AbortSignal.timeout(cfg.request_timeout_ms),
-                    },
+                    listUrl(
+                        "Property Setter",
+                        [
+                            ["doc_type", "=", cacheKey],
+                            ["doctype_or_field", "=", "DocField"],
+                        ],
+                        ["field_name", "property", "value", "property_type", "doctype_or_field"],
+                    ),
+                    { method: "GET", headers, signal: AbortSignal.timeout(cfg.request_timeout_ms) },
                 ),
             ])
 
@@ -1554,59 +1555,26 @@ class ErpnextModuleService extends MedusaService({
             const baseFields: any[] = Array.isArray(baseParsed?.data?.fields)
                 ? baseParsed.data.fields
                 : Array.isArray(baseParsed?.message?.fields)
-                  ? baseParsed.message.fields  // legacy shape (v13 / get_meta)
+                  ? baseParsed.message.fields // legacy shape (v13 / get_meta)
                   : []
 
-            // Custom Field fan-out is best-effort — a doctype with no
-            // Custom Fields returns an empty array; a permission error
-            // shouldn't block the whole call (we still have the
-            // baseline). Log and continue.
-            let customFields: any[] = []
-            if (customRes.ok) {
+            // The two list reads are best-effort: a doctype with no
+            // customisation returns an empty list, and a permission error
+            // must not hide the baseline.
+            const listRows = async (res: Response): Promise<any[]> => {
+                if (!res.ok) return []
                 try {
-                    const customParsed = JSON.parse(
-                        await customRes.text().catch(() => ""),
-                    )
-                    customFields = Array.isArray(customParsed?.data)
-                        ? customParsed.data
-                        : []
+                    const parsed = JSON.parse(await res.text().catch(() => ""))
+                    return Array.isArray(parsed?.data) ? parsed.data : []
                 } catch {
-                    /* swallow */
+                    return []
                 }
             }
-
-            // Filter out layout-only fieldtypes that have no value.
-            const NON_VALUE = new Set([
-                "Section Break",
-                "Column Break",
-                "Tab Break",
-                "HTML",
-                "Heading",
-                "Button",
-            ])
-            // Merge: Custom Field overrides baseline (same precedence
-            // as Frappe's runtime `frappe.model.meta.get_meta`).
-            const merged = new Map<string, any>()
-            for (const f of baseFields) {
-                if (f?.fieldname) merged.set(f.fieldname, f)
-            }
-            for (const f of customFields) {
-                if (f?.fieldname) merged.set(f.fieldname, f)
-            }
-            const trimmed = Array.from(merged.values())
-                .filter((f) => f.fieldname && !NON_VALUE.has(f.fieldtype))
-                .map((f) => ({
-                    fieldname: f.fieldname,
-                    label: f.label ?? f.fieldname,
-                    fieldtype: f.fieldtype,
-                    reqd: f.reqd ?? 0,
-                    options: f.options ?? null,
-                    in_list_view: f.in_list_view ?? 0,
-                    hidden: f.hidden ?? 0,
-                    read_only: f.read_only ?? 0,
-                    default: f.default ?? null,
-                    fetch_from: f.fetch_from ?? null,
-                }))
+            const trimmed = mergeDoctypeMeta({
+                baseFields,
+                customFields: await listRows(customRes),
+                propertySetters: await listRows(setterRes),
+            })
             _metaCache.set(cacheKey, {
                 fields: trimmed,
                 expiresAt: Date.now() + _META_CACHE_TTL_MS,
@@ -2701,13 +2669,21 @@ class ErpnextModuleService extends MedusaService({
         // where that is still cheap to fix, and it is what gates enabling.
         const targetMeta = await this.getDoctypeMeta(mapping.doctype)
         if (targetMeta.ok) {
+            // The transport fills some of these itself (a Customer's name
+            // and type, a Sales Order's dates and lines); only what is
+            // left is the operator's to map.
+            const rest = await this.restClient()
+            const filled = transportFilledFields(
+                mapping.doctype,
+                rest ? await this.pushDefaults(rest.client) : {},
+            )
             const unmet = unmetRequired({
                 direction: "push",
                 fields: mapping.field_mappings as MappingFieldPair[],
                 mappingDirection: mapping.direction as MappingDirection,
                 required: (targetMeta.fields ?? [])
                     // A field Frappe derives or defaults is not ours to send.
-                    .filter((f) => f.reqd && !f.fetch_from && !f.default)
+                    .filter((f) => f.reqd && !f.fetch_from && !f.default && !filled.has(f.fieldname))
                     .map((f) => ({ name: f.fieldname, label: f.label })),
             })
             if (unmet.length) {
@@ -3468,6 +3444,11 @@ class ErpnextModuleService extends MedusaService({
                         const again = await this.remoteNameFor("customer", String(order.customer_id), "Customer")
                         if (again?.erpnext_name) return { ok: true, name: again.erpnext_name }
                     }
+                    // The store has said how a Customer is made, and that
+                    // failed. A bare create here would only fail the same
+                    // way without the mapping's fixed values, and hide the
+                    // reason behind a second error.
+                    if (pushed.ok === false) return { ok: false, error: `customer: ${pushed.error}` }
                 }
             }
         }

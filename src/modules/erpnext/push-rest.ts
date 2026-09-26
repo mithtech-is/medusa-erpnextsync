@@ -321,3 +321,50 @@ export function isOwnWrite(doc: any, apiUser: string | null | undefined): boolea
 export function directionForCreated(mappingDirection: string | null | undefined): "Medusa → ERPNext" | "Both" {
     return String(mappingDirection ?? "").toLowerCase() === "both" ? "Both" : "Medusa → ERPNext"
 }
+
+// ── What the transport fills on its own ──────────────────────────────
+
+/**
+ * Mandatory fields the push fills without a pair, so a rehearsal does not
+ * ask the operator to map them. A Customer's name, type and contact come
+ * from the record; a sales document's dates, currency, lines and party
+ * come from the order. The settings-backed ones count only when the
+ * setting (or the ERPNext default it falls back to) is present, because
+ * that is the only case the push actually sends them.
+ */
+export function transportFilledFields(doctype: string, defaults: Partial<PushDefaults>): Set<string> {
+    const out = new Set<string>()
+    if (doctype === "Customer") {
+        for (const f of ["naming_series", "customer_name", "customer_type", "email_id", "mobile_no", "gstin", "gst_category"]) out.add(f)
+        if (defaults.customerGroup) out.add("customer_group")
+        if (defaults.territory) out.add("territory")
+    }
+    if (doctype === "Sales Order" || doctype === "Sales Invoice") {
+        for (const f of [
+            "naming_series",
+            "customer",
+            "customer_name",
+            "order_type",
+            "transaction_date",
+            "delivery_date",
+            "posting_date",
+            "posting_time",
+            "due_date",
+            "currency",
+            "conversion_rate",
+            "price_list_currency",
+            "plc_conversion_rate",
+            "selling_price_list",
+            "items",
+            "po_no",
+            "customer_address",
+            "shipping_address_name",
+            "contact_email",
+            "debit_to",
+            "against_income_account",
+        ]) out.add(f)
+        if (defaults.company) out.add("company")
+        if (defaults.taxesTemplate) out.add("taxes_and_charges")
+    }
+    return out
+}
