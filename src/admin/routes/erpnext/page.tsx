@@ -121,7 +121,7 @@ type EventRow = {
   target_url: string | null
 }
 
-type Tab = "settings" | "mappings" | "pull" | "events" | "reconcile"
+type Tab = "settings" | "mappings" | "documents" | "pull" | "events" | "reconcile"
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "settings", label: "Settings" },
@@ -131,6 +131,7 @@ const TABS: Array<{ key: Tab; label: string }> = [
   // briefly below the new component for reference; remove once the
   // new editor is battle-tested).
   { key: "mappings", label: "Mappings" },
+  { key: "documents", label: "Documents" },
   { key: "pull", label: "Pull" },
   { key: "events", label: "Events" },
   { key: "reconcile", label: "Reconcile" },
@@ -217,6 +218,7 @@ const ErpnextPage = () => {
       {view && tab === "pull" && <PullTab />}
       {view && tab === "events" && <EventsTab />}
       {view && tab === "reconcile" && <ReconcileTab />}
+      {view && tab === "documents" && <DocumentsTab erpnextUrl={view.erpnext_url ?? view.env_fallback?.erpnext_url ?? null} />}
     </Container>
   )
 }
@@ -4856,6 +4858,166 @@ function formatDate(iso: string): string {
 // rows orphaned from a deleted Medusa row. Read-only; runs GET
 // /admin/erpnext/reconcile. Built for a non-technical admin: one button,
 // a plain table, and click-to-see the specific ids.
+/** Frappe's desk URL for a document: /app/<doctype-slug>/<name>. */
+function frappeDocUrl(base: string | null, doctype: string, name: string): string | null {
+  if (!base) return null
+  const slug = doctype.toLowerCase().replace(/\s+/g, "-")
+  return `${base.replace(/\/+$/, "")}/app/${slug}/${encodeURIComponent(name)}`
+}
+
+/** Medusa's admin URL for a synced record, where the admin has a page for it. */
+function medusaRecordUrl(entity: string, id: string): string | null {
+  const paths: Record<string, string> = { product: "products", customer: "customers", order: "orders", product_category: "categories", product_collection: "collections" }
+  return paths[entity] ? `/app/${paths[entity]}/${id}` : null
+}
+
+/**
+ * Documents — what has actually synced, one row per ERPNext document and
+ * the Medusa record it is tied to. Which documents MAY sync is decided in
+ * ERPNext by the Sync to Medusa field; this is the record of what did.
+ */
+const DocumentsTab: React.FC<{ erpnextUrl: string | null }> = ({ erpnextUrl }) => {
+  const [items, setItems] = useState<any[]>([])
+  const [count, setCount] = useState(0)
+  const [doctypes, setDoctypes] = useState<string[]>([])
+  const [entities, setEntities] = useState<string[]>([])
+  const [doctype, setDoctype] = useState("")
+  const [entity, setEntity] = useState("")
+  const [state, setState] = useState("")
+  const [q, setQ] = useState("")
+  const [offset, setOffset] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const limit = 50
+
+  const load = async () => {
+    setLoading(true)
+    setErr(null)
+    try {
+      const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+      if (doctype) params.set("doctype", doctype)
+      if (entity) params.set("entity", entity)
+      if (state) params.set("state", state)
+      if (q.trim()) params.set("q", q.trim())
+      const res = await fetch(`/admin/erpnext/links?${params.toString()}`, { credentials: "include" })
+      const body = await res.json()
+      if (!res.ok) throw new Error(body.message || `HTTP ${res.status}`)
+      setItems(body.items ?? [])
+      setCount(body.count ?? 0)
+      setDoctypes(body.doctypes ?? [])
+      setEntities(body.entities ?? [])
+    } catch (e: any) {
+      setErr(e?.message ?? "load_failed")
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => {
+    void load()
+  }, [doctype, entity, state, offset])
+
+  const directionLabel = (d: string | null) =>
+    d === null || d === undefined ? "not shown yet" : d === "" ? "blank — not selected" : d
+
+  return (
+    <div className="space-y-3">
+      <Text size="small" className="text-ui-fg-subtle">
+        One row per ERPNext document that is tied to a record in this store. <strong>Which documents
+        are allowed to sync is decided in ERPNext</strong>: on each document, the <em>Sync to Medusa</em>{" "}
+        field says ERPNext → Medusa, Medusa → ERPNext, Both, or blank (not selected). In ERPNext, filter the
+        DocType's list by that field to see the allowed and the not-allowed ones. This tab is the record of
+        what has synced, with the direction ERPNext last showed for each; a document that was deselected
+        or deleted there shows its store record as <em>drafted</em>.
+      </Text>
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <Label>ERPNext DocType</Label>
+          <select className="rounded border bg-ui-bg-base px-2 py-1.5 text-sm" value={doctype} onChange={(e) => { setOffset(0); setDoctype(e.target.value) }}>
+            <option value="">all</option>
+            {doctypes.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <Label>Medusa</Label>
+          <select className="rounded border bg-ui-bg-base px-2 py-1.5 text-sm" value={entity} onChange={(e) => { setOffset(0); setEntity(e.target.value) }}>
+            <option value="">all</option>
+            {entities.map((d) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <Label>Store record</Label>
+          <select className="rounded border bg-ui-bg-base px-2 py-1.5 text-sm" value={state} onChange={(e) => { setOffset(0); setState(e.target.value) }}>
+            <option value="">active and drafted</option>
+            <option value="active">active</option>
+            <option value="drafted">drafted</option>
+          </select>
+        </div>
+        <div className="min-w-[220px] flex-1">
+          <Label>Search</Label>
+          <Input value={q} placeholder="ERPNext name or Medusa id" onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { setOffset(0); void load() } }} />
+        </div>
+        <Button size="small" variant="secondary" isLoading={loading} onClick={() => { setOffset(0); void load() }}>
+          Refresh
+        </Button>
+      </div>
+      {err && <Text size="small" className="text-ui-fg-error">{err}</Text>}
+      <div className="overflow-x-auto rounded border border-ui-border-base">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-ui-border-base text-left text-ui-fg-subtle">
+              <th className="p-2">ERPNext DocType</th>
+              <th className="p-2">ERPNext document</th>
+              <th className="p-2">Sync to Medusa</th>
+              <th className="p-2">Medusa</th>
+              <th className="p-2">Store record</th>
+              <th className="p-2">Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.length === 0 && !loading && (
+              <tr>
+                <td className="p-3 text-ui-fg-subtle" colSpan={6}>
+                  Nothing has synced yet. Set <em>Sync to Medusa</em> on a document in ERPNext, or push a record from the store.
+                </td>
+              </tr>
+            )}
+            {items.map((l) => {
+              const erp = frappeDocUrl(erpnextUrl, l.doctype, l.erpnext_name)
+              const med = medusaRecordUrl(l.medusa_entity, l.medusa_id)
+              return (
+                <tr key={l.id} className="border-b border-ui-border-base last:border-0">
+                  <td className="p-2">{l.doctype}</td>
+                  <td className="p-2 font-mono">{erp ? <a className="underline" href={erp} target="_blank" rel="noreferrer">{l.erpnext_name}</a> : l.erpnext_name}</td>
+                  <td className="p-2">{directionLabel(l.remote_direction)}</td>
+                  <td className="p-2">
+                    {l.medusa_entity}{" "}
+                    <span className="font-mono text-xs text-ui-fg-subtle">{med ? <a className="underline" href={med}>{l.medusa_id}</a> : l.medusa_id}</span>
+                  </td>
+                  <td className="p-2">
+                    <StatusBadge color={l.state === "drafted" ? "orange" : "green"}>{l.state}</StatusBadge>
+                  </td>
+                  <td className="p-2 text-xs text-ui-fg-subtle">{l.last_seen_at ? new Date(l.last_seen_at).toLocaleString() : "—"}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex items-center justify-between text-xs text-ui-fg-subtle">
+        <span>{count} document{count === 1 ? "" : "s"}</span>
+        <div className="flex gap-2">
+          <Button size="small" variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Previous</Button>
+          <Button size="small" variant="secondary" disabled={offset + limit >= count} onClick={() => setOffset(offset + limit)}>Next</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const ReconcileTab: React.FC = () => {
   const [running, setRunning] = useState(false)
   const [reports, setReports] = useState<any[] | null>(null)

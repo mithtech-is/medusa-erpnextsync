@@ -3,6 +3,14 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.5.2 — 2026-09-27
+
+- **Documents tab**: one row per ERPNext document tied to a store record — DocType, the document
+  (linked into ERPNext's desk), the Sync to Medusa direction ERPNext last showed, the Medusa record
+  (linked into the admin), active or drafted, last seen; filters by DocType, entity, state and a
+  search. `GET /admin/erpnext/links` behind it. Which documents may sync stays an ERPNext-side
+  decision (the field on each document); this is the record of what did.
+
 ## 0.5.1 — 2026-09-27
 
 - The mapping editor names its two sides: a header row over the field pairs ("Medusa · Customer
