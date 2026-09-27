@@ -40,6 +40,8 @@ type SettingsView = {
   medusa_public_url: string | null
   frappe_webhook_secret_masked: string | null
   sync_doctypes: Array<{ doctype: string; mode: "allow" | "deny" }>
+  /** The same list with the syncs that put each DocType there. */
+  selection_sources?: Array<{ doctype: string; mode: "allow" | "deny"; syncs: string[] }>
   erpnext_setup_at: string | null
   erpnext_setup_report: SetupReport | null
   phone_region: string
@@ -651,28 +653,41 @@ const SettingsTab: React.FC<{
           <Heading level="h2">ERPNext setup</Heading>
         </div>
         <Text size="small" className="text-ui-fg-subtle mb-3">
-          Every DocType a sync pulls from gets a <strong>Sync to Medusa</strong>{" "}
-          field — blank, ERPNext → Medusa, Medusa → ERPNext or Both — and
-          two webhooks; stock and prices add theirs when switched on. Which
-          DocTypes, and whether a new document starts blank (allow list) or
-          on Both (deny list), is set on each sync under <strong>Mappings</strong>.
-          Press Set up ERPNext after adding or changing a sync.
+          <strong>Set up ERPNext</strong> installs, on the ERPNext side, what a sync that
+          reads <em>from</em> ERPNext needs: a <strong>Sync to Medusa</strong> field on
+          that DocType (a person sets it to ERPNext → Medusa, Medusa → ERPNext or Both on
+          each document — that is how you choose which Items reach the store) and two
+          webhooks that deliver changes. Only DocTypes that some sync pulls from are
+          listed: a sync that only writes <em>to</em> ERPNext (Customers, Orders) goes
+          over REST and needs nothing installed. Whether a <em>new</em> ERPNext document
+          starts blank (nothing syncs until someone picks it) or on Both (everything
+          syncs unless someone blanks it) is set on the sync itself, under{" "}
+          <strong>Mappings</strong>. Press Set up ERPNext after adding or changing a sync.
         </Text>
         {syncDoctypes.length ? (
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-ui-fg-subtle">
-                <th className="py-1 pr-2">DocType</th>
-                <th className="py-1">New documents</th>
+                <th className="py-1 pr-2">ERPNext DocType</th>
+                <th className="py-1 pr-2">Read by sync</th>
+                <th className="py-1">A new document there</th>
               </tr>
             </thead>
             <tbody>
-              {syncDoctypes.map((row) => (
-                <tr key={row.doctype}>
-                  <td className="py-1 pr-2 font-mono">{row.doctype}</td>
-                  <td className="py-1">{row.mode === "deny" ? "start on Both (deny list)" : "start blank (allow list)"}</td>
-                </tr>
-              ))}
+              {syncDoctypes.map((row) => {
+                const src = (view.selection_sources ?? []).find((s) => s.doctype === row.doctype)
+                return (
+                  <tr key={row.doctype}>
+                    <td className="py-1 pr-2 font-mono">{row.doctype}</td>
+                    <td className="py-1 pr-2">{src?.syncs?.length ? src.syncs.join(", ") : "—"}</td>
+                    <td className="py-1">
+                      {row.mode === "deny"
+                        ? "starts on Both — syncs unless someone blanks it"
+                        : "starts blank — syncs only once someone sets it"}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         ) : (
@@ -3013,8 +3028,8 @@ const MappingList: React.FC<{
             <thead className="bg-ui-bg-base-hover">
               <tr>
                 <th className="p-2 text-left">Name</th>
-                <th className="p-2 text-left">Medusa</th>
-                <th className="p-2 text-left">Frappe doctype</th>
+                <th className="p-2 text-left">Medusa (store)</th>
+                <th className="p-2 text-left">ERPNext DocType</th>
                 <th className="p-2 text-left">Direction</th>
                 <th className="p-2 text-left">Pairs</th>
                 <th className="p-2 text-left">Last run</th>
@@ -4273,6 +4288,25 @@ const MappingEditor: React.FC<{
             </div>
           )
         })()}
+        {(draft.field_mappings ?? []).length > 0 && (
+          <div className="mb-1 flex items-center gap-2 rounded bg-ui-bg-subtle px-2 py-1 text-xs font-medium">
+            <div className="flex-1">
+              Medusa · {activeEntity?.label ?? draft.medusa_entity ?? "store"}
+              <span className="ml-1 font-normal text-ui-fg-subtle">(this store)</span>
+            </div>
+            <div className="w-[104px] shrink-0 text-center font-normal text-ui-fg-subtle" title="→ out to ERPNext · ↔ both ways · ← in from ERPNext">
+              direction
+            </div>
+            <div className="flex-1">
+              ERPNext · {draft.doctype || "DocType"}
+              {secondaryDoctypes.filter((s) => s.doctype).length
+                ? ` + ${secondaryDoctypes.filter((s) => s.doctype).map((s) => s.doctype).join(", ")}`
+                : ""}
+              <span className="ml-1 font-normal text-ui-fg-subtle">(the ERP)</span>
+            </div>
+            <div className="w-[52px] shrink-0" />
+          </div>
+        )}
         {(draft.field_mappings ?? []).map((pair, idx) => (
           <FieldPairRow
             key={idx}
@@ -4521,13 +4555,13 @@ const FieldPairRow: React.FC<{
           )}
         </div>
 
-        <div className="flex shrink-0 gap-1">
+        <div className="flex w-[104px] shrink-0 justify-center gap-1">
           {arrow("push", "→", "Only out to ERPNext")}
           {arrow("both", "↔", "Both ways")}
           {arrow("pull", "←", "Only in from ERPNext")}
         </div>
 
-        <div className="flex-1">
+        <div className="flex-1 rounded border-l-2 border-ui-border-strong bg-ui-bg-subtle p-1" title="ERPNext side">
           {doctypeChoices.length > 1 && (
             <select
               className="mb-1 w-full rounded border bg-ui-bg-base px-2 py-1 text-xs"

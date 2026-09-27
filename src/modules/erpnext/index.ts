@@ -873,8 +873,18 @@ class ErpnextModuleService extends MedusaService({
                 env_fallback: envFallback,
             }
         }
+        // Which syncs put each DocType under selection, so the Settings
+        // page can say why a DocType is listed and why another is not.
+        const pullMappings: any[] = (await this.listErpnextMappings({}, { take: 1000 })).filter(
+            (m: any) => String(m.direction ?? "both").toLowerCase() !== "push",
+        )
+        const selection_sources = syncDoctypesOf(row).map((d) => ({
+            ...d,
+            syncs: pullMappings.filter((m: any) => m.doctype === d.doctype).map((m: any) => String(m.name)),
+        }))
         return {
             exists: true,
+            selection_sources,
             enable_sync: row.enable_sync,
             medusa_product_policy: normalizeProductPolicy(row.medusa_product_policy),
             erpnext_url: row.erpnext_url,

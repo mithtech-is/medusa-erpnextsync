@@ -3,6 +3,14 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.5.1 — 2026-09-27
+
+- The mapping editor names its two sides: a header row over the field pairs ("Medusa · Customer
+  (this store)" / direction / "ERPNext · Customer + Contact (the ERP)"), and the ERPNext side of
+  every pair is tinted. The syncs list says "Medusa (store)" and "ERPNext DocType".
+- Settings explains what Set up ERPNext installs and why only DocTypes a sync reads from are
+  listed, with the sync that reads each one; push-only syncs need nothing installed.
+
 ## 0.5.0 — 2026-09-27
 
 - **A sync may span several DocTypes.** A mapping keeps its main DocType and may name secondary
