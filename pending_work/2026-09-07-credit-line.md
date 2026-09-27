@@ -1,64 +1,74 @@
 # Credit line sync
 
-**Status:** waiting on an application to exist on both sides
-**Belongs to:** whenever the credit-line apps are built
-**Side:** both. The Frappe app keeps the same file.
+**Status:** decided and built, 2026-09-27. The line of credit is ERPNext's;
+the store draws on it at checkout and follows it, and keeps no ledger.
+**Side:** both. The ERPNext side is the Frappe `lending` app through
+`customer_wallet`; the store side is `@mithtech-medusa/wallet-loc`'s
+`providers/wallet-loc-credit`.
 
-## What is happening
+## What exists now
 
-You are building credit-line applications yourself — one for ERPNext, one
-for Medusa — and these will be linked to the connector afterwards. Nothing
-here should be built before they exist: a contract written against an
-imagined schema is a contract that gets rewritten.
+**ERPNext.** One `Loan` per customer on the company's *Line of Credit*
+product: `maximum_limit_amount` / `available_limit_amount` /
+`utilized_limit_amount`, limit changes logged in `Loan Limit Change Log`,
+drawdowns as `Loan Disbursement` into the wallet, repayments as `Loan
+Repayment` out of it. `idempotency_key` (unique), `origin` and `medusa_id` on
+all three. Wrappers where REST cannot be atomic:
+`customer_wallet.api.credit.get_credit` / `open_credit_line` /
+`set_credit_limit` / `draw` / `repay_from_wallet`.
 
-This file exists so the seam is thought about before the applications are
-finished, not after.
+**Medusa.** The three tables this file mentioned (`credit_line`,
+`credit_terms`, `order_credit_line`) are not used and not the model. The store
+holds the ids of what it did on the payment session, and a 60 s in-memory
+cache of the summary for `GET /store/wallet/credit`. That is all.
 
-## What Medusa already has
+## The seam, as built
 
-The sandbox carries three tables from earlier work, which may or may not be
-what the new application uses:
+- **A stable id on each side.** `Loan.medusa_id` = the Medusa customer id
+  (stamped by this plugin when a Loan webhook arrives, or by the store when
+  it opens nothing — the store never opens lines). `erpnext_link` pairs
+  `Loan` ↔ customer (`medusa_entity: credit_line`). Every draw carries the
+  store's session key (`<session>:credit`) and `medusa_id`.
+- **One document per event.** A draw is a `Loan Disbursement`, a repayment a
+  `Loan Repayment`, a limit change a `Loan Limit Change Log` row — all
+  ERPNext's. The store adds none.
+- **Minor units, explicit currency.** Converted at the REST edge only.
+- **An idempotency key per transaction.** `draw` and `repay_from_wallet`
+  replay a repeated key (`replayed: true`) and post nothing; the unique
+  column refuses a duplicate even through `/api/resource`.
+- **Which side originated a movement.** `origin: Medusa` on every draw and
+  repayment the store makes; the wallet rows they produce are excluded from
+  the `Wallet Transaction` webhook by its condition.
 
-| Table | |
-|---|---|
-| `credit_line` | the facility itself |
-| `credit_terms` | days, limit, and the rules attached to it |
-| `order_credit_line` | an order drawing on one |
+## Decided
 
-There is no ERPNext counterpart. `Customer.credit_limit` and the payment
-terms on a Sales Order are the nearest standard things, and neither is a
-ledger.
+### The shape of the ERPNext side (Q1)
 
-## What the connector will need from your applications
+> **Answer:** the `lending` app's Loan, through `customer_wallet`. Built.
 
-Not requests — the things it cannot work around, so they are worth knowing
-while the schema is still soft.
+### Which side owns the balance (Q2)
 
-- **A stable id on each side, and a place to record the other's.** The
-  connector correlates by id pairs, and everything else in it works this way
-  (`medusa_customer_id`, `medusa_order_id`). A credit line with no id field
-  for its counterpart can only be matched by heuristics.
-- **One document per *event*, not per state.** A limit that is a number on a
-  customer syncs badly: two systems both editing a number cannot be ordered.
-  A drawdown, a repayment and a limit change that are each a record can.
-- **Amounts in minor units with an explicit currency**, matching the rest of
-  the wire contract.
-- **An idempotency key per transaction.** The connector retries, and a
-  retried drawdown that draws twice is the worst bug this project could
-  ship.
-- **Something that says which side originated a movement**, or the loop
-  prevention has nothing to hold on to. The existing echo mechanism can tag
-  it, but only if there is a field to carry the tag.
+> **Answer:** ERPNext, entirely. The store reads `available_limit_amount`
+> through a cache and lets the draw validate the real limit.
 
-## What is not decided
+### One entity or two (Q3b)
 
-See `00-QUESTIONS-ANSWER-THESE-FIRST.md`.
+> **Answer:** Two. A wallet is money held, a credit line is money owed;
+> they reconcile differently.
 
-- **Q1** — the shape of the ERPNext side, once it exists.
-- **Q2** — which side owns the balance.
-- **Q3b** — whether wallet and credit line are one entity to the connector
-  or two. Medusa's existing tables suggest two, and they reconcile
-  differently: a wallet is money held, a credit line is money owed.
+Built as two: the wallet is mirrored row for row
+(`2026-09-04-wallet-sync.md`); the credit line is followed, not mirrored —
+a `Loan` webhook (`on_update` / `on_submit` / `on_cancel`, customers only)
+pairs it and emits `erpnext.credit_line.updated` so the store's cache
+refreshes.
 
-Q3b is the one that decides how much of this is shared with the wallet
-work, so it is worth answering even before the applications are finished.
+## How a checkout draws (for the record)
+
+`wallet-loc-credit` at authorise: wallet part first (promo up to the cap,
+then main, all or nothing); the remainder drawn (`draw`), mirrored into the
+store wallet (`grant_credit`, paired with ERPNext's `Wallet Deposit` by
+`medusa_id`) and debited (`order_debit`, which this plugin pushes as a *Buy
+Settlement*). Cancel reverses the wallet part, posts the drawn part back to
+the ERPNext wallet first (`api.wallet.credit`, paired), then repays
+(`repay_from_wallet`). Refunds credit the wallet; the draw stays owed until
+repaid in ERPNext.

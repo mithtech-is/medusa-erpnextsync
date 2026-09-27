@@ -74,6 +74,22 @@ Item Price on the list), are re-read by the hourly reconcile and by every
 catalogue pull, and move only for an Item that moves ERPNext → Medusa.
 Nothing is written back.
 
+**Wallet and line of credit, both ways.** With the store's wallet plugin
+(`@mithtech-medusa/wallet-loc`) and ERPNext's `customer_wallet` app (the
+wallet DocTypes, and the line of credit on Frappe `lending`), the wallet is
+kept as one ledger on both sides and the credit line stays ERPNext's:
+
+| Need | Existing feature it uses | Gap this plugin builds |
+|---|---|---|
+| Every store wallet movement in ERPNext, once | `customer_wallet.api.wallet.credit` / `debit` (wallet-leg only, idempotent on the key, `origin` + `medusa_id` columns); `Wallet Deposit` for money that arrived in a bank | `wallet-sync.ts` maps each main-bucket row to a transaction type (an order debit is a *Buy Settlement*, a payout a *Withdrawal*, a fee a *Fee*…); pushed by the wallet subscriber right after a movement and by a 5-minute sweep, oldest first, a failure holding that customer's later rows back |
+| Every ERPNext movement in the store, once | Frappe core Webhooks (`Wallet Transaction on_submit`, `Wallet on_update`), the wallet's `credit` / `debit` / `freezeWallet` with an idempotency key | `Set up ERPNext` installs the webhooks with the condition `doc.origin != "Medusa"`, so a row this store wrote never comes back; an applied row is keyed `erpnext:wt:<name>` and linked at once |
+| Correlation and loop prevention | `erpnext_link` (id pairs), `medusa_id` on every wallet DocType | pairs for the Wallet (its Medusa wallet id, stamped on `Wallet.medusa_id`) and for every row; a row is skipped when a link or an ERPNext row with its id exists; the promo bucket never travels |
+| The line of credit | `Loan` / `Loan Disbursement` / `Loan Repayment` in `lending`, drawn on by the wallet plugin's `wallet-loc-credit` provider | nothing kept here: a `Loan` webhook pairs the Loan with the customer, stamps `Loan.medusa_id`, and emits `erpnext.credit_line.updated` so the store's cached limits refresh |
+| The two balances agree | `Wallet.balance_available` | the hourly reconcile compares it with the store's main balance, allowing for rows still to push; drift is reported on the Events tab and **ERPNext is authoritative** — the correction is an Adjustment posted there |
+
+Both switches are under Settings → *Wallet and line of credit*;
+`npm run rehearsal` exercises the seam against a live site.
+
 ## A sync across several DocTypes
 
 A mapping keeps one main DocType — what the Medusa record *is* on the
@@ -243,6 +259,7 @@ and never writes null over the target.
 ```bash
 npm run typecheck   # tsc over the plugin and its specs
 npm test            # vitest: webhook signature and plan, selection, setup, mapping engine …
+npm run rehearsal   # against a live ERPNext; skipped without ERPNEXT_URL / _API_KEY / _API_SECRET / _TEST_CUSTOMER
 npm run build       # medusa plugin:build
 ```
 
@@ -257,7 +274,9 @@ plugin build drops it silently. `route-folders.spec.ts` guards this.
 | `src/api/webhooks/erpnext-inbound/` | Where the Frappe Webhooks deliver. |
 | `src/api/admin/erpnext/` | Admin API — settings, setup, mappings, pull/push, events/retry, reconcile, products link. |
 | `src/admin/routes/erpnext/` | Admin UI (Settings / Mappings / Pull / Events / Reconcile tabs). |
-| `src/jobs/` | Pull every 5 min, retry every 5 min, hourly reconciliation, nightly prune. |
+| `src/jobs/` | Pull every 5 min, retry every 5 min, wallet sweep every 5 min, hourly reconciliation, nightly prune. |
+| `src/modules/erpnext/wallet-sync.ts` | The wallet and credit rules, pure: webhook conditions, ERPNext ↔ Medusa transaction kinds, what travels and what never does, the balance comparison. |
+| `rehearsal/` | Opt-in specs against a live ERPNext (`npm run rehearsal` with `ERPNEXT_URL`, `ERPNEXT_API_KEY`, `ERPNEXT_API_SECRET`, `ERPNEXT_TEST_CUSTOMER`). |
 | `docs/` | Operations, local development, resuming on another machine. |
 | `pending_work/` | What is still to decide or build, one file per topic. |
 

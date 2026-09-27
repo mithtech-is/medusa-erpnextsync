@@ -176,6 +176,17 @@ export const ErpnextSetting = model.define("erpnext_setting", {
     /** Buffer held back from every level; an Item's own safety_stock wins when set. */
     erpnext_safety_stock: model.number().default(0),
 
+    // ── Wallet and line of credit (both ways) ────────────────────────
+    /** Mirror the store wallet's main-bucket rows to the ERPNext wallet
+     *  (`customer_wallet` app) and apply ERPNext wallet rows here. */
+    sync_wallet: model.boolean().default(false),
+    /** Announce Loan changes to the store's credit provider and pair
+     *  each customer's Loan; ERPNext keeps the ledger. */
+    sync_credit: model.boolean().default(false),
+    /** The ERPNext bank account a store deposit with a bank UTR is booked
+     *  into as a Wallet Deposit (both legs). Empty → wallet leg only. */
+    erpnext_wallet_bank_account: model.text().nullable(),
+
     // ── Orders and invoices (this store's choice; honoured by the push) ─
     /** "Sales Order" | "Sales Invoice" | "Sales Order and Sales Invoice". */
     order_document: model.text().nullable(),

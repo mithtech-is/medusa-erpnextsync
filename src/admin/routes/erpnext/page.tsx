@@ -56,6 +56,9 @@ type SettingsView = {
   erpnext_warehouse: string | null
   medusa_stock_location_id: string | null
   erpnext_safety_stock: number
+  sync_wallet: boolean
+  sync_credit: boolean
+  erpnext_wallet_bank_account: string | null
   outbound_paused: boolean
   erpnext_api_key_masked: string | null
   erpnext_api_secret_masked: string | null
@@ -271,6 +274,11 @@ const SettingsTab: React.FC<{
     medusa_stock_location_id: view.medusa_stock_location_id ?? "",
     erpnext_safety_stock: String(view.erpnext_safety_stock ?? 0),
   })
+  const [walletCfg, setWalletCfg] = useState({
+    sync_wallet: Boolean(view.sync_wallet),
+    sync_credit: Boolean(view.sync_credit),
+    erpnext_wallet_bank_account: view.erpnext_wallet_bank_account ?? "",
+  })
   /** A freshly generated secret, shown once. Cleared on save — a stored
    *  secret is never re-displayed. */
   const [freshSecret, setFreshSecret] = useState<string | null>(null)
@@ -339,6 +347,11 @@ const SettingsTab: React.FC<{
       medusa_stock_location_id: view.medusa_stock_location_id ?? "",
       erpnext_safety_stock: String(view.erpnext_safety_stock ?? 0),
     })
+    setWalletCfg({
+      sync_wallet: Boolean(view.sync_wallet),
+      sync_credit: Boolean(view.sync_credit),
+      erpnext_wallet_bank_account: view.erpnext_wallet_bank_account ?? "",
+    })
     setInvoiceStorage(view.invoice_storage ?? "local")
     setLocalDir(view.invoice_local_dir ?? "")
     setS3Bucket(view.s3_bucket ?? "")
@@ -374,6 +387,9 @@ const SettingsTab: React.FC<{
         erpnext_warehouse: stockCfg.erpnext_warehouse.trim() || null,
         medusa_stock_location_id: stockCfg.medusa_stock_location_id.trim() || null,
         erpnext_safety_stock: Math.max(0, Math.floor(Number(stockCfg.erpnext_safety_stock) || 0)),
+        sync_wallet: walletCfg.sync_wallet,
+        sync_credit: walletCfg.sync_credit,
+        erpnext_wallet_bank_account: walletCfg.erpnext_wallet_bank_account.trim() || null,
         invoice_storage: invoiceStorage,
         invoice_local_dir: localDir.trim() || null,
         s3_bucket: s3Bucket.trim() || null,
@@ -438,6 +454,31 @@ const SettingsTab: React.FC<{
   const [refreshResult, setRefreshResult] = useState<string | null>(null)
   /** Re-read every linked Item's stock and selling price now. Saves first,
    *  so the warehouse and switches the refresh reads are the ones shown. */
+  const [walletBusy, setWalletBusy] = useState<"sweep" | "reconcile" | null>(null)
+  const [walletResult, setWalletResult] = useState<string | null>(null)
+  /** Push the wallet rows ERPNext lacks, or compare the balances, now.
+   *  Saves first, so the switches the run reads are the ones shown. */
+  const runWallet = async (what: "sweep" | "reconcile") => {
+    setWalletResult(null)
+    if (!(await save())) return
+    setWalletBusy(what)
+    try {
+      const res = await fetch(`/admin/erpnext/wallet/${what}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      })
+      const body = await res.json()
+      if (body.skipped) setWalletResult(`Skipped: ${body.skipped}`)
+      else if (what === "sweep") setWalletResult(`Scanned ${body.scanned}, pushed ${body.pushed}, failed ${body.failed}.${body.notes?.length ? ` ${body.notes.join("; ")}` : ""}`)
+      else setWalletResult(`Checked ${body.checked}: ${body.equal} equal, ${body.lagging} lagging, ${body.drift} drifted.${body.notes?.length ? ` ${body.notes.join("; ")}` : ""}`)
+    } catch (err: any) {
+      setWalletResult(`Failed: ${err?.message ?? err}`)
+    } finally {
+      setWalletBusy(null)
+    }
+  }
   const refreshStockPrices = async () => {
     setRefreshResult(null)
     if (!(await save())) return
@@ -996,6 +1037,55 @@ const SettingsTab: React.FC<{
             Refresh stock and prices now
           </Button>
           {refreshResult ? <Text size="small">{refreshResult}</Text> : null}
+        </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Wallet and line of credit</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          Needs the store's wallet plugin and ERPNext's customer_wallet app.
+          The wallet is a ledger on both sides: every store movement (main
+          bucket only — promo credit never travels) becomes a Wallet
+          Transaction in ERPNext, and every ERPNext movement not written by
+          this store arrives on a Webhook and lands on the customer's wallet
+          here. The line of credit is ERPNext's: a Loan per customer, drawn
+          on by the wallet-loc-credit payment provider; a Loan change is
+          announced to the store so its cached limits refresh. Both need Set
+          up ERPNext once switched on. When balances disagree, ERPNext's is
+          right: the hourly reconcile reports the drift on the Events tab
+          and the correction is an Adjustment posted in ERPNext.
+        </Text>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="flex items-center gap-2">
+            <Switch checked={walletCfg.sync_wallet} onCheckedChange={(v) => setWalletCfg((c) => ({ ...c, sync_wallet: Boolean(v) }))} />
+            <Label>Mirror the wallet both ways</Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch checked={walletCfg.sync_credit} onCheckedChange={(v) => setWalletCfg((c) => ({ ...c, sync_credit: Boolean(v) }))} />
+            <Label>Follow the line of credit</Label>
+          </div>
+          <div />
+          <div className="md:col-span-2">
+            <Label>Bank account for store deposits (optional)</Label>
+            <Input
+              value={walletCfg.erpnext_wallet_bank_account}
+              onChange={(e) => setWalletCfg((c) => ({ ...c, erpnext_wallet_bank_account: e.target.value }))}
+              placeholder="HDFC Bank - ABC"
+            />
+            <Text size="small" className="text-ui-fg-subtle">
+              Set it and a store deposit that carries a bank UTR is booked as a Wallet Deposit
+              (wallet leg plus Journal Entry, matched by the Bank Reconciliation Tool). Empty: wallet leg only.
+            </Text>
+          </div>
+        </div>
+        <div className="mt-3 flex items-center gap-3">
+          <Button size="small" variant="secondary" onClick={() => runWallet("sweep")} isLoading={walletBusy === "sweep"} disabled={!walletCfg.sync_wallet}>
+            Push wallet rows now
+          </Button>
+          <Button size="small" variant="secondary" onClick={() => runWallet("reconcile")} isLoading={walletBusy === "reconcile"} disabled={!walletCfg.sync_wallet}>
+            Compare balances now
+          </Button>
+          {walletResult ? <Text size="small">{walletResult}</Text> : null}
         </div>
       </section>
 

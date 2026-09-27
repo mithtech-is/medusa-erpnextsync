@@ -45,6 +45,17 @@ import { getMedusaEntity } from "../modules/erpnext/registry"
 export default async function reconciliation(container: MedusaContainer) {
     const erpnext: any = container.resolve(ERPNEXT_MODULE)
 
+    // ── 0a. Wallet reconcile ─────────────────────────────────────────
+    try {
+        const w = await erpnext.reconcileWallets(container)
+        if (!w?.skipped) {
+            console.log(`[erpnext-recon] wallets: checked=${w.checked} equal=${w.equal} lagging=${w.lagging} drift=${w.drift}`)
+            for (const n of w.notes ?? []) console.warn("[erpnext-recon] wallet:", n)
+        }
+    } catch (err: any) {
+        console.warn("[erpnext-recon] wallet reconcile failed:", err?.message ?? err)
+    }
+
     // ── 0. Selection reconcile ───────────────────────────────────────
     try {
         const sel = await erpnext.reconcileSelection(container)

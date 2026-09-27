@@ -16,6 +16,7 @@ import {
     itemPriceCondition,
     stockLedgerCondition,
 } from "./stock-prices"
+import { walletWebhookSpecs } from "./wallet-sync"
 
 /**
  * "Set up ERPNext": everything this plugin needs on the ERPNext side,
@@ -357,6 +358,16 @@ export function buildPriceWebhooks(args: { priceList: string; publicUrl: string;
     ]
 }
 
+/** The wallet and credit webhooks: a submitted Wallet Transaction not
+ *  written by this store, a Wallet status change, and (with credit) a
+ *  customer's Loan. See ./wallet-sync.ts for the conditions. */
+export function buildWalletWebhooks(args: { wallet: boolean; credit: boolean; publicUrl: string; secret: string }): Record<string, any>[] {
+    const base = { publicUrl: args.publicUrl, secret: args.secret }
+    return walletWebhookSpecs({ wallet: args.wallet, credit: args.credit }).map((s) =>
+        buildWebhook({ ...base, doctype: s.doctype, event: s.event, condition: s.condition }),
+    )
+}
+
 export async function runErpnextSetup(args: {
     client: FrappeClient
     doctypes: SyncDoctype[]
@@ -367,6 +378,8 @@ export async function runErpnextSetup(args: {
     stock?: { warehouse: string } | null
     /** Price sync is on and the selling price list is known. */
     prices?: { priceList: string } | null
+    /** Wallet sync is on; the credit line as well when `credit` is true. */
+    wallet?: { credit: boolean } | null
     /** DocTypes that hang off a synced one (a Customer's Contact): one
      *  on_update webhook each, unconditioned — whether the document is
      *  linked to a synced one is decided on arrival. */
@@ -397,6 +410,7 @@ export async function runErpnextSetup(args: {
     const extra = [
         ...(args.stock ? buildStockWebhooks({ warehouse: args.stock.warehouse, publicUrl: args.publicUrl, secret: args.secret }) : []),
         ...(args.prices ? buildPriceWebhooks({ priceList: args.prices.priceList, publicUrl: args.publicUrl, secret: args.secret }) : []),
+        ...(args.wallet ? buildWalletWebhooks({ wallet: true, credit: args.wallet.credit, publicUrl: args.publicUrl, secret: args.secret }) : []),
         ...(args.secondaries ?? [])
             .filter((dt, i, all) => dt && !underSelection.has(dt) && all.indexOf(dt) === i)
             .map((dt) => buildWebhook({ doctype: dt, event: "on_update", publicUrl: args.publicUrl, secret: args.secret, condition: "" })),

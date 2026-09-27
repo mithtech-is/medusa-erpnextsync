@@ -3,6 +3,27 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## Unreleased
+
+- **Wallet and line of credit, both ways** (`src/modules/erpnext/wallet-sync.ts`). With
+  `@mithtech-medusa/wallet-loc` on the store and the `customer_wallet` app on ERPNext, every
+  main-bucket wallet row becomes a `Wallet Transaction` there through the app's idempotent
+  wallet-leg methods (an order debit is a Buy Settlement, a payout a Withdrawal, a fee a Fee; a
+  bank-UTR deposit a `Wallet Deposit` document when Settings names the bank account), pushed by a
+  wallet subscriber right after a movement and by a 5-minute sweep (`POST /admin/erpnext/wallet/sweep`
+  on demand). Every ERPNext movement not written by this store arrives on `Wallet Transaction
+  on_submit` / `Wallet on_update` webhooks that Set up ERPNext installs with `doc.origin != "Medusa"`
+  and lands on the customer's wallet keyed `erpnext:wt:<name>`; a Wallet status change freezes or
+  unfreezes. Rows are paired by id (`erpnext_link` + `medusa_id`), the promo bucket never travels,
+  the mirror of a credit-line draw or repayment is ERPNext's own row. The line of credit stays in
+  ERPNext: a `Loan` webhook pairs it with the customer, stamps `Loan.medusa_id` and emits
+  `erpnext.credit_line.updated` for the wallet plugin's cache. The hourly reconcile compares each
+  paired wallet's balance with ERPNext's (`POST /admin/erpnext/wallet/reconcile` on demand),
+  reporting drift on the Events tab; ERPNext's figure is authoritative. Settings gain `sync_wallet`,
+  `sync_credit`, `erpnext_wallet_bank_account` (migration `20260927170000`) and a section on the
+  page. `npm run rehearsal` runs `rehearsal/wallet-credit.fixerp.spec.ts` against a live site.
+  Closes `pending_work/2026-09-04-wallet-sync.md` and `2026-09-07-credit-line.md`.
+
 ## 0.5.4 — 2026-09-27
 
 - On a one-way sync the field pairs show a fixed arrow instead of a three-way choice; switching a

@@ -2,10 +2,10 @@ schemaVersion: 1
 id: erpnext
 kind: plugin
 title: ERPNext catalogue sync
-summary: Products, stock levels and selling prices kept in step with an ERPNext site over Frappe core Webhooks and a scheduled pull; ERPNext is source of truth. Customers, orders and invoices go the other way over plain Frappe REST as drafts. Nothing is installed on ERPNext.
-provides: [erp-sync, erp-catalogue-pull, erp-customer-push, erp-order-push]
+summary: Products, stock levels and selling prices kept in step with an ERPNext site over Frappe core Webhooks and a scheduled pull; ERPNext is source of truth. Customers, orders and invoices go the other way over plain Frappe REST as drafts. With the wallet plugin, the customer wallet is mirrored both ways and the ERPNext line of credit is followed. Nothing is installed on ERPNext.
+provides: [erp-sync, erp-catalogue-pull, erp-customer-push, erp-order-push, erp-wallet-sync]
 requires: []
-optional: []
+optional: [stored-value-wallet]
 conflictsWith: []
 exclusiveGroup: erp
 medusaRange: "^2.19.0"
@@ -24,3 +24,5 @@ storefront: none
 verify:
   - { http: "GET /admin/erpnext/settings", expect: 401 }
 brokenExports: []
+notes:
+  - "Wallet and credit sync (Settings → Wallet and line of credit) needs @mithtech-medusa/wallet-loc on the store and the customer_wallet app (with Frappe lending) on ERPNext; the API user needs System Manager."

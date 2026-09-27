@@ -1,7 +1,7 @@
 {
   "name": "@mithtech-medusa/plugin-erpnext",
   "version": "0.5.4",
-  "description": "ERPNext (Frappe) sync as a Medusa v2 plugin. ERPNext → Medusa catalogue over Frappe core Webhooks and a scheduled pull, selected per document with a medusa_sync field the plugin creates; mapping engine with configurable doctype field mappings and an admin console. Nothing is installed on ERPNext.",
+  "description": "ERPNext (Frappe) sync as a Medusa v2 plugin. ERPNext \u2192 Medusa catalogue over Frappe core Webhooks and a scheduled pull, selected per document with a medusa_sync field the plugin creates; mapping engine with configurable doctype field mappings and an admin console. Nothing is installed on ERPNext.",
   "license": "UNLICENSED",
   "keywords": [
     "medusa",
@@ -24,7 +24,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "prepare": "medusa plugin:build || true",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "rehearsal": "vitest run -c vitest.rehearsal.config.ts"
   },
   "exports": {
     "./package.json": "./package.json",

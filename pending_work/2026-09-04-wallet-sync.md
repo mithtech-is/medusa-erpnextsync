@@ -1,106 +1,96 @@
-# Wallet / store-credit sync
+# Wallet sync
 
-**Status:** waiting on an application to exist on both sides
-**Belongs to:** whenever the wallet apps are built
-**Side:** both. The other repo keeps the same file.
+**Status:** decided and built, 2026-09-27 (`src/modules/erpnext/wallet-sync.ts`,
+the wallet methods on the module service, `src/subscribers/wallet-forward.ts`,
+`src/jobs/push-wallet-transactions.ts`, `rehearsal/wallet-credit.fixerp.spec.ts`).
+**Side:** both. The ERPNext side is the `customer_wallet` Frappe app
+(`frappe16/apps/customer_wallet`); the store side is `@mithtech-medusa/wallet-loc`.
 
-## What is happening
+## What exists now
 
-You are building the wallet applications yourself — one for ERPNext, one
-for Medusa — and these will be linked to the connector afterwards. That
-supersedes the earlier plan, which was for the connector to define a
-generic `wallet_transaction` contract and have each project implement it.
+**ERPNext.** `customer_wallet`: `Wallet` (`WAL-<customer>`, balances derived),
+`Wallet Transaction` (append-only, submittable, reversal by compensating row,
+`idempotency_key` unique), `Wallet Deposit` / `Wallet Withdrawal` (wallet leg +
+Journal Entry, idempotent on the bank reference). Every one carries `origin`
+(ERPNext / Medusa) and `medusa_id`. Wallet-leg-only writes for a connector:
+`customer_wallet.api.wallet.credit` / `debit` / `reverse` (operator-only,
+idempotent, 120/min). `Customer.wallet_balance_paise` is gone.
 
-Nothing here should be built before those applications exist. A contract
-written against an imagined schema is a contract that gets rewritten, and
-the earlier attempt at one is exactly why the demo module was removed.
+**Medusa.** `@mithtech-medusa/wallet-loc`: two-bucket ledger (`main`, `promo`),
+`wallet_transaction` rows with a unique `idempotency_key`, `metadata`, the
+service's `credit` / `debit` / `reverseDebit` / `freezeWallet`, events on the bus.
 
-## Where things stand today
+**The connector.** What this file asked for, the applications supplied, so the
+seam is exactly the list below.
 
-**ERPNext.** No wallet DocType at all. The one the first deployment had
-went with its custom app when that was uninstalled on 2026-09-04.
-`Customer.wallet_balance_paise` survives with nothing writing to it — see Q3.
+## The seam, as built
 
-**Medusa.** A real `cashfree_wallet` module is installed on the sandbox and
-holds data: 22 wallets, 11 transactions, 4 settlements. It was written for
-one deployment's securities domain rather than for generic commerce, so it
-is a reasonable thing to test transport against and the wrong thing to
-model a contract on.
-
-**The connector.** Cleaned of the debris on 2026-09-05: the registry no
-longer offers a `wallet_settlement` entity, the dead mapping is switched
-off, and the six `cashfree_wallet` handlers answer "not installed" rather
-than throwing on a Medusa that has no such module.
-
-## What the connector will need from your applications
-
-Not requests — the things it cannot work around, worth knowing while the
-schema is still soft.
-
-- **A stable id on each side, and a field to record the other's.** The
-  connector correlates by id pairs and everything in it already works this
-  way. A wallet with no place to keep its counterpart's id can only be
-  matched by heuristics.
-- **One document per movement, not a balance somebody edits.** Two systems
-  both writing a number cannot be ordered; two systems each appending
-  transactions can. The balance should be derived.
-- **Amounts in minor units with an explicit currency.**
-- **An idempotency key per transaction.** The connector retries, and a
-  retried credit that credits twice is the worst bug this project could
-  ship.
-- **A reversal that references what it reverses**, rather than a second
-  entry with the opposite sign and no link.
-- **Somewhere to carry which side originated a movement**, or loop
-  prevention has nothing to hold on to.
-
-## What is not decided
-
-See `00-QUESTIONS-ANSWER-THESE-FIRST.md`.
-
-- **Q1** — the shape of the ERPNext side, once it exists.
-- **Q2** — which side owns the balance.
-- **Q3** — whether `Customer.wallet_balance_paise` stays or goes.
-- **Q3b** — whether wallet and credit line are one entity to the connector
-  or two. See `2026-09-07-credit-line.md`.
-
-Q3b is worth answering before either application is finished, because it
-decides whether they share a contract.
-
----
-
-## Context
-
-You are building the wallet and credit-line applications yourself, on both
-ERPNext and Medusa, and this connector links to them afterwards. So what
-is left here is not what to build — it is the seam.
+- **A stable id on each side, and a field to record the other's.**
+  `erpnext_link` pairs the Wallet (`WAL-<customer>` ↔ the Medusa wallet id,
+  also stamped on `Wallet.medusa_id`) and every row (`Wallet Transaction`
+  name ↔ the Medusa row's key). ERPNext rows carry `medusa_id = <Medusa row id>`.
+- **One document per movement, not a balance somebody edits.** Every
+  main-bucket Medusa row becomes one `Wallet Transaction`; every ERPNext row
+  becomes one Medusa row. Balances are never written.
+- **Amounts in minor units with an explicit currency.** Minor units inside
+  the plugin; converted to two-decimal rupees at the REST edge only
+  (`majorToMinor` / `minorToMajor`). One currency per wallet on both sides.
+- **An idempotency key per transaction.** Outbound: `medusa:<row key>` (or
+  `medusa:wt:<row id>`); ERPNext replays a repeated key without posting.
+  Inbound: `erpnext:wt:<name>`; the wallet replays it without posting.
+- **A reversal that references what it reverses.** ERPNext's `Reversal` rows
+  carry `reverses`; Medusa's carry `metadata.reversal_of`. Outbound reversals
+  are posted as Adjustments with the reference in the remarks; inbound
+  reversals land as `refund` credits with `metadata.reverses`.
+- **Which side originated a movement.** `origin` on every ERPNext row; the
+  webhooks are conditioned on `doc.origin != "Medusa"`, so no echo leaves
+  ERPNext. A Medusa row written by an inbound apply is keyed `erpnext:` and
+  linked at once, so no echo leaves Medusa.
 
 ## Decided
 
-Moved here from `00-QUESTIONS-ANSWER-THESE-FIRST.md`, which now
-carries only questions still waiting on an answer. The decision and
-the reasoning stay with the work they govern.
+### What the ERPNext side of the wallet is (Q1)
 
-### What the ERPNext side of the wallet is
+> **Answer:** the `customer_wallet` app, as above. Built; the connector maps
+> ERPNext transaction types to Medusa kinds and back (`wallet-sync.ts`).
 
-> **Answer:** We will create a new application on both Frappe and Medusa which will deal with wallet and line of credit. I'll give you access to those later once it's done
+### Which side owns the balance (Q2)
 
-### Which side owns the balance
+> **Answer:** Both with time stamp and if that doesn't resolve the conflict
+> ERPNext's data takes precedence.
 
-> **Answer:** Both with time stamp and if that doesn't resolve the conflict ERPNext's data takes precidence
+Applied as: each side appends its own rows in time order and the pairs decide
+what has already travelled. The hourly reconcile compares the store's main
+balance with `Wallet.balance_available`, allowing for rows still to push
+(`lagging`); anything else is `drift`, reported on the Events tab as
+`wallet.drift`, and **ERPNext's figure is the one to keep** — the correction
+is an Adjustment posted in ERPNext, which then syncs down. The connector never
+writes a balance to match.
 
-### The leftover `Customer.wallet_balance_paise`
+### The leftover `Customer.wallet_balance_paise` (Q3)
 
-> **Answer:** If anything exists, it will be related to the old work remove it from both medusa and ERPNext
+> **Answer:** If anything exists, it will be related to the old work; remove
+> it from both Medusa and ERPNext.
 
-**Q3b. Should the connector treat wallet and credit line as one entity or
-two?**
-Medusa already has `credit_line`, `credit_terms` and `order_credit_line`
-tables alongside `wallet`, which suggests two.
-(a) ★ Two — a wallet is money held, a credit line is money owed, and they
-reconcile differently
-(b) One ledger with a sign
+Nothing carries it any more: no Custom Field on fixerp, nothing in this
+plugin or the wallet plugin reads it.
 
-> **Answer:** 2 in both the Cases. In ERPNext let's have a setting called Wallet-LOC-balancer. Remember this for now. I'll just need feature list for both Frappe and medusa applications for Wallet-LOC. Later
+### One entity or two (Q3b)
 
-### Percentage Pricing Rules and MRP — `2026-09-04-pricing-rules-and-mrp.md`
+> **Answer:** 2 in both the cases. In ERPNext let's have a setting called
+> Wallet-LOC-balancer.
 
+Two: the wallet is a ledger on both sides; the credit line is ERPNext's alone
+(`2026-09-07-credit-line.md`). The balancer is the company's *Wallet Credit
+Clearing* account in `customer_wallet`: the Loan's disbursement and repayment
+account, mirrored into the wallet and netting to zero after every draw and
+repayment — no separate setting was needed.
+
+## Not synced, on purpose
+
+- The **promo** bucket: store marketing credit, not money.
+- The mirror of a **credit-line draw or repayment**: ERPNext posts that row
+  itself (`Wallet Deposit` / `Wallet Withdrawal`, mode *Credit Line*) and pairs
+  it by `medusa_id`.
+- `Reservation` / `Reservation Release`: ERPNext's reserved bucket has no store
+  counterpart, so they land as a debit and a credit of the available balance.

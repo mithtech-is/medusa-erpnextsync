@@ -67,6 +67,10 @@ const SaveSchema = z.object({
     erpnext_warehouse: z.string().nullable().optional(),
     medusa_stock_location_id: z.string().nullable().optional(),
     erpnext_safety_stock: z.number().int().min(0).nullable().optional(),
+    /** Wallet and line of credit, both ways. */
+    sync_wallet: z.boolean().optional(),
+    sync_credit: z.boolean().optional(),
+    erpnext_wallet_bank_account: z.string().nullable().optional(),
     erpnext_api_key: z.string().nullable().optional(),
     erpnext_api_secret: z.string().nullable().optional(),
     request_timeout_ms: z.number().int().optional(),

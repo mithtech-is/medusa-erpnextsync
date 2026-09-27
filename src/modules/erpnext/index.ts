@@ -35,7 +35,7 @@ import {
 import { evaluateTrigger, presetCondition, validateTrigger } from "./trigger"
 import { mergeDirection, mergeEvents, mergeFieldPairs, pairUidOf } from "./pair-identity"
 import { entityRefOf, isWithinEchoWindow } from "./echo"
-import { OUTBOUND_PAUSED, OUTBOUND_PAUSED_MESSAGE, pausedResult } from "./outbound"
+import { OUTBOUND_PAUSED, OUTBOUND_PAUSED_MESSAGE, OUTBOUND_PAUSED_REASON, pausedResult } from "./outbound"
 import {
     DEFAULT_SYNC_DOCTYPES,
     PULL_VALUES,
@@ -94,6 +94,21 @@ import {
     type PricePlan,
 } from "./stock-prices"
 import {
+    CREDIT_LINE_UPDATED_EVENT,
+    LOAN_DOCTYPE,
+    WALLET_DOCTYPE,
+    WALLET_TXN_DOCTYPE,
+    compareBalances,
+    isWalletOrCreditDoctype,
+    outboundKeyFor,
+    pairFilterFor,
+    parseWalletRow,
+    planLoan,
+    planOutboundWalletRow,
+    planWalletStatus,
+    planWalletTransaction,
+} from "./wallet-sync"
+import {
     DEFAULT_PRODUCT_POLICY,
     decideProductPush,
     isLinked,
@@ -138,6 +153,8 @@ function placeholderFor(p: { path: string; type?: string; label?: string }): any
 }
 
 export const ERPNEXT_MODULE = "erpnext"
+/** The container key `@mithtech-medusa/wallet-loc` registers its module under. */
+const WALLET_MODULE_KEY = "wallet"
 
 // Doctypes whose ERPNext record is a header + a child line-items table.
 // A flat field mapping can populate the header, but not the child rows,
@@ -240,6 +257,10 @@ type SaveSettingsInput = {
     erpnext_warehouse?: string | null
     medusa_stock_location_id?: string | null
     erpnext_safety_stock?: number | null
+    /** Wallet and line of credit, both ways. */
+    sync_wallet?: boolean
+    sync_credit?: boolean
+    erpnext_wallet_bank_account?: string | null
     erpnext_api_key?: string | null
     erpnext_api_secret?: string | null
     request_timeout_ms?: number
@@ -276,6 +297,9 @@ type ActiveConfig = {
     erpnext_warehouse: string | null
     medusa_stock_location_id: string | null
     erpnext_safety_stock: number
+    sync_wallet: boolean
+    sync_credit: boolean
+    erpnext_wallet_bank_account: string | null
     auto_retry_failed: boolean
     auto_retry_max_attempts: number
     auto_retry_min_interval_minutes: number
@@ -895,6 +919,7 @@ class ErpnextModuleService extends MedusaService({
                 erpnext_setup_report: null,
                 phone_region: DEFAULT_PHONE_REGION,
                 ...pushSettingsView(null),
+                ...walletSettingsView(null),
                 medusa_product_policy: DEFAULT_PRODUCT_POLICY,
                 request_timeout_ms: DEFAULT_TIMEOUT_MS,
                 auto_retry_failed: true,
@@ -935,6 +960,7 @@ class ErpnextModuleService extends MedusaService({
             phone_region: phoneRegionOf(row),
             ...pushSettingsView(row),
             ...stockSettingsView(row),
+            ...walletSettingsView(row),
             request_timeout_ms: row.request_timeout_ms,
             auto_retry_failed: row.auto_retry_failed,
             auto_retry_max_attempts: row.auto_retry_max_attempts,
@@ -998,6 +1024,11 @@ class ErpnextModuleService extends MedusaService({
         }
         if (input.sync_stock !== undefined) patch.sync_stock = Boolean(input.sync_stock)
         if (input.sync_prices !== undefined) patch.sync_prices = Boolean(input.sync_prices)
+        if (input.sync_wallet !== undefined) patch.sync_wallet = Boolean(input.sync_wallet)
+        if (input.sync_credit !== undefined) patch.sync_credit = Boolean(input.sync_credit)
+        if ("erpnext_wallet_bank_account" in input) {
+            patch.erpnext_wallet_bank_account = String(input.erpnext_wallet_bank_account ?? "").trim() || null
+        }
         if (input.erpnext_safety_stock !== undefined) {
             patch.erpnext_safety_stock = Math.max(0, Math.floor(Number(input.erpnext_safety_stock) || 0))
         }
@@ -1099,6 +1130,9 @@ class ErpnextModuleService extends MedusaService({
             erpnext_warehouse: row?.erpnext_warehouse || null,
             medusa_stock_location_id: row?.medusa_stock_location_id || null,
             erpnext_safety_stock: Number(row?.erpnext_safety_stock) || 0,
+            sync_wallet: Boolean(row?.sync_wallet),
+            sync_credit: Boolean(row?.sync_credit),
+            erpnext_wallet_bank_account: row?.erpnext_wallet_bank_account || null,
             auto_retry_failed: row?.auto_retry_failed ?? true,
             auto_retry_max_attempts: row?.auto_retry_max_attempts ?? 5,
             auto_retry_min_interval_minutes:
@@ -4801,7 +4835,9 @@ class ErpnextModuleService extends MedusaService({
         ) {
             return { ok: true, status: "skipped", event_id, message: "already being applied" }
         }
-        const stockOrPrice = isStockOrPriceDoctype(body.doctype)
+        // Stock, prices, the wallet and the credit line have no mapping:
+        // each has one handler and a Settings switch.
+        const stockOrPrice = isStockOrPriceDoctype(body.doctype) || isWalletOrCreditDoctype(body.doctype)
         const mappings = stockOrPrice
             ? []
             : (await this.listEnabledPullMappings()).filter((m: any) => m.doctype === body.doctype)
@@ -4864,7 +4900,9 @@ class ErpnextModuleService extends MedusaService({
         )
         try {
             const outcome = stockOrPrice
-                ? await this.applyStockPriceEvent(body, args.scope)
+                ? isWalletOrCreditDoctype(body.doctype)
+                    ? await this.applyWalletEvent(body, args.scope)
+                    : await this.applyStockPriceEvent(body, args.scope)
                 : await this.applyFrappeEvent(body, args.scope, mappings)
             const failed = outcome.results.filter((r: any) => r.ok === false)
             const message = failed.length
@@ -5089,9 +5127,11 @@ class ErpnextModuleService extends MedusaService({
             return { ok: false, status: "failed", error, poison: true }
         }
         try {
-            const outcome = isStockOrPriceDoctype(parsed.data.doctype)
-                ? await this.applyStockPriceEvent(parsed.data, scope)
-                : await this.applyFrappeEvent(parsed.data, scope)
+            const outcome = isWalletOrCreditDoctype(parsed.data.doctype)
+                ? await this.applyWalletEvent(parsed.data, scope)
+                : isStockOrPriceDoctype(parsed.data.doctype)
+                  ? await this.applyStockPriceEvent(parsed.data, scope)
+                  : await this.applyFrappeEvent(parsed.data, scope)
             const failed = outcome.results.filter((r: any) => r.ok === false)
             const error = failed.length ? String(failed[0].error ?? "failed").slice(0, ERROR_TRUNCATE) : null
             await this.updateErpnextSyncEvents({
@@ -5123,6 +5163,7 @@ class ErpnextModuleService extends MedusaService({
      * The studio's "plan inbound". Reads links, writes nothing.
      */
     async planInbound(body: FrappeWebhookBody): Promise<any> {
+        if (isWalletOrCreditDoctype(body.doctype)) return this.planWalletInbound(body)
         // Stock and prices have no mapping; say what would move and why.
         if (isStockOrPriceDoctype(body.doctype)) {
             const cfg = await this.getActiveConfig()
@@ -5208,6 +5249,402 @@ class ErpnextModuleService extends MedusaService({
             })
         }
         return { action: "planned", mappings: plans }
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Wallet and line of credit (./wallet-sync.ts)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /** The store's wallet module, when `@mithtech-medusa/wallet-loc` is installed. */
+    private walletModule(scope: any): any | null {
+        try {
+            const w = scope?.resolve?.(WALLET_MODULE_KEY)
+            return w && typeof w.ensureWallet === "function" ? w : null
+        } catch {
+            return null
+        }
+    }
+
+    /**
+     * The ERPNext Customer for a Medusa customer: through the link table,
+     * else pushed through the store's Customer mapping (as an order does),
+     * else found by email. Null when ERPNext cannot be told about them.
+     */
+    private async erpnextCustomerFor(customer_id: string, container: any): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
+        const link = await this.remoteNameFor("customer", String(customer_id), "Customer")
+        if (link?.erpnext_name) return { ok: true, name: link.erpnext_name }
+        const rest = await this.restClient()
+        if (!rest) return { ok: false, error: "ERPNext is not configured" }
+        const customerEntity = getMedusaEntity("customer")
+        const customer = customerEntity && container ? await customerEntity.fetchById(container, String(customer_id)).catch(() => null) : null
+        if (!customer) return { ok: false, error: `customer ${customer_id} not found` }
+        return this.ensureCustomerForOrder({
+            client: rest.client,
+            cfg: rest.cfg,
+            mapping: null,
+            record: { ...customer, customer_id: customer.id, id: `wallet:${customer.id}` },
+            container,
+            keyField: "email_id",
+            keyValue: customer.email ?? null,
+            payload: {},
+        } as any)
+    }
+
+    /**
+     * The Medusa customer behind an ERPNext wallet: the pair the Wallet
+     * carries (`medusa_id` is the Medusa wallet id), else the Customer link.
+     */
+    private async medusaCustomerForErpnextWallet(scope: any, walletName: string, customerName: string, walletMedusaId?: string | null): Promise<string | null> {
+        const wallet = this.walletModule(scope)
+        if (walletMedusaId && wallet) {
+            const [row] = await wallet.listWallets({ id: walletMedusaId }, { take: 1 })
+            if (row?.customer_id) return String(row.customer_id)
+        }
+        const link = await this.findLink(WALLET_DOCTYPE, walletName, "wallet")
+        if (link?.medusa_id && wallet) {
+            const [row] = await wallet.listWallets({ id: link.medusa_id }, { take: 1 })
+            if (row?.customer_id) return String(row.customer_id)
+        }
+        const [customerLink] = await this.listErpnextLinks({ doctype: "Customer", erpnext_name: customerName, medusa_entity: "customer" } as any, { take: 1 })
+        if (customerLink?.medusa_id && !String(customerLink.medusa_id).startsWith("email:")) return String(customerLink.medusa_id)
+        return null
+    }
+
+    /**
+     * Pair the two wallets: `erpnext_link` (Wallet ↔ Medusa wallet id) here
+     * and `Wallet.medusa_id` there, written once. Returns the ERPNext
+     * wallet name.
+     */
+    private async ensureWalletPair(client: FrappeClient, customerName: string, medusaWalletId: string): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
+        const name = `WAL-${customerName}`
+        const existing = await this.findLink(WALLET_DOCTYPE, name, "wallet")
+        if (existing?.medusa_id === medusaWalletId) return { ok: true, name }
+        const read = await client.get(`/api/resource/${encodeURIComponent(WALLET_DOCTYPE)}/${encodeURIComponent(name)}`)
+        if (read.ok !== true) {
+            return { ok: false, error: read.ok === false && read.status === 404 ? `${customerName} has no wallet in ERPNext (is the company's wallet enabled?)` : (read as any).error }
+        }
+        if (String(read.data?.medusa_id ?? "") !== medusaWalletId) {
+            const put = await client.put(`/api/resource/${encodeURIComponent(WALLET_DOCTYPE)}/${encodeURIComponent(name)}`, { medusa_id: medusaWalletId })
+            if (put.ok !== true) return { ok: false, error: (put as any).error }
+        }
+        await this.recordLink({ doctype: WALLET_DOCTYPE, erpnext_name: name, medusa_entity: "wallet", medusa_id: medusaWalletId, state: "active" })
+        return { ok: true, name }
+    }
+
+    /** Does ERPNext already hold this Medusa row (by `medusa_id`)? */
+    private async walletRowPaired(client: FrappeClient, row: { id: string; idempotency_key?: string | null }): Promise<string | null> {
+        const res = await client.get(`/api/resource/${encodeURIComponent(WALLET_TXN_DOCTYPE)}`, {
+            fields: JSON.stringify(["name"]),
+            filters: JSON.stringify([...pairFilterFor(row), ["docstatus", "=", 1]]),
+            limit_page_length: "1",
+        })
+        const rows: any[] = res.ok === true && Array.isArray(res.data) ? res.data : []
+        return rows[0]?.name ? String(rows[0].name) : null
+    }
+
+    /**
+     * One Medusa wallet row → ERPNext. Idempotent: linked or paired rows
+     * are skipped; ERPNext replays a repeated key without posting.
+     */
+    async pushWalletTransaction(scope: any, tx: any): Promise<{ ok: boolean; status: "success" | "skipped" | "failed"; reason?: string; name?: string }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync || !cfg.sync_wallet) return { ok: true, status: "skipped", reason: "wallet sync is off" }
+        if (OUTBOUND_PAUSED) return { ok: true, status: "skipped", reason: OUTBOUND_PAUSED_REASON }
+        const parsed = parseWalletRow(tx)
+        if (parsed.ok === false) return { ok: false, status: "failed", reason: `not a wallet row: ${parsed.message}` }
+        const row = parsed.row
+        const event_id = `medusa:wallet_transaction:${row.id}`
+        const link = await this.findLink(WALLET_TXN_DOCTYPE, outboundKeyFor(row), "wallet_transaction")
+        if (link?.erpnext_name) return { ok: true, status: "skipped", reason: `already ${link.erpnext_name}`, name: link.erpnext_name }
+        const quick = planOutboundWalletRow({ row, customer: "", company: null, link: null, paired: false, bank_account: null, posting_date: "" })
+        if (quick.action === "skip") return { ok: true, status: "skipped", reason: quick.reason }
+
+        const rest = await this.restClient()
+        if (!rest) return { ok: true, status: "skipped", reason: "not-configured" }
+        const attempt = async (): Promise<{ ok: boolean; status: "success" | "skipped" | "failed"; reason?: string; name?: string }> => {
+            const customer = await this.erpnextCustomerFor(row.customer_id, scope)
+            if (customer.ok === false) return { ok: false, status: "failed", reason: customer.error }
+            const pair = await this.ensureWalletPair(rest.client, customer.name, row.wallet_id)
+            if (pair.ok === false) return { ok: false, status: "failed", reason: pair.error }
+            const paired = await this.walletRowPaired(rest.client, row)
+            if (paired) {
+                await this.recordLink({ doctype: WALLET_TXN_DOCTYPE, erpnext_name: paired, medusa_entity: "wallet_transaction", medusa_id: outboundKeyFor(row), state: "active" })
+                return { ok: true, status: "skipped", reason: `ERPNext already holds it as ${paired}`, name: paired }
+            }
+            const plan = planOutboundWalletRow({
+                row,
+                customer: customer.name,
+                company: (await this.pushDefaults(rest.client)).company ?? null,
+                link: null,
+                paired: false,
+                bank_account: cfg.erpnext_wallet_bank_account,
+                posting_date: formatInZone(row.created_at ? new Date(row.created_at) : new Date(), await this.siteTimezone(), false),
+            })
+            if (plan.action === "skip") return { ok: true, status: "skipped", reason: plan.reason }
+            let name: string
+            if (plan.action === "deposit_document") {
+                const res = await rest.client.post(`/api/resource/${encodeURIComponent("Wallet Deposit")}`, plan.body)
+                if (res.ok !== true) return { ok: false, status: "failed", reason: (res as any).error }
+                name = String(res.data?.wallet_transaction_ref ?? res.data?.name ?? "")
+                if (!res.data?.wallet_transaction_ref) {
+                    const again = await this.walletRowPaired(rest.client, row)
+                    if (again) name = again
+                }
+            } else {
+                const res = await rest.client.post(`/api/method/${plan.method}`, plan.params)
+                if (res.ok !== true) return { ok: false, status: "failed", reason: (res as any).error }
+                name = String(res.data?.wallet_transaction ?? "")
+            }
+            if (!name) return { ok: false, status: "failed", reason: "ERPNext answered without a Wallet Transaction name" }
+            await this.recordLink({ doctype: WALLET_TXN_DOCTYPE, erpnext_name: name, medusa_entity: "wallet_transaction", medusa_id: outboundKeyFor(row), state: "active" })
+            return { ok: true, status: "success", name }
+        }
+        let result: { ok: boolean; status: "success" | "skipped" | "failed"; reason?: string; name?: string }
+        try {
+            result = await attempt()
+        } catch (err: any) {
+            result = { ok: false, status: "failed", reason: describeError(err) }
+        }
+        await this.upsertEventRow(
+            { event: "wallet_transaction.created", event_id, data: { wallet_transaction: row } },
+            {
+                status: result.status,
+                last_error: result.ok ? (result.status === "skipped" ? result.reason ?? null : null) : (result.reason ?? "failed").slice(0, ERROR_TRUNCATE),
+                target_url: cfg.erpnext_url,
+                mapping_id: null,
+                action: result.status === "success" ? "created" : "skipped",
+            },
+        )
+        return result
+    }
+
+    /**
+     * Every main-bucket wallet row not yet paired with ERPNext, oldest
+     * first, so a debit never overtakes the credit that funds it. The job
+     * runs it every five minutes; the wallet subscriber runs it for one
+     * customer right after a movement.
+     */
+    async sweepWalletTransactions(scope: any, args: { customer_id?: string | null; limit?: number } = {}): Promise<{ skipped?: string; scanned: number; pushed: number; failed: number; notes: string[] }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync || !cfg.sync_wallet) return { skipped: "off", scanned: 0, pushed: 0, failed: 0, notes: [] }
+        const wallet = this.walletModule(scope)
+        if (!wallet) return { skipped: "wallet module not installed", scanned: 0, pushed: 0, failed: 0, notes: [] }
+        const limit = Math.max(1, Math.min(500, args.limit ?? 200))
+        const rows: any[] = await wallet.listWalletTransactions(
+            { bucket: "main", ...(args.customer_id ? { customer_id: args.customer_id } : {}) },
+            { take: limit, order: { created_at: "ASC" } },
+        )
+        let scanned = 0
+        let pushed = 0
+        let failed = 0
+        const notes: string[] = []
+        const stalled = new Set<string>()
+        for (const row of rows) {
+            if (stalled.has(String(row.customer_id))) continue
+            scanned += 1
+            const out = await this.pushWalletTransaction(scope, row)
+            if (out.status === "success") pushed += 1
+            else if (out.status === "failed") {
+                failed += 1
+                notes.push(`${row.id}: ${out.reason}`)
+                // Rows are ordered; a failure holds the customer's later rows
+                // back so a debit cannot land before the credit it needs.
+                stalled.add(String(row.customer_id))
+            }
+        }
+        return { scanned, pushed, failed, notes: notes.slice(0, 20) }
+    }
+
+    /**
+     * An ERPNext wallet or credit event: a submitted Wallet Transaction is
+     * applied to the Medusa wallet, a Wallet status change freezes or
+     * unfreezes, a Loan change is announced on the event bus.
+     */
+    private async applyWalletEvent(body: FrappeWebhookBody, scope: any): Promise<{ via: "frappe"; event: string; results: any[] }> {
+        const cfg = await this.getActiveConfig()
+        const results: any[] = []
+        const wallet = this.walletModule(scope)
+        if (body.doctype === LOAN_DOCTYPE) {
+            if (!cfg.sync_credit) results.push({ ok: true, action: "skipped", reason: "credit sync is off in Settings" })
+            else results.push(await this.applyLoanEvent(body, scope))
+            return { via: "frappe", event: body.event, results }
+        }
+        if (!cfg.sync_wallet) {
+            results.push({ ok: true, action: "skipped", reason: "wallet sync is off in Settings" })
+            return { via: "frappe", event: body.event, results }
+        }
+        if (!wallet) {
+            results.push({ ok: false, error: "the wallet module (@mithtech-medusa/wallet-loc) is not installed on this store" })
+            return { via: "frappe", event: body.event, results }
+        }
+        if (body.doctype === WALLET_DOCTYPE) {
+            const plan = planWalletStatus(body.doc)
+            if (plan.action === "skip") {
+                results.push({ ok: true, action: "skipped", reason: plan.reason })
+                return { via: "frappe", event: body.event, results }
+            }
+            const customer_id = await this.medusaCustomerForErpnextWallet(scope, plan.wallet, plan.customer, plan.medusa_id)
+            if (!customer_id) {
+                results.push({ ok: true, action: "skipped", reason: `${plan.wallet} is not paired with a store customer` })
+                return { via: "frappe", event: body.event, results }
+            }
+            try {
+                const out = plan.action === "freeze" ? await wallet.freezeWallet(customer_id) : await wallet.unfreezeWallet(customer_id)
+                results.push({ ok: true, action: plan.action === "freeze" ? "frozen" : "unfrozen", entity: "wallet", id: out?.id ?? customer_id })
+            } catch (err: any) {
+                results.push({ ok: false, error: describeError(err) })
+            }
+            return { via: "frappe", event: body.event, results }
+        }
+        // Wallet Transaction
+        const name = String(body.doc?.name ?? body.name)
+        const link = await this.findLink(WALLET_TXN_DOCTYPE, name, "wallet_transaction")
+        const plan = planWalletTransaction({ event: body.event, doc: body.doc, link })
+        if (plan.action === "skip") {
+            results.push({ ok: true, action: "skipped", reason: plan.reason })
+            return { via: "frappe", event: body.event, results }
+        }
+        const customer_id = await this.medusaCustomerForErpnextWallet(scope, plan.wallet, plan.customer, null)
+        if (!customer_id) {
+            results.push({ ok: true, action: "skipped", reason: `${plan.wallet} is not paired with a store customer; nothing applied` })
+            return { via: "frappe", event: body.event, results }
+        }
+        try {
+            if (plan.action === "credit") {
+                const tx = await wallet.credit({
+                    customer_id,
+                    amount_minor: plan.amount_minor,
+                    kind: plan.kind,
+                    reference_type: "manual",
+                    reference_id: name,
+                    idempotency_key: plan.idempotency_key,
+                    note: plan.note,
+                    metadata: plan.metadata,
+                })
+                await this.recordLink({ doctype: WALLET_TXN_DOCTYPE, erpnext_name: name, medusa_entity: "wallet_transaction", medusa_id: String(tx.id), state: "active" })
+                results.push({ ok: true, action: "created", entity: "wallet_transaction", id: tx.id })
+            } else {
+                const out = await wallet.debit({
+                    customer_id,
+                    amount_minor: plan.amount_minor,
+                    kind: plan.kind,
+                    reference_type: "manual",
+                    reference_id: name,
+                    idempotency_key: plan.idempotency_key,
+                    note: plan.note,
+                    metadata: plan.metadata,
+                })
+                if (out.ok === false) {
+                    results.push({ ok: false, error: `debit refused: ${out.reason}${out.short_by_minor ? ` (short by ${out.short_by_minor} minor units)` : ""}` })
+                } else {
+                    await this.recordLink({ doctype: WALLET_TXN_DOCTYPE, erpnext_name: name, medusa_entity: "wallet_transaction", medusa_id: String(out.transaction_id), state: "active" })
+                    results.push({ ok: true, action: "created", entity: "wallet_transaction", id: out.transaction_id })
+                }
+            }
+        } catch (err: any) {
+            results.push({ ok: false, error: describeError(err) })
+        }
+        return { via: "frappe", event: body.event, results }
+    }
+
+    /** A customer's Loan changed: pair it, stamp it, and tell the store. */
+    private async applyLoanEvent(body: FrappeWebhookBody, scope: any): Promise<any> {
+        const plan = planLoan(body.doc)
+        if (plan.action === "skip") return { ok: true, action: "skipped", reason: plan.reason }
+        const [customerLink] = await this.listErpnextLinks({ doctype: "Customer", erpnext_name: plan.customer, medusa_entity: "customer" } as any, { take: 1 })
+        const customer_id = customerLink?.medusa_id && !String(customerLink.medusa_id).startsWith("email:") ? String(customerLink.medusa_id) : null
+        if (!customer_id) return { ok: true, action: "skipped", reason: `${plan.customer} is not a store customer` }
+        await this.recordLink({ doctype: LOAN_DOCTYPE, erpnext_name: plan.loan, medusa_entity: "credit_line", medusa_id: customer_id, state: body.event === "on_cancel" ? "drafted" : "active" })
+        if (!body.doc?.medusa_id && body.event !== "on_cancel") {
+            const rest = await this.restClient()
+            if (rest) await rest.client.put(`/api/resource/${encodeURIComponent(LOAN_DOCTYPE)}/${encodeURIComponent(plan.loan)}`, { medusa_id: customer_id }).catch(() => null)
+        }
+        try {
+            const bus: any = scope?.resolve?.(Modules.EVENT_BUS)
+            await bus?.emit?.({ name: CREDIT_LINE_UPDATED_EVENT, data: { customer_id, erpnext_customer: plan.customer, event: body.event, ...plan.summary } })
+        } catch (err: any) {
+            return { ok: true, action: "updated", entity: "credit_line", id: customer_id, note: `event not emitted: ${describeError(err)}` }
+        }
+        return { ok: true, action: "updated", entity: "credit_line", id: customer_id }
+    }
+
+    /** What a wallet or credit webhook WOULD do. Reads links, writes nothing. */
+    private async planWalletInbound(body: FrappeWebhookBody): Promise<any> {
+        const cfg = await this.getActiveConfig()
+        if (body.doctype === LOAN_DOCTYPE) {
+            if (!cfg.sync_credit) return { action: "skipped", reason: "credit sync is off in Settings" }
+            const plan = planLoan(body.doc)
+            return plan.action === "skip" ? { action: "skipped", reason: plan.reason } : { action: "announce", event: CREDIT_LINE_UPDATED_EVENT, ...plan }
+        }
+        if (!cfg.sync_wallet) return { action: "skipped", reason: "wallet sync is off in Settings" }
+        if (body.doctype === WALLET_DOCTYPE) {
+            const plan = planWalletStatus(body.doc)
+            return plan.action === "skip" ? { action: "skipped", reason: plan.reason } : plan
+        }
+        const name = String(body.doc?.name ?? body.name)
+        const plan = planWalletTransaction({ event: body.event, doc: body.doc, link: await this.findLink(WALLET_TXN_DOCTYPE, name, "wallet_transaction") })
+        return plan.action === "skip" ? { action: "skipped", reason: plan.reason } : plan
+    }
+
+    /**
+     * Do the paired wallets agree? For every paired wallet, the Medusa main
+     * balance against ERPNext's available balance, allowing for rows still
+     * to be pushed. Drift is reported on the Events tab, never corrected:
+     * ERPNext's figure is authoritative, and the correction is an
+     * Adjustment posted there, which then syncs down.
+     */
+    async reconcileWallets(scope: any): Promise<{ skipped?: string; checked: number; equal: number; lagging: number; drift: number; notes: string[] }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync || !cfg.sync_wallet) return { skipped: "off", checked: 0, equal: 0, lagging: 0, drift: 0, notes: [] }
+        const wallet = this.walletModule(scope)
+        const rest = await this.restClient()
+        if (!wallet || !rest) return { skipped: !wallet ? "wallet module not installed" : "not-configured", checked: 0, equal: 0, lagging: 0, drift: 0, notes: [] }
+        let checked = 0
+        let equal = 0
+        let lagging = 0
+        let drift = 0
+        const notes: string[] = []
+        for (let offset = 0; ; offset += 200) {
+            const links: any[] = await this.listErpnextLinks({ doctype: WALLET_DOCTYPE, medusa_entity: "wallet", state: "active" } as any, { take: 200, skip: offset })
+            if (!links.length) break
+            for (const link of links) {
+                const [mine] = await wallet.listWallets({ id: link.medusa_id }, { take: 1 })
+                if (!mine) continue
+                const theirs = await rest.client.get(`/api/resource/${encodeURIComponent(WALLET_DOCTYPE)}/${encodeURIComponent(String(link.erpnext_name))}`)
+                if (theirs.ok !== true) {
+                    notes.push(`${link.erpnext_name}: ${(theirs as any).error}`)
+                    continue
+                }
+                checked += 1
+                const pendingRows: any[] = await wallet.listWalletTransactions({ wallet_id: mine.id, bucket: "main" }, { take: 500, order: { created_at: "ASC" } })
+                let pending = 0
+                for (const r of pendingRows) {
+                    const key = outboundKeyFor(r)
+                    if (String(r.idempotency_key ?? "").startsWith("erpnext:")) continue
+                    const l = await this.findLink(WALLET_TXN_DOCTYPE, key, "wallet_transaction")
+                    if (l) continue
+                    const source = String(r.metadata?.source ?? "")
+                    if ((source === "credit_line_draw" && r.direction === "credit") || source === "credit_line_repayment") continue
+                    pending += (r.direction === "credit" ? 1 : -1) * Number(r.amount_minor)
+                }
+                const cmp = compareBalances({
+                    medusa_main_minor: Number(mine.balance_minor),
+                    erpnext_available_minor: Math.round(Number(theirs.data?.balance_available ?? 0) * 100),
+                    pending_outbound_minor: pending,
+                })
+                if (cmp.state === "equal") equal += 1
+                else if (cmp.state === "lagging") lagging += 1
+                else {
+                    drift += 1
+                    await this.upsertInboundEventRow(
+                        { event: "wallet.drift", event_id: `wallet-drift:${link.erpnext_name}:${new Date().toISOString().slice(0, 13)}`, data: { wallet: link.erpnext_name, medusa_wallet_id: mine.id, medusa_main_minor: Number(mine.balance_minor), erpnext_available_minor: Math.round(Number(theirs.data?.balance_available ?? 0) * 100), delta_minor: cmp.delta_minor } },
+                        { status: "drift_detected", last_error: `ERPNext shows ${cmp.delta_minor} minor units more than the store; ERPNext is authoritative — post an Adjustment there`, action: "drift" },
+                    )
+                }
+            }
+        }
+        return { checked, equal, lagging, drift, notes: notes.slice(0, 20) }
     }
 
     private async findLink(doctype: string, erpnext_name: string, medusa_entity: string): Promise<any | null> {
@@ -5324,6 +5761,7 @@ class ErpnextModuleService extends MedusaService({
             previous: cfg.erpnext_setup_report,
             stock: cfg.sync_stock && cfg.erpnext_warehouse ? { warehouse: cfg.erpnext_warehouse } : null,
             prices: cfg.sync_prices && sellingList ? { priceList: sellingList } : null,
+            wallet: cfg.sync_wallet ? { credit: cfg.sync_credit } : null,
             secondaries: (await this.listEnabledPullMappings()).flatMap((m: any) =>
                 normalizeSecondaryDoctypes(m.secondary_doctypes, m.doctype).map((s) => s.doctype),
             ),
@@ -5586,6 +6024,15 @@ function pushSettingsView(row: any) {
     const out: Record<string, string | null> = {}
     for (const key of PUSH_SETTING_KEYS) out[key] = row?.[key] ?? null
     return out
+}
+
+/** Wallet and credit line, as the settings page shows them. */
+function walletSettingsView(row: any) {
+    return {
+        sync_wallet: Boolean(row?.sync_wallet),
+        sync_credit: Boolean(row?.sync_credit),
+        erpnext_wallet_bank_account: row?.erpnext_wallet_bank_account ?? null,
+    }
 }
 
 /** Stock and prices, as the settings page shows them. */

@@ -190,6 +190,56 @@ A product with several variants and no variant carrying the Item code as
 its SKU is skipped ("no variant for Item"); give the right variant that
 SKU.
 
+## Wallet and line of credit
+
+Needs the wallet plugin on the store and ERPNext's `customer_wallet` app.
+Switch on under Settings → *Wallet and line of credit* and run Set up
+ERPNext again: it adds `Wallet Transaction on_submit` and `Wallet on_update`
+(both with `doc.origin != "Medusa"`, so nothing this store wrote comes
+back) and, with the credit switch, `Loan on_update` / `on_submit` /
+`on_cancel` for customers' loans.
+
+- **Store → ERPNext.** Every main-bucket wallet row (promo never travels)
+  is posted once through `customer_wallet.api.wallet.credit` / `debit`,
+  keyed on the row's idempotency key, `origin: Medusa`, `medusa_id: <row
+  id>`. A deposit with a bank UTR becomes a `Wallet Deposit` document when
+  the bank account is named in Settings. A wallet event or an order
+  pushes that customer's rows at once; the 5-minute sweep pushes the rest,
+  oldest first, and a failed row holds that customer's later rows so a
+  debit never lands before the credit that funds it. Each push is a row
+  on the Events tab (`wallet_transaction.created`). On demand:
+
+```
+POST /admin/erpnext/wallet/sweep        { "customer_id": "cus_…" }   # or {} for everyone
+```
+
+- **ERPNext → store.** A submitted Wallet Transaction lands on the
+  customer's wallet keyed `erpnext:wt:<name>` (Deposit → deposit credit,
+  Withdrawal → withdrawal debit, Buy Settlement → order debit, Fee, Adjustment,
+  Reversal → refund…), Frozen / Active freezes or unfreezes. The wallet
+  must be paired: the sync stamps the store's wallet id on
+  `Wallet.medusa_id` the first time it pushes for that customer; until
+  then an ERPNext row for that wallet is skipped and the row says so.
+- **The line of credit** is ERPNext's. A Loan webhook pairs the Loan with
+  the customer (`Loan.medusa_id`) and emits `erpnext.credit_line.updated`
+  so the wallet plugin refreshes its cached limits; nothing else is kept
+  here. Draws and repayments made at checkout are ERPNext's own rows and
+  are never posted again.
+- **When the balances disagree**, ERPNext is right. The hourly reconcile
+  compares each paired wallet's main balance with `Wallet.balance_available`,
+  allowing for rows still to push (`lagging`), and writes a `wallet.drift`
+  row on the Events tab for the rest. Post an Adjustment in ERPNext; it
+  syncs down. On demand:
+
+```
+POST /admin/erpnext/wallet/reconcile
+```
+
+Rehearse the seam against a live site with `npm run rehearsal`
+(`ERPNEXT_URL`, `ERPNEXT_API_KEY`, `ERPNEXT_API_SECRET`,
+`ERPNEXT_TEST_CUSTOMER`); it posts and reverses movements, draws on and
+repays the customer's line, and cleans up the lending documents it made.
+
 ## The catalogue
 
 ERPNext owns it. The rules:

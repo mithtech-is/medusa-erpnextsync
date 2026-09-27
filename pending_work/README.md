@@ -39,8 +39,8 @@ The working order is:
 
 | File | Waiting on |
 |---|---|
-| `2026-09-04-wallet-sync.md` | the wallet applications being built separately |
-| `2026-09-07-credit-line.md` | the credit-line applications being built separately |
+| `2026-09-04-wallet-sync.md` | decided and built (2026-09-27) — the file records the seam |
+| `2026-09-07-credit-line.md` | decided and built (2026-09-27) — the file records the seam |
 | `2026-09-04-pricing-rules-and-mrp.md` | decided — MRP is removed entirely |
 | `2026-09-04-variant-attributes.md` | decided — options, attributes, barcode/UOM/brand |
 | `2026-09-04-inbound-price-path.md` | Q1–Q3 (target price list decided) |
@@ -57,7 +57,8 @@ The working order is:
 | `2026-09-14-store-payments-and-gateway-settlement.md` | Phase 2 — orders, invoices, payments over REST |
 | `2026-09-26-phase-2-push-over-rest.md` | Phase 2 — what the paused push has to restore, the seams ready for it, the questions |
 
-Wallet and credit line are a different kind of pending: they are not waiting
-on a decision so much as on two applications that do not exist yet. Their
-files record what the connector will need from those applications, so the
-seam can be got right while the schema is still soft.
+Wallet and credit line were waiting on two applications that now exist:
+`customer_wallet` on ERPNext (wallet DocTypes, the line of credit on Frappe
+`lending`) and `@mithtech-medusa/wallet-loc` on the store. Both syncs are
+built (`src/modules/erpnext/wallet-sync.ts`); their files stay as the record
+of the seam and of the decisions taken.
