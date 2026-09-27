@@ -3,7 +3,7 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## 0.5.0 — unreleased
+## 0.5.0 — 2026-09-27
 
 - **A sync may span several DocTypes.** A mapping keeps its main DocType and may name secondary
   ones with how each is tied to the main document: a Link field on it (`Sales Invoice.customer`)
