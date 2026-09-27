@@ -13,6 +13,7 @@ import { ERPNEXT_MODULE } from "../../../../../modules/erpnext"
  *   {
  *     ok: boolean,
  *     fields: Array<{ fieldname, label, fieldtype, reqd, options, ... }>,
+ *     filled_by_push: string[],   // mandatory fields the push fills itself
  *     message?: string
  *   }
  *
@@ -32,7 +33,8 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
             res.status(502).json(result)
             return
         }
-        res.json(result)
+        const filled_by_push = await erpnext.transportFilledFor(name).catch(() => [])
+        res.json({ ...result, filled_by_push })
     } catch (err: any) {
         res.status(500).json({
             ok: false,

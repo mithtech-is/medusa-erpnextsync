@@ -3335,6 +3335,13 @@ class ErpnextModuleService extends MedusaService({
         return _countryCache.map.get(wanted) ?? null
     }
 
+    /** The mandatory fields of a doctype the push fills on its own, so the
+     *  editor's "Required in ERPNext" panel agrees with the rehearsal. */
+    async transportFilledFor(doctype: string): Promise<string[]> {
+        const rest = await this.restClient()
+        return Array.from(transportFilledFields(doctype, rest ? await this.pushDefaults(rest.client) : {}))
+    }
+
     /** A Sales Taxes and Charges Template's rows, cached for an hour. */
     private async templateTaxes(client: FrappeClient, name: string | null | undefined): Promise<any[]> {
         if (!name) return []

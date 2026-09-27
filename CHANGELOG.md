@@ -3,6 +3,13 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.4.1 — unreleased
+
+- The mapping editor's "Required in ERPNext" panel no longer lists the mandatory fields the push
+  fills itself (a Customer's name and type, a Sales Order's party, dates, currency and lines, the
+  terms text from a `tc_name` pair), so it agrees with the rehearsal. `GET /admin/erpnext/doctypes/:name`
+  returns them as `filled_by_push`.
+
 ## 0.4.0 — 2026-09-27
 
 **Stock and prices, ERPNext → Medusa.** ERPNext owns both; nothing is written back.

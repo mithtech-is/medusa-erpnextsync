@@ -3122,6 +3122,9 @@ const MappingEditor: React.FC<{
   const [doctypes, setDoctypes] = useState<string[]>([])
   const [doctypeSearch, setDoctypeSearch] = useState("")
   const [doctypeFields, setDoctypeFields] = useState<DoctypeField[]>([])
+  /** Mandatory fields the push fills itself (a Customer's name, a Sales
+   *  Order's dates and lines); not the operator's to map. */
+  const [filledByPush, setFilledByPush] = useState<string[]>([])
   const [draft, setDraft] = useState<Partial<Mapping>>({
     name: "",
     description: "",
@@ -3220,6 +3223,7 @@ const MappingEditor: React.FC<{
       )
       const body = await res.json()
       setDoctypeFields(body.fields ?? [])
+      setFilledByPush(Array.isArray(body.filled_by_push) ? body.filled_by_push : [])
     } catch (e: any) {
       setDoctypeFields([])
       setError(`could not load fields for ${name}: ${e?.message}`)
@@ -3914,6 +3918,13 @@ const MappingEditor: React.FC<{
         doctype={draft.doctype ?? ""}
         erpRequired={doctypeFields
           .filter((f) => f.reqd && !f.fetch_from && !f.default)
+          // The push fills these itself, and renders the terms text from a
+          // tc_name pair — the same rule the rehearsal applies.
+          .filter(
+            (f) =>
+              !filledByPush.includes(f.fieldname) &&
+              !(f.fieldname === "terms" && (draft.field_mappings ?? []).some((p: any) => p?.erpnext_field === "tc_name")),
+          )
           .map((f) => ({ name: f.fieldname, label: f.label || f.fieldname }))}
         medusaRequired={medusaFields
           .filter((f) => f.required)
