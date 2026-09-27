@@ -219,3 +219,28 @@ export function resolveProductsDoctype(
     if (list?.length) return list[0].doctype
     return DEFAULT_CATALOGUE_DOCTYPE
 }
+
+/**
+ * The selection list, derived from the syncs: every mapping with a pull
+ * leg puts its DocType under selection, and its own choice of mode
+ * (allow: new documents start blank; deny: they start on Both) rides
+ * along. Two syncs on one DocType that disagree resolve to allow — the
+ * conservative side, since deny switches every existing document on at
+ * the first setup. Push-only syncs need no field and no webhooks.
+ */
+export function deriveSyncDoctypes(
+    mappings: Array<{ doctype?: string | null; direction?: string | null; selection_mode?: string | null }>,
+): SyncDoctype[] {
+    const modes = new Map<string, SyncMode>()
+    for (const m of mappings ?? []) {
+        const doctype = String(m?.doctype ?? "").trim()
+        const direction = String(m?.direction ?? "both").toLowerCase()
+        if (!doctype || direction === "push") continue
+        const mode: SyncMode = String(m?.selection_mode ?? "").toLowerCase() === "deny" ? "deny" : "allow"
+        const seen = modes.get(doctype)
+        modes.set(doctype, seen === undefined ? mode : seen === "deny" && mode === "deny" ? "deny" : "allow")
+    }
+    return Array.from(modes.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([doctype, mode]) => ({ doctype, mode }))
+}

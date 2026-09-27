@@ -5,6 +5,7 @@ import {
     DIRECTION_MEDUSA_TO_ERPNEXT,
     allowsPull,
     allowsPush,
+    deriveSyncDoctypes,
     effectiveDirection,
     isSyncDoctype,
     normalizeSyncDoctypes,
@@ -159,5 +160,30 @@ describe("what the hourly reconcile does with a linked document", () => {
         expect(reconcileDecision(null)).toBe("draft")
         expect(reconcileDecision(undefined)).toBe("draft")
         expect(reconcileDecision(DIRECTION_MEDUSA_TO_ERPNEXT)).toBe("owned")
+    })
+})
+
+describe("deriveSyncDoctypes", () => {
+    it("puts every DocType a sync pulls from under selection, with the sync's mode, sorted", () => {
+        expect(
+            deriveSyncDoctypes([
+                { doctype: "Item", direction: "pull", selection_mode: "deny" },
+                { doctype: "Customer", direction: "both", selection_mode: null },
+                { doctype: "Sales Order", direction: "push", selection_mode: "deny" },
+            ]),
+        ).toEqual([
+            { doctype: "Customer", mode: "allow" },
+            { doctype: "Item", mode: "deny" },
+        ])
+    })
+    it("resolves two syncs on one DocType that disagree to allow, and ignores blanks", () => {
+        expect(
+            deriveSyncDoctypes([
+                { doctype: "Item", direction: "pull", selection_mode: "deny" },
+                { doctype: "Item", direction: "both", selection_mode: "allow" },
+                { doctype: "", direction: "pull" },
+            ]),
+        ).toEqual([{ doctype: "Item", mode: "allow" }])
+        expect(deriveSyncDoctypes([])).toEqual([])
     })
 })

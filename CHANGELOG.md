@@ -5,6 +5,13 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
 
 ## 0.4.1 — unreleased
 
+- **Selection moves onto the sync.** Which DocTypes get the `Sync to Medusa` field and webhooks,
+  and whether a new document starts blank (allow list) or on Both (deny list), is set on each sync
+  in the Mappings editor (`selection_mode`, migration `20260927101530` carries today's modes over).
+  Settings shows the derived list read-only; "Add a doctype" is gone. Every save or delete of a
+  sync recomputes the list, so Set up ERPNext and the pull filter follow the Mappings page.
+- DocType pickers ask ERPNext for up to 5000 DocTypes (was 2000), so a site with many apps shows all
+  of them; the Set up ERPNext report is readable in dark mode.
 - The mapping editor's "Required in ERPNext" panel no longer lists the mandatory fields the push
   fills itself (a Customer's name and type, a Sales Order's party, dates, currency and lines, the
   terms text from a `tc_name` pair), so it agrees with the rehearsal. `GET /admin/erpnext/doctypes/:name`

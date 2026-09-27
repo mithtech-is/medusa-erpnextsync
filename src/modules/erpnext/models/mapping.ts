@@ -172,6 +172,15 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
      *  create-only, so an existing record is never overwritten. */
     allow_update: model.boolean().default(true),
 
+    /**
+     * How the `medusa_sync` field on this DocType treats a NEW document
+     * when this sync pulls: "allow" — it starts blank and somebody picks
+     * the few to sync; "deny" — it starts on Both and somebody blanks
+     * the exemptions. The selection list under Settings is derived from
+     * the syncs (see selection.ts, deriveSyncDoctypes).
+     */
+    selection_mode: model.text().nullable(),
+
     /** User id of the admin who last saved this row. */
     updated_by_user_id: model.text().nullable(),
 

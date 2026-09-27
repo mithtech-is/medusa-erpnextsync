@@ -31,7 +31,8 @@ needed. Do it in this order; nothing here is run by the plugin on its own.
 ## In the plugin (Settings)
 
 4. ERPNext URL, API key and secret, Medusa public URL (`https://splendax.com`'s backend).
-   Selection doctypes: `Item`, allow. **Set up ERPNext**: field + two Webhooks, and once
+   The Catalogue sync (Item, pull) puts `Item` under selection as an allow list — set on the sync
+   itself. **Set up ERPNext**: field + two Webhooks, and once
    stock/prices are on, five more.
 5. **Pushing to ERPNext**: Company, selling price list, customer group, territory, shipping
    account (e.g. "Freight and Forwarding Charges - <abbr>"), taxes template (e.g.

@@ -230,9 +230,11 @@ const SettingsTab: React.FC<{
   const [enableSync, setEnableSync] = useState(view.enable_sync)
   const [url, setUrl] = useState(view.erpnext_url ?? "")
   const [publicUrl, setPublicUrl] = useState(view.medusa_public_url ?? "")
+  /** Derived from the syncs (each pull sync names its DocType and mode);
+   *  shown here so Set up ERPNext says what it will touch. */
   const [syncDoctypes, setSyncDoctypes] = useState<
     Array<{ doctype: string; mode: "allow" | "deny" }>
-  >(view.sync_doctypes?.length ? view.sync_doctypes : [{ doctype: "Item", mode: "allow" }])
+  >(view.sync_doctypes ?? [])
   // Secret fields. Empty = leave-as-is, null sentinel = clear,
   // value = update. Mirrors how Medusa's own settings pages behave.
   const [frappeWebhookSecret, setFrappeWebhookSecret] = useState("")
@@ -306,9 +308,7 @@ const SettingsTab: React.FC<{
     setEnableSync(view.enable_sync)
     setUrl(view.erpnext_url ?? "")
     setPublicUrl(view.medusa_public_url ?? "")
-    setSyncDoctypes(
-      view.sync_doctypes?.length ? view.sync_doctypes : [{ doctype: "Item", mode: "allow" }],
-    )
+    setSyncDoctypes(view.sync_doctypes ?? [])
     setFrappeWebhookSecret("")
     setApiKey("")
     setApiSecret("")
@@ -356,9 +356,6 @@ const SettingsTab: React.FC<{
         enable_sync: enableSync,
         erpnext_url: url.trim() || null,
         medusa_public_url: publicUrl.trim() || null,
-        sync_doctypes: syncDoctypes
-          .filter((d) => d.doctype.trim())
-          .map((d) => ({ doctype: d.doctype.trim(), mode: d.mode })),
         request_timeout_ms: timeoutMs,
         auto_retry_failed: autoRetry,
         auto_retry_max_attempts: retryMax,
@@ -465,8 +462,8 @@ const SettingsTab: React.FC<{
     ? "Set the ERPNext URL first"
     : !(view.erpnext_api_key_masked || apiKey)
       ? "Set the API key and secret first (System Manager)"
-      : !syncDoctypes.some((d) => d.doctype.trim())
-        ? "Add at least one doctype"
+      : !syncDoctypes.length
+        ? "Add a sync that pulls from ERPNext first (Mappings)"
         : null
 
   const ping = async () => {
@@ -651,74 +648,38 @@ const SettingsTab: React.FC<{
 
       <section className="rounded border border-ui-border-base p-4">
         <div className="mb-3 flex items-center justify-between">
-          <Heading level="h2">Selection and ERPNext setup</Heading>
-          <Button
-            size="small"
-            variant="secondary"
-            onClick={() => setSyncDoctypes([...syncDoctypes, { doctype: "", mode: "allow" }])}
-          >
-            <Plus /> Add a doctype
-          </Button>
+          <Heading level="h2">ERPNext setup</Heading>
         </div>
         <Text size="small" className="text-ui-fg-subtle mb-3">
-          Every doctype listed here gets a <strong>Sync to Medusa</strong>{" "}
+          Every DocType a sync pulls from gets a <strong>Sync to Medusa</strong>{" "}
           field — blank, ERPNext → Medusa, Medusa → ERPNext or Both — and
-          two webhooks. A document moves only the way its field says, and
-          never wider than its mapping allows; clearing the field or
-          deleting the document drafts its product.{" "}
-          <strong>Allow list</strong>: new documents start blank — set the
-          few to sync. <strong>Deny list</strong>: new documents start on
-          Both — blank the exemptions; the first setup puts every existing
-          document on Both too. Changing the mode later affects new
-          documents only.
+          two webhooks; stock and prices add theirs when switched on. Which
+          DocTypes, and whether a new document starts blank (allow list) or
+          on Both (deny list), is set on each sync under <strong>Mappings</strong>.
+          Press Set up ERPNext after adding or changing a sync.
         </Text>
-        <div className="space-y-2">
-          {syncDoctypes.map((row, i) => (
-            <div key={i} className="grid grid-cols-1 items-end gap-2 md:grid-cols-[1fr_220px_auto]">
-              <div>
-                <Label>DocType</Label>
-                <Input
-                  value={row.doctype}
-                  onChange={(e) =>
-                    setSyncDoctypes(
-                      syncDoctypes.map((r, j) => (j === i ? { ...r, doctype: e.target.value } : r)),
-                    )
-                  }
-                  placeholder="Item"
-                />
-              </div>
-              <div>
-                <Label>Mode</Label>
-                <Select
-                  value={row.mode}
-                  onValueChange={(v) =>
-                    setSyncDoctypes(
-                      syncDoctypes.map((r, j) =>
-                        j === i ? { ...r, mode: v as "allow" | "deny" } : r,
-                      ),
-                    )
-                  }
-                >
-                  <Select.Trigger>
-                    <Select.Value />
-                  </Select.Trigger>
-                  <Select.Content>
-                    <Select.Item value="allow">Allow list — default blank</Select.Item>
-                    <Select.Item value="deny">Deny list — default Both</Select.Item>
-                  </Select.Content>
-                </Select>
-              </div>
-              <Button
-                size="small"
-                variant="transparent"
-                disabled={syncDoctypes.length <= 1}
-                onClick={() => setSyncDoctypes(syncDoctypes.filter((_, j) => j !== i))}
-              >
-                <Trash />
-              </Button>
-            </div>
-          ))}
-        </div>
+        {syncDoctypes.length ? (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-ui-fg-subtle">
+                <th className="py-1 pr-2">DocType</th>
+                <th className="py-1">New documents</th>
+              </tr>
+            </thead>
+            <tbody>
+              {syncDoctypes.map((row) => (
+                <tr key={row.doctype}>
+                  <td className="py-1 pr-2 font-mono">{row.doctype}</td>
+                  <td className="py-1">{row.mode === "deny" ? "start on Both (deny list)" : "start blank (allow list)"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <Text size="small" className="text-ui-fg-subtle">
+            No sync pulls from ERPNext yet, so nothing needs the field. Add one under Mappings.
+          </Text>
+        )}
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <Button
             onClick={setupErpnext}
@@ -744,7 +705,7 @@ const SettingsTab: React.FC<{
           return (
             <div
               className={`mt-3 rounded border px-3 py-2 ${
-                shown.ok ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"
+                shown.ok ? "border-ui-tag-green-border bg-ui-tag-green-bg text-ui-fg-base" : "border-ui-tag-red-border bg-ui-tag-red-bg text-ui-fg-base"
               }`}
             >
               {shown.message && <Text size="small">{shown.message}</Text>}
@@ -1199,7 +1160,7 @@ const PullTab: React.FC = () => {
     try {
       const url = search
         ? `/admin/erpnext/doctypes?search=${encodeURIComponent(search)}&limit=200`
-        : `/admin/erpnext/doctypes?limit=2000`
+        : `/admin/erpnext/doctypes?limit=5000`
       const res = await fetch(url, { credentials: "include" })
       const body = await res.json()
       if (!res.ok || body?.ok === false) {
@@ -3181,7 +3142,7 @@ const MappingEditor: React.FC<{
       // per-entity recommendations below are never truncated out.
       const url = search
         ? `/admin/erpnext/doctypes?search=${encodeURIComponent(search)}&limit=200`
-        : `/admin/erpnext/doctypes?limit=2000`
+        : `/admin/erpnext/doctypes?limit=5000`
       const res = await fetch(url, { credentials: "include" })
       const body = await res.json()
       if (!res.ok || body?.ok === false) {
@@ -3636,6 +3597,24 @@ const MappingEditor: React.FC<{
           <Text className="mt-1 text-xs text-ui-fg-subtle">
             {DIRECTION_HELP[(draft.direction ?? "both") as Direction]}
           </Text>
+          {(draft.direction ?? "both") !== "push" && (
+            <div className="mt-2">
+              <Label>New ERPNext documents</Label>
+              <select
+                className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
+                value={(draft as any).selection_mode === "deny" ? "deny" : "allow"}
+                onChange={(e) => setDraft((d) => ({ ...d, selection_mode: e.target.value as any }))}
+              >
+                <option value="allow">Start blank — somebody picks the few to sync (allow list)</option>
+                <option value="deny">Start on Both — somebody blanks the exemptions (deny list)</option>
+              </select>
+              <Text className="mt-1 text-xs text-ui-fg-subtle">
+                Set up ERPNext puts a <strong>Sync to Medusa</strong> field and two webhooks on{" "}
+                {draft.doctype || "this DocType"}; this is what a new document starts with. Deny also puts
+                every existing document on Both at the first setup. Run Set up ERPNext (Settings) after saving.
+              </Text>
+            </div>
+          )}
         </div>
         <div className="col-span-2">
           <Label>Description</Label>

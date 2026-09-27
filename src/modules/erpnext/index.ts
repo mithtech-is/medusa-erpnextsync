@@ -40,13 +40,14 @@ import {
     DEFAULT_SYNC_DOCTYPES,
     PULL_VALUES,
     SELECTION_FIELD,
+    deriveSyncDoctypes,
     isSyncDoctype,
     normalizeSyncDoctypes,
     pushAllowedByRecord,
     reconcileDecision,
     resolveProductsDoctype,
-    withSelectionFilter,
     type SyncDoctype,
+    withSelectionFilter,
 } from "./selection"
 import { FrappeWebhookBody, frappeEventId, planFrappeEvent, supersededBy } from "./frappe-webhook"
 import { makeFrappeClient, type FrappeClient } from "./frappe-client"
@@ -1461,7 +1462,9 @@ class ErpnextModuleService extends MedusaService({
         if (!cfg.erpnext_url || !apiCreds) {
             return { ok: false, message: "erpnext_url / api credentials not configured" }
         }
-        const limit = Math.max(1, Math.min(2000, options.limit ?? 500))
+        // A site with several apps carries well over two thousand DocTypes;
+        // the pickers ask for all of them and search narrows client-side.
+        const limit = Math.max(1, Math.min(5000, options.limit ?? 500))
         const filters: any[] = []
         if (!options.include_single) {
             filters.push(["issingle", "=", 0])
@@ -2044,6 +2047,8 @@ class ErpnextModuleService extends MedusaService({
         skip_unchanged?: boolean
         allow_create?: boolean
         allow_update?: boolean
+        /** allow | deny — how a new document on this DocType starts. */
+        selection_mode?: "allow" | "deny" | null
         updated_by_user_id?: string | null
         /**
          * Set only by applyMappingConfig, when this save is ERPNext's copy
@@ -2125,6 +2130,8 @@ class ErpnextModuleService extends MedusaService({
             skip_unchanged: input.skip_unchanged ?? false,
             allow_create: input.allow_create ?? true,
             allow_update: input.allow_update ?? true,
+            selection_mode:
+                input.selection_mode === "deny" ? "deny" : input.selection_mode === "allow" ? "allow" : null,
             updated_by_user_id: input.updated_by_user_id ?? null,
             // Set by the gate above when ERPNext switched on a mapping this
             // side has not rehearsed. Undefined on an ordinary save, and
@@ -2168,6 +2175,7 @@ class ErpnextModuleService extends MedusaService({
                         : {}),
                 },
             ])
+            await this.syncSelectionFromMappings()
             return updated
         }
         const twin = await this.findMappingByPair(patch.medusa_entity, patch.doctype)
@@ -2200,12 +2208,31 @@ class ErpnextModuleService extends MedusaService({
                     version: Number(twin.version ?? 1) + 1,
                 },
             ])
+            await this.syncSelectionFromMappings()
             return { ...folded, merged_into: twin.id }
         }
         const [created] = await this.createErpnextMappings([
             { ...patch, mapping_uid: pair, version: 1 },
         ])
+        await this.syncSelectionFromMappings()
         return created
+    }
+
+    /**
+     * The selection list is the syncs' doing: recompute it from every
+     * mapping and write it to Settings when it changed, so Set up ERPNext
+     * and the pull filter read what the Mappings page shows.
+     */
+    async syncSelectionFromMappings(): Promise<SyncDoctype[]> {
+        const mappings: any[] = await this.listErpnextMappings({}, { take: 1000 })
+        const derived = deriveSyncDoctypes(mappings)
+        const row: any = await this.findSettingsRow()
+        const current = normalizeSyncDoctypes(row?.sync_doctypes)
+        const same =
+            current.length === derived.length &&
+            current.every((c, i) => c.doctype === derived[i].doctype && c.mode === derived[i].mode)
+        if (row && !same) await this.updateErpnextSettings([{ id: row.id, sync_doctypes: derived as any }])
+        return derived
     }
 
 
@@ -2310,6 +2337,7 @@ class ErpnextModuleService extends MedusaService({
         // What the mapping correlated stays on the synced records, in the
         // link table and in the event log.
         await this.deleteErpnextMappings([id])
+        await this.syncSelectionFromMappings()
         return { ok: true, id }
     }
 
