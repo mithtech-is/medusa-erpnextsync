@@ -1,6 +1,6 @@
 # Production checklist (erp.splendax.com ↔ splendax.com)
 
-> **Done 2026-09-27:** Splendx `4a45806` (plugin 0.4.0) is live on medusplendax; settings, Set up
+> **Done 2026-09-27:** Splendx `15deecd` (plugin 0.5.0; earlier `4a45806` = 0.4.0) is live on medusplendax; settings, Set up
 > ERPNext (field + 7 Webhooks), the three mappings (Catalogue pull, Customers push, Orders push)
 > rehearsed and enabled; stock from "Stores - SGPL" to the Bengaluru location, prices from
 > Standard Selling. Production ERPNext had no custom mandatory fields and no SO/SI server scripts.
