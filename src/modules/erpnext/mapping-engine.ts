@@ -116,6 +116,9 @@ export type MappingFieldPair = {
      *  product published, tagged with its source, put in a sales channel.
      *  `erpnext_field` may be empty on such a pair. */
     constant_pull?: unknown
+    /** The ERPNext DocType this pair targets when the sync spans several;
+     *  absent means the mapping's main DocType (secondary-doctypes.ts). */
+    erpnext_doctype?: string
     /** When true, a missing source value short-circuits the whole
      *  mapping (caller skips with `required_missing` reason). When
      *  false (default), the target field is simply omitted. */

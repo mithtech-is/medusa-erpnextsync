@@ -2125,6 +2125,15 @@ type FieldPair = {
   default_push?: unknown
   default_pull?: unknown
   required?: boolean
+  /** The DocType this pair targets when the sync spans several; absent = the main one. */
+  erpnext_doctype?: string
+}
+
+/** A DocType that hangs off the main one, and how it is tied to it. */
+type SecondaryDoctype = {
+  doctype: string
+  link_kind: "field" | "dynamic_links"
+  link_field?: string | null
 }
 
 type Mapping = {
@@ -3030,7 +3039,12 @@ const MappingList: React.FC<{
                     )}
                   </td>
                   <td className="p-2">{m.medusa_entity}</td>
-                  <td className="p-2">{m.doctype}</td>
+                  <td className="p-2">
+                    {m.doctype}
+                    {Array.isArray((m as any).secondary_doctypes) && (m as any).secondary_doctypes.length
+                      ? ` + ${(m as any).secondary_doctypes.map((s: any) => s.doctype).filter(Boolean).join(", ")}`
+                      : ""}
+                  </td>
                   <td className="p-2">{m.direction}</td>
                   <td className="p-2">{m.field_mappings?.length ?? 0}</td>
                   <td className="p-2 text-xs text-ui-fg-subtle">
@@ -3194,7 +3208,29 @@ const MappingEditor: React.FC<{
   const activeEntity = useMemo(
     () => entities.find((e) => e.key === draft.medusa_entity) ?? null,
     [entities, draft.medusa_entity],
-  )
+  )  /** Field meta per secondary DocType, loaded when one is named. */
+  const [fieldsByDoctype, setFieldsByDoctype] = useState<Record<string, DoctypeField[]>>({})
+  const ensureFieldsFor = async (name: string) => {
+    if (!name || fieldsByDoctype[name]) return
+    try {
+      const res = await fetch(`/admin/erpnext/doctypes/${encodeURIComponent(name)}`, { credentials: "include" })
+      const body = await res.json()
+      setFieldsByDoctype((m) => ({ ...m, [name]: body.fields ?? [] }))
+    } catch {
+      setFieldsByDoctype((m) => ({ ...m, [name]: [] }))
+    }
+  }
+  const secondaryDoctypes: SecondaryDoctype[] = Array.isArray((draft as any).secondary_doctypes)
+    ? (draft as any).secondary_doctypes
+    : []
+  useEffect(() => {
+    for (const s of secondaryDoctypes) if (s.doctype) void ensureFieldsFor(s.doctype)
+  }, [secondaryDoctypes.map((s) => s.doctype).join("|")])
+  const setSecondaries = (next: SecondaryDoctype[]) => setDraft((d) => ({ ...d, secondary_doctypes: next }))
+  const doctypeChoices = [draft.doctype ?? "", ...secondaryDoctypes.map((s) => s.doctype)].filter(Boolean)
+  const fieldsFor = (dt: string | undefined) =>
+    !dt || dt === (draft.doctype ?? "") ? doctypeFields : fieldsByDoctype[dt] ?? []
+
 
   /**
    * Every field the entity really has, not just the ones `registry.ts`
@@ -3747,6 +3783,109 @@ const MappingEditor: React.FC<{
           />
         </div>
 
+        <div className="col-span-2 rounded border border-ui-border-base p-3">
+          <div className="mb-1 flex items-center justify-between">
+            <Label>More DocTypes in this sync</Label>
+            <Button
+              size="small"
+              variant="secondary"
+              disabled={!draft.doctype}
+              onClick={() => setSecondaries([...secondaryDoctypes, { doctype: "", link_kind: "field", link_field: "" }])}
+            >
+              <Plus /> Add a DocType
+            </Button>
+          </div>
+          <Text className="mb-2 text-xs text-ui-fg-subtle">
+            A {draft.doctype || "main"} document can carry documents of other DocTypes with it: a
+            Contact or Address tied through its <em>Links</em> table, or a document that names the{" "}
+            {draft.doctype || "main"} in a Link field. Each field pair below then picks which DocType
+            it targets. The main document is written first; each linked one is found through the link,
+            or created with it set. A change to a linked document in ERPNext comes back as a change to
+            the main one.
+          </Text>
+          {secondaryDoctypes.length === 0 && (
+            <Text className="text-xs text-ui-fg-subtle">Just {draft.doctype || "the main DocType"}.</Text>
+          )}
+          <div className="space-y-2">
+            {secondaryDoctypes.map((sec, i) => {
+              const linkFields = (fieldsByDoctype[sec.doctype] ?? []).filter((f) => f.fieldtype === "Link")
+              const toMain = linkFields.filter((f) => (f.options ?? "") === (draft.doctype ?? ""))
+              const hasLinksTable = (fieldsByDoctype[sec.doctype] ?? []).some((f) => f.fieldname === "links" && f.fieldtype === "Table")
+              return (
+                <div key={i} className="grid grid-cols-1 items-end gap-2 md:grid-cols-[1fr_220px_1fr_auto]">
+                  <div>
+                    <Label>DocType</Label>
+                    <Input
+                      list="erpnext-secondary-doctypes"
+                      value={sec.doctype}
+                      placeholder="Contact"
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setSecondaries(secondaryDoctypes.map((s, j) => (j === i ? { ...s, doctype: v } : s)))
+                        if (doctypes.includes(v)) void ensureFieldsFor(v)
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <Label>Tied to {draft.doctype || "the main one"} by</Label>
+                    <select
+                      className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
+                      value={sec.link_kind}
+                      onChange={(e) =>
+                        setSecondaries(secondaryDoctypes.map((s, j) => (j === i ? { ...s, link_kind: e.target.value as any } : s)))
+                      }
+                    >
+                      <option value="field">a Link field on it</option>
+                      <option value="dynamic_links">its Links table{hasLinksTable ? "" : " (none seen)"}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <Label>Link field</Label>
+                    <select
+                      className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm disabled:opacity-50"
+                      disabled={sec.link_kind !== "field"}
+                      value={sec.link_field ?? ""}
+                      onChange={(e) =>
+                        setSecondaries(secondaryDoctypes.map((s, j) => (j === i ? { ...s, link_field: e.target.value } : s)))
+                      }
+                    >
+                      <option value="">{sec.link_kind === "field" ? "Pick the Link field…" : "— Links table —"}</option>
+                      {(toMain.length ? toMain : linkFields).map((f) => (
+                        <option key={f.fieldname} value={f.fieldname}>
+                          {f.label} · {f.fieldname}
+                          {f.options ? ` → ${f.options}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <Button
+                    size="small"
+                    variant="transparent"
+                    onClick={() => {
+                      const gone = sec.doctype
+                      setSecondaries(secondaryDoctypes.filter((_, j) => j !== i))
+                      // Its pairs go back to the main DocType rather than dangling.
+                      setDraft((d) => ({
+                        ...d,
+                        field_mappings: (d.field_mappings ?? []).map((p) =>
+                          p.erpnext_doctype === gone ? { ...p, erpnext_doctype: undefined, erpnext_field: "" } : p,
+                        ),
+                      }))
+                    }}
+                  >
+                    <Trash />
+                  </Button>
+                </div>
+              )
+            })}
+          </div>
+          <datalist id="erpnext-secondary-doctypes">
+            {doctypes.map((d) => (
+              <option key={d} value={d} />
+            ))}
+          </datalist>
+        </div>
+
         <div className="col-span-2">
           <Label>Push events (comma separated)</Label>
           <Input
@@ -3928,6 +4067,34 @@ const MappingEditor: React.FC<{
           }))
         }
       />
+      {secondaryDoctypes
+        .filter((sec) => sec.doctype)
+        .map((sec) => {
+          const linkField = sec.link_kind === "dynamic_links" ? "links" : sec.link_field ?? ""
+          return (
+            <RequiredBoxes
+              key={`req-${sec.doctype}`}
+              direction="push"
+              pairs={(draft.field_mappings ?? []).filter((p) => p.erpnext_doctype === sec.doctype) as FieldPair[]}
+              doctype={sec.doctype}
+              erpRequired={(fieldsByDoctype[sec.doctype] ?? [])
+                .filter((f) => f.reqd && !f.fetch_from && !f.default && f.fieldname !== linkField)
+                .map((f) => ({ name: f.fieldname, label: f.label || f.fieldname }))}
+              medusaRequired={[]}
+              storeKnown={false}
+              onAddErp={(names) =>
+                setDraft((d) => ({
+                  ...d,
+                  field_mappings: [
+                    ...(d.field_mappings ?? []),
+                    ...names.map((n) => ({ medusa_path: "", erpnext_field: n, erpnext_doctype: sec.doctype })),
+                  ],
+                }))
+              }
+              onAddMedusa={() => {}}
+            />
+          )
+        })}
 
       {/* Field-pair mapper */}
       <div className="mt-6">
@@ -4112,10 +4279,13 @@ const MappingEditor: React.FC<{
             pair={pair}
             entity={activeEntity}
             medusaFields={medusaFields}
-            fields={doctypeFields}
+            fields={fieldsFor(pair.erpnext_doctype)}
+            doctypeChoices={doctypeChoices}
+            mainDoctype={draft.doctype ?? ""}
             annotation={annotations[pair.erpnext_field]}
             mappingDirection={(draft.direction ?? "both") as Direction}
             takenErpnextFields={(draft.field_mappings ?? [])
+              .filter((p) => (p.erpnext_doctype || draft.doctype || "") === (pair.erpnext_doctype || draft.doctype || ""))
               .map((p) => p.erpnext_field)
               .filter(Boolean)}
             constantOptions={constantOptions}
@@ -4174,6 +4344,9 @@ const FieldPairRow: React.FC<{
   entity: MedusaEntity | null
   medusaFields: DiscoveredField[]
   fields: DoctypeField[]
+  /** The main DocType and the secondary ones; a choice per pair when there are several. */
+  doctypeChoices?: string[]
+  mainDoctype?: string
   annotation?: AutofillAnnotation
   mappingDirection: Direction
   takenErpnextFields: string[]
@@ -4186,6 +4359,8 @@ const FieldPairRow: React.FC<{
   entity,
   medusaFields,
   fields,
+  doctypeChoices = [],
+  mainDoctype = "",
   annotation,
   mappingDirection,
   takenErpnextFields,
@@ -4353,6 +4528,23 @@ const FieldPairRow: React.FC<{
         </div>
 
         <div className="flex-1">
+          {doctypeChoices.length > 1 && (
+            <select
+              className="mb-1 w-full rounded border bg-ui-bg-base px-2 py-1 text-xs"
+              value={pair.erpnext_doctype || mainDoctype}
+              onChange={(e) => {
+                const dt = e.target.value
+                // A field belongs to one DocType; changing the DocType clears it.
+                onChange({ erpnext_doctype: dt === mainDoctype ? undefined : dt, erpnext_field: "" })
+              }}
+            >
+              {doctypeChoices.map((dt) => (
+                <option key={dt} value={dt}>
+                  {dt === mainDoctype ? `${dt} (main)` : dt}
+                </option>
+              ))}
+            </select>
+          )}
           <select
             className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
             value={pair.erpnext_field}

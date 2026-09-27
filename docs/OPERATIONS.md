@@ -107,6 +107,16 @@ DocType; the pair is its identity and there is one per pair.
   Submit the order first, then the invoice; ERPNext refuses the other way
   round.
 
+### Several DocTypes in one sync
+
+Under **More DocTypes in this sync** name the DocType and how it is tied
+to the main one (a Link field on it, or its Links table). Field pairs
+then carry a DocType choice. Set up ERPNext adds an unconditioned
+`on_update` webhook for each secondary DocType, so a change there comes
+back as a change to the main document. A secondary write that fails
+fails the whole row, and the retry redoes the main write too (idempotent
+through the link table).
+
 ### Trying one before trusting it
 
 ```

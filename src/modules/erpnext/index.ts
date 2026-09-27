@@ -73,6 +73,16 @@ import { runErpnextSetup, type SetupReport } from "./erpnext-setup"
 import { mergeDoctypeMeta } from "./doctype-meta"
 import { SUPERSEDED_MESSAGE, supersededByLater } from "./retry-policy"
 import {
+    linkFieldFilled,
+    mainNameFromSecondaryDoc,
+    normalizeSecondaryDoctypes,
+    pairsForDoctype,
+    pairsForPull,
+    secondaryLinkPayload,
+    secondaryLookupFilters,
+    type SecondaryDoctype,
+} from "./secondary-doctypes"
+import {
     ITEM_PRICE_DOCTYPE,
     STOCK_DOCTYPES,
     isStockOrPriceDoctype,
@@ -166,6 +176,8 @@ type PushContext = {
     keyField: string
     keyValue: string | null
     container?: any
+    /** One payload per secondary DocType with something to send. */
+    secondaries?: Array<{ sec: SecondaryDoctype; payload: Record<string, any> }>
 }
 
 type PushOutcome =
@@ -2049,6 +2061,8 @@ class ErpnextModuleService extends MedusaService({
         allow_update?: boolean
         /** allow | deny — how a new document on this DocType starts. */
         selection_mode?: "allow" | "deny" | null
+        /** DocTypes that hang off the main one, and how each is tied to it. */
+        secondary_doctypes?: any[] | null
         updated_by_user_id?: string | null
         /**
          * Set only by applyMappingConfig, when this save is ERPNext's copy
@@ -2132,6 +2146,7 @@ class ErpnextModuleService extends MedusaService({
             allow_update: input.allow_update ?? true,
             selection_mode:
                 input.selection_mode === "deny" ? "deny" : input.selection_mode === "allow" ? "allow" : null,
+            secondary_doctypes: normalizeSecondaryDoctypes(input.secondary_doctypes, input.doctype),
             updated_by_user_id: input.updated_by_user_id ?? null,
             // Set by the gate above when ERPNext switched on a mapping this
             // side has not rehearsed. Undefined on an ordinary save, and
@@ -2709,9 +2724,12 @@ class ErpnextModuleService extends MedusaService({
         if (!record) {
             return { ok: false, message: `no ${mapping.medusa_entity} with id ${args.record_id}` }
         }
+        const mainDoctype = String(mapping.doctype)
+        const allPairs = (mapping.field_mappings ?? []) as MappingFieldPair[]
+        const secs = normalizeSecondaryDoctypes(mapping.secondary_doctypes, mainDoctype)
         const result = applyMapping({
             direction: "push",
-            fields: mapping.field_mappings as MappingFieldPair[],
+            fields: pairsForDoctype(allPairs, mainDoctype, mainDoctype),
             mappingDirection: mapping.direction as MappingDirection,
             source: record,
             options: await this.transformOptions(),
@@ -2766,9 +2784,32 @@ class ErpnextModuleService extends MedusaService({
             // way ERPNext's form does.
             const namesTerms = (mapping.field_mappings as MappingFieldPair[]).some((p) => p?.erpnext_field === "tc_name")
             if (namesTerms) filled.add("terms")
+            // Each secondary DocType has its own mandatory fields; the link
+            // the plugin sets is not the operator's to map.
+            for (const sec of secs) {
+                const secMeta = await this.getDoctypeMeta(sec.doctype)
+                if (!secMeta.ok) continue
+                const secFilled = transportFilledFields(sec.doctype, rest ? await this.pushDefaults(rest.client) : {})
+                secFilled.add(linkFieldFilled(sec))
+                const secUnmet = unmetRequired({
+                    direction: "push",
+                    fields: pairsForDoctype(allPairs, mainDoctype, sec.doctype),
+                    mappingDirection: mapping.direction as MappingDirection,
+                    required: (secMeta.fields ?? [])
+                        .filter((f) => f.reqd && !f.fetch_from && !f.default && !secFilled.has(f.fieldname))
+                        .map((f) => ({ name: f.fieldname, label: f.label })),
+                })
+                if (secUnmet.length) {
+                    warnings.push(
+                        `${sec.doctype} (linked to ${mainDoctype}) will not accept a record without ` +
+                            secUnmet.map((f) => `'${f.label || f.name}'`).join(", ") +
+                            ". Map each one on that DocType, or give it a fixed value.",
+                    )
+                }
+            }
             const unmet = unmetRequired({
                 direction: "push",
-                fields: mapping.field_mappings as MappingFieldPair[],
+                fields: pairsForDoctype(allPairs, mainDoctype, mainDoctype),
                 mappingDirection: mapping.direction as MappingDirection,
                 required: (targetMeta.fields ?? [])
                     // A field Frappe derives or defaults is not ours to send.
@@ -3085,13 +3126,36 @@ class ErpnextModuleService extends MedusaService({
             )
             return { ok: true, status: "skipped", reason: gate.reason }
         }
+        const mainDoctype = String(args.mapping.doctype)
+        const allPairs = (args.mapping.field_mappings ?? []) as MappingFieldPair[]
+        const transformOptions = await this.transformOptions()
         const transform = applyMapping({
             direction: "push",
-            fields: args.mapping.field_mappings as MappingFieldPair[],
+            fields: pairsForDoctype(allPairs, mainDoctype, mainDoctype),
             mappingDirection: args.mapping.direction as MappingDirection,
             source: args.record,
-            options: await this.transformOptions(),
+            options: transformOptions,
         })
+        // One payload per secondary DocType; an empty one sends nothing.
+        const secondaries: Array<{ sec: SecondaryDoctype; payload: Record<string, any> }> = []
+        for (const sec of normalizeSecondaryDoctypes(args.mapping.secondary_doctypes, mainDoctype)) {
+            const t = applyMapping({
+                direction: "push",
+                fields: pairsForDoctype(allPairs, mainDoctype, sec.doctype),
+                mappingDirection: args.mapping.direction as MappingDirection,
+                source: args.record,
+                options: transformOptions,
+            })
+            if (t.ok === false) {
+                const err = `${sec.doctype}: ${t.reason} (field=${t.field ?? "?"})`
+                await this.upsertEventRow(
+                    { event: args.event, event_id: args.event_id, data: args.record },
+                    { status: "failed", last_error: err, target_url: null, mapping_id: args.mapping.id },
+                )
+                return { ok: false, status: "failed", error: err }
+            }
+            if (Object.keys(t.payload ?? {}).length) secondaries.push({ sec, payload: t.payload })
+        }
         if (transform.ok === false) {
             const err = `${transform.reason} (field=${transform.field ?? "?"})`
             await this.upsertEventRow(
@@ -3132,6 +3196,7 @@ class ErpnextModuleService extends MedusaService({
                     key: keyValueStr,
                     doctype: args.mapping.doctype,
                     payload: transform.payload,
+                    ...(secondaries.length ? { secondaries: secondaries.map((s) => [s.sec.doctype, s.payload]) } : {}),
                 }),
             )
             .digest("hex")
@@ -3258,6 +3323,7 @@ class ErpnextModuleService extends MedusaService({
                 keyField: effKeyField,
                 keyValue: effKeyValue,
                 container: args.container,
+                secondaries,
             }
             let outcome: PushOutcome
             if (isDeleteEvent) {
@@ -3268,6 +3334,15 @@ class ErpnextModuleService extends MedusaService({
                 outcome = await this.pushCustomerDoc(ctx)
             } else {
                 outcome = await this.pushGenericDoc(ctx)
+            }
+            // The documents that hang off the main one, once it has a name.
+            if (outcome.ok && outcome.status === "success" && secondaries.length) {
+                if (!outcome.name) {
+                    outcome = { ...outcome, notes: [...(outcome.notes ?? []), "secondary DocTypes not written: the main document's name is unknown"] }
+                } else {
+                    const sec = await this.pushSecondaryDocs(ctx, outcome.name)
+                    outcome = sec.ok === false ? sec : { ...outcome, notes: [...(outcome.notes ?? []), ...sec.notes] }
+                }
             }
             if (outcome.ok === false) {
                 const errMsg = String(outcome.error).slice(0, ERROR_TRUNCATE)
@@ -3493,6 +3568,93 @@ class ErpnextModuleService extends MedusaService({
      * document on a selection DocType is stamped with its direction so the
      * next push finds it selected.
      */
+    /**
+     * The secondary documents of a sync, after the main one: each is found
+     * through its link to the main document (a Link field, or its Links
+     * table) and updated, or created with that link set.
+     */
+    private async pushSecondaryDocs(
+        ctx: PushContext,
+        mainName: string,
+    ): Promise<{ ok: true; notes: string[] } | { ok: false; error: string; httpStatus?: number }> {
+        const { client, mapping, record } = ctx
+        const mainDoctype = String(mapping.doctype)
+        const notes: string[] = []
+        for (const { sec, payload } of ctx.secondaries ?? []) {
+            const existing = await this.findSecondaryName(client, sec, mainDoctype, mainName)
+            if (existing && mapping.allow_update === false) {
+                notes.push(`${sec.doctype} ${existing} left alone: update not allowed by the mapping`)
+                continue
+            }
+            if (!existing && mapping.allow_create === false) {
+                notes.push(`${sec.doctype} not created: create not allowed by the mapping`)
+                continue
+            }
+            const doc = existing ? { ...payload } : { ...payload, ...secondaryLinkPayload(sec, mainDoctype, mainName) }
+            const written = await this.writeRemote(client, sec.doctype, existing, doc)
+            if (written.ok === false) return { ok: false, error: `${sec.doctype}: ${written.error}`, httpStatus: written.httpStatus }
+            if (record?.id != null) {
+                await this.recordLink({
+                    doctype: sec.doctype,
+                    erpnext_name: written.name,
+                    medusa_entity: mapping.medusa_entity,
+                    medusa_id: String(record.id),
+                    mapping_id: mapping.id,
+                    state: "active",
+                })
+            }
+            notes.push(`${sec.doctype} ${written.name} ${written.created ? "created" : "updated"}`)
+        }
+        return { ok: true, notes }
+    }
+
+    /** The name of the secondary document tied to this main one, if any. */
+    private async findSecondaryName(
+        client: FrappeClient,
+        sec: SecondaryDoctype,
+        mainDoctype: string,
+        mainName: string,
+    ): Promise<string | null> {
+        const res = await client.get(`/api/resource/${encodeURIComponent(sec.doctype)}`, {
+            filters: JSON.stringify(secondaryLookupFilters(sec, mainDoctype, mainName)),
+            fields: JSON.stringify(["name"]),
+            limit_page_length: "1",
+        })
+        const name = res.ok === true && Array.isArray(res.data) ? res.data[0]?.name : null
+        return name != null ? String(name) : null
+    }
+
+    /**
+     * The main document with its linked secondary documents laid under it
+     * by DocType name, which is how a pull reads a secondary pair
+     * (`Contact.first_name`). A DocType with no linked document reads as
+     * absent, so its pairs are skipped rather than blanked.
+     */
+    private async hydrateSecondaries(client: FrappeClient | null, mapping: any, doc: Record<string, any>): Promise<Record<string, any>> {
+        const mainDoctype = String(mapping?.doctype ?? "")
+        const secs = normalizeSecondaryDoctypes(mapping?.secondary_doctypes, mainDoctype)
+        if (!secs.length || !client || !doc?.name) return doc
+        const out: Record<string, any> = { ...doc }
+        for (const sec of secs) {
+            const name = await this.findSecondaryName(client, sec, mainDoctype, String(doc.name))
+            if (!name) continue
+            const full = await client.get(`/api/resource/${encodeURIComponent(sec.doctype)}/${encodeURIComponent(name)}`)
+            if (full.ok === true && full.data) out[sec.doctype] = full.data
+        }
+        return out
+    }
+
+    /** Pull mappings that name this DocType as a secondary one. */
+    private async mappingsWithSecondary(doctype: string): Promise<Array<{ mapping: any; sec: SecondaryDoctype }>> {
+        const mappings = await this.listEnabledPullMappings()
+        const out: Array<{ mapping: any; sec: SecondaryDoctype }> = []
+        for (const m of mappings) {
+            const sec = normalizeSecondaryDoctypes(m.secondary_doctypes, m.doctype).find((s) => s.doctype === doctype)
+            if (sec) out.push({ mapping: m, sec })
+        }
+        return out
+    }
+
     private async pushGenericDoc(ctx: PushContext): Promise<PushOutcome> {
         const { client, cfg, mapping, record } = ctx
         const doctype = String(mapping.doctype)
@@ -4355,6 +4517,7 @@ class ErpnextModuleService extends MedusaService({
         const linksToRecord: Array<{ erpnext_name: string; medusa_id: string; remote_direction: string | null }> = []
         const transformOptions = await this.transformOptions()
         const apiUser = await this.apiUserEmail()
+        const pullClient = (await this.restClient())?.client ?? null
         for (const row of rows) {
             if (row?.modified && (!maxModified || row.modified > maxModified)) {
                 maxModified = row.modified
@@ -4367,9 +4530,9 @@ class ErpnextModuleService extends MedusaService({
             }
             const transform = applyMapping({
                 direction: "pull",
-                fields: mapping.field_mappings as MappingFieldPair[],
+                fields: pairsForPull(mapping.field_mappings as MappingFieldPair[], String(mapping.doctype)),
                 mappingDirection: mapping.direction as MappingDirection,
-                source: row,
+                source: await this.hydrateSecondaries(pullClient, mapping, row),
                 options: transformOptions,
             })
             if (transform.ok === false) {
@@ -4592,6 +4755,51 @@ class ErpnextModuleService extends MedusaService({
             ? []
             : (await this.listEnabledPullMappings()).filter((m: any) => m.doctype === body.doctype)
         if (!stockOrPrice && !mappings.length) {
+            // A change on a DocType that hangs off a synced one (a Contact of
+            // a Customer): find the main document and apply it as its change.
+            const viaSecondary = await this.mappingsWithSecondary(body.doctype)
+            if (viaSecondary.length && !isOwnWrite(body.doc, await this.apiUserEmail())) {
+                const row = await this.upsertInboundEventRow(
+                    { event: eventName, event_id, data: body },
+                    { status: "pending", last_error: null },
+                )
+                try {
+                    const rest = await this.restClient()
+                    const results: any[] = []
+                    for (const { mapping, sec } of viaSecondary) {
+                        const mainName = mainNameFromSecondaryDoc(sec, String(mapping.doctype), body.doc)
+                        if (!mainName || !rest) {
+                            results.push({ mapping: mapping.name, ok: true, action: "skipped", reason: `${body.doctype} ${body.name} is not linked to a ${mapping.doctype}` })
+                            continue
+                        }
+                        const main = await rest.client.get(`/api/resource/${encodeURIComponent(String(mapping.doctype))}/${encodeURIComponent(mainName)}`)
+                        if (main.ok !== true || !main.data) {
+                            results.push({ mapping: mapping.name, ok: true, action: "skipped", reason: `${mapping.doctype} ${mainName} not found` })
+                            continue
+                        }
+                        const synthetic: FrappeWebhookBody = { event: "on_update", doctype: String(mapping.doctype), name: mainName, doc: main.data }
+                        const outcome = await this.applyFrappeEvent(synthetic, args.scope, [mapping])
+                        results.push(...outcome.results)
+                    }
+                    const failed = results.filter((r: any) => r.ok === false)
+                    const message = failed.length ? String(failed[0].error ?? "failed").slice(0, ERROR_TRUNCATE) : null
+                    await this.updateErpnextSyncEvents({
+                        id: row.id,
+                        status: failed.length ? "failed" : "success",
+                        succeeded_at: failed.length ? null : new Date(),
+                        last_error: message,
+                        action: summariseActions(results),
+                        entity_ref: entityRefOf({ results }),
+                    })
+                    return failed.length
+                        ? { ok: false, status: "failed", event_id, message: message ?? undefined, results }
+                        : { ok: true, status: "success", event_id, results }
+                } catch (err: any) {
+                    const message = describeError(err).slice(0, ERROR_TRUNCATE)
+                    await this.updateErpnextSyncEvents({ id: row.id, status: "failed", last_error: message })
+                    return { ok: false, status: "failed", event_id, message }
+                }
+            }
             const message = `no enabled pull mapping for ${body.doctype}`
             await this.upsertInboundEventRow(
                 { event: eventName, event_id, data: body },
@@ -4738,9 +4946,9 @@ class ErpnextModuleService extends MedusaService({
             }
             const transform = applyMapping({
                 direction: "pull",
-                fields: mapping.field_mappings as MappingFieldPair[],
+                fields: pairsForPull(mapping.field_mappings as MappingFieldPair[], String(mapping.doctype)),
                 mappingDirection: mapping.direction as MappingDirection,
-                source: body.doc,
+                source: await this.hydrateSecondaries((await this.restClient())?.client ?? null, mapping, body.doc),
                 options: transformOptions,
             })
             if (transform.ok === false) {
@@ -4926,9 +5134,9 @@ class ErpnextModuleService extends MedusaService({
             }
             const transform = applyMapping({
                 direction: "pull",
-                fields: mapping.field_mappings as MappingFieldPair[],
+                fields: pairsForPull(mapping.field_mappings as MappingFieldPair[], String(mapping.doctype)),
                 mappingDirection: mapping.direction as MappingDirection,
-                source: body.doc,
+                source: await this.hydrateSecondaries((await this.restClient())?.client ?? null, mapping, body.doc),
                 options: await this.transformOptions(),
             })
             if (transform.ok === false) {
@@ -5065,6 +5273,9 @@ class ErpnextModuleService extends MedusaService({
             previous: cfg.erpnext_setup_report,
             stock: cfg.sync_stock && cfg.erpnext_warehouse ? { warehouse: cfg.erpnext_warehouse } : null,
             prices: cfg.sync_prices && sellingList ? { priceList: sellingList } : null,
+            secondaries: (await this.listEnabledPullMappings()).flatMap((m: any) =>
+                normalizeSecondaryDoctypes(m.secondary_doctypes, m.doctype).map((s) => s.doctype),
+            ),
         })
         if (row) {
             await this.updateErpnextSettings([
@@ -5425,6 +5636,8 @@ function validateFieldMappings(raw: any[]): MappingFieldPair[] {
         if (r.direction && ["push", "pull", "both", "none"].includes(r.direction)) {
             pair.direction = r.direction
         }
+        const targetDoctype = text(r.erpnext_doctype)
+        if (targetDoctype) pair.erpnext_doctype = targetDoctype
         // A composite template ("{first_name} {last_name}") joins several
         // Medusa fields into one Frappe column and has no inverse. Pin it
         // to push here rather than trusting the form.
@@ -5463,6 +5676,9 @@ function uniqueFrappeFields(pairs: MappingFieldPair[], keyField: string, extra: 
     for (const p of pairs ?? []) {
         if (!p?.erpnext_field) continue
         if (String((p as any).direction ?? "").toLowerCase() === "push") continue
+        // A pair on a secondary DocType reads the linked document, not a
+        // column of this one.
+        if (String(p.erpnext_doctype ?? "").trim()) continue
         set.add(p.erpnext_field)
     }
     return Array.from(set)

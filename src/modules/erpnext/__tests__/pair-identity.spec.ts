@@ -86,3 +86,13 @@ describe("folding two mappings for one pair", () => {
         ).toBe(1)
     })
 })
+
+describe("mergeFieldPairs across DocTypes", () => {
+    it("keeps a field on a secondary DocType apart from the same field on the main one", () => {
+        const merged = mergeFieldPairs(
+            [{ medusa_path: "first_name", erpnext_field: "first_name" }],
+            [{ medusa_path: "first_name", erpnext_field: "first_name", erpnext_doctype: "Contact" }],
+        )
+        expect(merged).toHaveLength(2)
+    })
+})

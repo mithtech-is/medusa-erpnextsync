@@ -74,6 +74,25 @@ Item Price on the list), are re-read by the hourly reconcile and by every
 catalogue pull, and move only for an Item that moves ERPNext → Medusa.
 Nothing is written back.
 
+## A sync across several DocTypes
+
+A mapping keeps one main DocType — what the Medusa record *is* on the
+ERPNext side — and may name secondary DocTypes that hang off it, under
+**More DocTypes in this sync** in the editor: a Contact or an Address tied
+to a Customer through their *Links* table, or any document that names the
+main one in a Link field. Every field pair then picks which DocType it
+targets, and its field list follows.
+
+- **Push**: the main document is written first; each secondary document
+  is found through its link to the main one and updated, or created with
+  the link set. One secondary document per DocType per main document.
+- **Pull**: the linked documents are read and laid under the main one by
+  DocType name, so a pair on Contact reads `Contact.first_name`. A change
+  to a linked document in ERPNext arrives on its own webhook and is applied
+  as a change to the main document.
+- **Rehearsal** names each DocType's mandatory fields separately; the link
+  the plugin sets is never yours to map.
+
 ## Set up ERPNext
 
 One button on the Settings tab (`POST /admin/erpnext/setup`). For every

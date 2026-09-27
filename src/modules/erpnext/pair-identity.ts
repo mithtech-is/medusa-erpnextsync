@@ -41,7 +41,12 @@ export function mergeFieldPairs(
     base: MappingFieldPair[],
     extra: MappingFieldPair[],
 ): MappingFieldPair[] {
-    const keyOf = (p: MappingFieldPair) => p.erpnext_field || (p.medusa_path ? `medusa:${p.medusa_path}` : "")
+    const keyOf = (p: MappingFieldPair) =>
+        p.erpnext_field
+            ? `${String(p.erpnext_doctype ?? "").trim()}:${p.erpnext_field}`
+            : p.medusa_path
+              ? `medusa:${p.medusa_path}`
+              : ""
     const taken = new Set((base ?? []).map(keyOf).filter(Boolean))
     return [
         ...(base ?? []),

@@ -263,3 +263,21 @@ describe("stock and price webhooks", () => {
         expect(report.ok).toBe(true)
     })
 })
+
+describe("secondary DocType webhooks", () => {
+    it("get one unconditioned on_update webhook each, never for a DocType already under selection", async () => {
+        const { client, writes } = fakeClient({})
+        const report = await runErpnextSetup({
+            client,
+            doctypes: [{ doctype: "Item", mode: "allow" }],
+            publicUrl: "http://x",
+            secret: "s",
+            secondaries: ["Contact", "Item", "Contact", ""],
+        })
+        const names = report.items.filter((i) => i.kind === "webhook").map((i) => i.name)
+        expect(names).toEqual(["Medusa Sync: Item on_update", "Medusa Sync: Item on_trash", "Medusa Sync: Contact on_update"])
+        const contact = writes.find((w) => w.method === "POST" && w.body?.name === "Medusa Sync: Contact on_update")
+        expect(contact?.body?.condition).toBe("")
+        expect(contact?.body?.webhook_docevent).toBe("on_update")
+    })
+})

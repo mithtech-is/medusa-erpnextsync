@@ -3,8 +3,18 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## 0.4.1 — unreleased
+## 0.5.0 — unreleased
 
+- **A sync may span several DocTypes.** A mapping keeps its main DocType and may name secondary
+  ones with how each is tied to the main document: a Link field on it (`Sales Invoice.customer`)
+  or its Links table (Contact, Address). Each field pair picks the DocType it targets and its
+  field list follows. Pushing writes the main document, then finds each linked document through
+  the link (or creates it with the link set); pulling lays the linked documents under the main
+  one so a pair reads `Contact.first_name`; a change to a linked document in ERPNext comes back
+  as a change to the main one (Set up ERPNext adds an `on_update` webhook per secondary
+  DocType). The rehearsal checks each DocType's mandatory fields; the editor shows a required
+  panel per DocType. Columns `erpnext_mapping.secondary_doctypes` (migration `20260927120450`)
+  and `field_mappings[].erpnext_doctype`.
 - **Selection moves onto the sync.** Which DocTypes get the `Sync to Medusa` field and webhooks,
   and whether a new document starts blank (allow list) or on Both (deny list), is set on each sync
   in the Mappings editor (`selection_mode`, migration `20260927101530` carries today's modes over).

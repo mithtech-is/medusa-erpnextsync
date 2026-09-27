@@ -181,6 +181,14 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
      */
     selection_mode: model.text().nullable(),
 
+    /**
+     * DocTypes that hang off the main one in this sync, and how each is
+     * tied to it: `[{ doctype, link_kind: "field" | "dynamic_links",
+     * link_field }]`. A field pair names its DocType in `erpnext_doctype`.
+     * See secondary-doctypes.ts.
+     */
+    secondary_doctypes: model.json().nullable(),
+
     /** User id of the admin who last saved this row. */
     updated_by_user_id: model.text().nullable(),
 

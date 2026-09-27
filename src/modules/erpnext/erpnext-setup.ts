@@ -367,6 +367,10 @@ export async function runErpnextSetup(args: {
     stock?: { warehouse: string } | null
     /** Price sync is on and the selling price list is known. */
     prices?: { priceList: string } | null
+    /** DocTypes that hang off a synced one (a Customer's Contact): one
+     *  on_update webhook each, unconditioned — whether the document is
+     *  linked to a synced one is decided on arrival. */
+    secondaries?: string[] | null
 }): Promise<SetupReport> {
     const items: SetupItem[] = []
     for (const { doctype, mode } of args.doctypes) {
@@ -389,9 +393,13 @@ export async function runErpnextSetup(args: {
             )
         }
     }
+    const underSelection = new Set(args.doctypes.map((d) => d.doctype))
     const extra = [
         ...(args.stock ? buildStockWebhooks({ warehouse: args.stock.warehouse, publicUrl: args.publicUrl, secret: args.secret }) : []),
         ...(args.prices ? buildPriceWebhooks({ priceList: args.prices.priceList, publicUrl: args.publicUrl, secret: args.secret }) : []),
+        ...(args.secondaries ?? [])
+            .filter((dt, i, all) => dt && !underSelection.has(dt) && all.indexOf(dt) === i)
+            .map((dt) => buildWebhook({ doctype: dt, event: "on_update", publicUrl: args.publicUrl, secret: args.secret, condition: "" })),
     ]
     for (const desired of extra) {
         items.push(await ensureWebhook(args.client, desired, previousItem(args.previous, "webhook", String(desired.name))))
