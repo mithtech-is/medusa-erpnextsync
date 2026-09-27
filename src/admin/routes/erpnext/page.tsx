@@ -3605,9 +3605,22 @@ const MappingEditor: React.FC<{
           <select
             className="w-full rounded border bg-ui-bg-base px-2 py-1.5 text-sm"
             value={draft.direction ?? "both"}
-            onChange={(e) =>
-              setDraft((d) => ({ ...d, direction: e.target.value as any }))
-            }
+            onChange={(e) => {
+              const direction = e.target.value as any
+              setDraft((d) => ({
+                ...d,
+                direction,
+                // A pair's own direction only narrows a two-way sync; on a
+                // one-way sync it could only disagree, so it is dropped.
+                field_mappings:
+                  direction === "both"
+                    ? d.field_mappings
+                    : (d.field_mappings ?? []).map((p) => {
+                        const { direction: _pd, ...rest } = p as any
+                        return rest
+                      }),
+              }))
+            }}
           >
             <option value="push">One-way — Medusa → ERPNext</option>
             <option value="pull">One-way — ERPNext → Medusa</option>
@@ -4263,7 +4276,7 @@ const MappingEditor: React.FC<{
               <span className="ml-1 font-normal text-ui-fg-subtle">(this store)</span>
             </div>
             <div className="w-[104px] shrink-0 text-center font-normal text-ui-fg-subtle" title="→ out to ERPNext · ↔ both ways · ← in from ERPNext">
-              direction
+              {(draft.direction ?? "both") === "both" ? "direction" : "direction (set above)"}
             </div>
             <div className="flex-1">
               ERPNext · {draft.doctype || "DocType"}
@@ -4524,9 +4537,22 @@ const FieldPairRow: React.FC<{
         </div>
 
         <div className="flex w-[104px] shrink-0 justify-center gap-1">
-          {arrow("push", "→", "Only out to ERPNext")}
-          {arrow("both", "↔", "Both ways")}
-          {arrow("pull", "←", "Only in from ERPNext")}
+          {mappingDirection === "both" ? (
+            <>
+              {arrow("push", "→", "Only out to ERPNext")}
+              {arrow("both", "↔", "Both ways")}
+              {arrow("pull", "←", "Only in from ERPNext")}
+            </>
+          ) : (
+            // A one-way sync moves every pair its one way; there is nothing
+            // to choose here, so the arrow just says which way.
+            <span
+              className="inline-flex h-7 w-8 items-center justify-center rounded border border-ui-border-base bg-ui-bg-subtle text-sm text-ui-fg-subtle"
+              title={mappingDirection === "push" ? "Out to ERPNext — set by the sync direction" : "In from ERPNext — set by the sync direction"}
+            >
+              {mappingDirection === "push" ? "→" : "←"}
+            </span>
+          )}
         </div>
 
         <div className="flex-1 rounded border-l-2 border-ui-border-strong bg-ui-bg-subtle p-1" title="ERPNext side">

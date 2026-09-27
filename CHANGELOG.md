@@ -3,6 +3,11 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.5.4 — 2026-09-27
+
+- On a one-way sync the field pairs show a fixed arrow instead of a three-way choice; switching a
+  sync to one-way drops any per-pair direction, which could only have disagreed with it.
+
 ## 0.5.3 — 2026-09-27
 
 - **Customers can download ERPNext invoices** is a real switch now: when on, the Sales Invoice PDF
