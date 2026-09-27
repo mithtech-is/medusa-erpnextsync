@@ -111,7 +111,8 @@ describe("the Sales Order", () => {
     const itemCodeFor = (li: any) => codes.get(li.id) ?? null
 
     it("carries the lines, the dates in the site's timezone, and reconciles the total as shipping", () => {
-        const out = buildSalesOrderDoc({ order, customerName: "Rao Traders", itemCodeFor, addresses: { billing: "Rao Traders-Billing" }, defaults: { ...defaults, shippingAccount: "Freight - FIPL" }, has: has([]), timezone: "Asia/Kolkata" })
+        // now === the order date, so delivery is a week out from a fixed clock, not the wall clock.
+        const out = buildSalesOrderDoc({ order, customerName: "Rao Traders", itemCodeFor, addresses: { billing: "Rao Traders-Billing" }, defaults: { ...defaults, shippingAccount: "Freight - FIPL" }, has: has([]), timezone: "Asia/Kolkata", now: new Date("2026-09-26T04:30:00.000Z") })
         expect(out.ok).toBe(true)
         if (!out.ok) return
         expect(out.doc).toMatchObject({
