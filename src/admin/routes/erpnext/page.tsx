@@ -254,7 +254,7 @@ const SettingsTab: React.FC<{
   const [logRetentionDays, setLogRetentionDays] = useState(
     view.log_retention_days ?? 180,
   )
-  const [phoneRegion, setPhoneRegion] = useState(view.phone_region ?? "IN")
+  const [sendInvoice, setSendInvoice] = useState(Boolean(view.send_invoice_to_store))
   const [pushCfg, setPushCfg] = useState({
     erpnext_company: view.erpnext_company ?? "",
     erpnext_price_list: view.erpnext_price_list ?? "",
@@ -322,7 +322,7 @@ const SettingsTab: React.FC<{
     setRetryInterval(view.auto_retry_min_interval_minutes)
     setPushAllowlist(view.push_allowlist ?? "")
     setLogRetentionDays(view.log_retention_days ?? 180)
-    setPhoneRegion(view.phone_region ?? "IN")
+    setSendInvoice(Boolean(view.send_invoice_to_store))
     setPushCfg({
       erpnext_company: view.erpnext_company ?? "",
       erpnext_price_list: view.erpnext_price_list ?? "",
@@ -366,9 +366,9 @@ const SettingsTab: React.FC<{
         auto_retry_min_interval_minutes: retryInterval,
         push_allowlist: pushAllowlist.trim() || null,
         log_retention_days: Number(logRetentionDays) || 0,
-        phone_region: phoneRegion.trim().toUpperCase() || "IN",
         ...Object.fromEntries(Object.entries(pushCfg).map(([k, v]) => [k, v.trim() || null])),
         order_document: orderDocument,
+        send_invoice_to_store: sendInvoice,
         sync_stock: stockCfg.sync_stock,
         sync_prices: stockCfg.sync_prices,
         erpnext_warehouse: stockCfg.erpnext_warehouse.trim() || null,
@@ -852,27 +852,6 @@ const SettingsTab: React.FC<{
         </Text>
       </section>
 
-      <section className="rounded border border-ui-border-base p-4">
-        <Heading level="h2" className="mb-3">
-          Phone numbers
-        </Heading>
-        <div className="flex items-center gap-2">
-          <Label>Default region</Label>
-          <Input
-            className="w-24 font-mono uppercase"
-            maxLength={2}
-            value={phoneRegion}
-            onChange={(e) => setPhoneRegion(e.target.value.toUpperCase())}
-            placeholder="IN"
-          />
-        </div>
-        <Text className="mt-1 text-xs text-ui-fg-subtle">
-          The country a phone number without a country code belongs to, as
-          a two-letter code. The <code>phone</code> transform writes numbers
-          in international form (+91…); a number it cannot read is skipped,
-          never written blank.
-        </Text>
-      </section>
 
       <section className="rounded border border-ui-border-base p-4">
         <Heading level="h2" className="mb-3">
@@ -1021,30 +1000,17 @@ const SettingsTab: React.FC<{
       </section>
 
       <section className="rounded border border-ui-border-base p-4">
-        <Heading level="h2">Orders and invoices</Heading>
+        <Heading level="h2">Invoices for customers</Heading>
         <Text size="small" className="text-ui-fg-subtle mb-3">
-          What the push to ERPNext does with an order, as saved.
+          What an order becomes in ERPNext is set above under <strong>Pushing to ERPNext</strong>{" "}
+          (currently: <strong>{orderDocument}</strong>). ERPNext numbers its invoices. This
+          switch gives customers the ERPNext invoice: the PDF is fetched when the invoice is
+          raised and again once ERPNext submits it, kept in the storage set below, and served
+          only to the signed-in customer whose order it is.
         </Text>
-        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-          <Text size="small">
-            A store order becomes: <strong>{view.order_document || "Sales Order and Sales Invoice"}</strong>
-          </Text>
-          <Text size="small">
-            Invoice numbers:{" "}
-            <strong>
-              {view.invoice_numbering === "store"
-                ? `this store, ${view.store_invoice_prefix ?? "(no prefix)"}… next ${view.store_invoice_next} (not yet honoured by the push: ERPNext names its own invoices)`
-                : "ERPNext"}
-            </strong>
-          </Text>
-          <Text size="small">
-            Customers can download ERPNext invoices:{" "}
-            <strong>{view.invoice_numbering !== "store" && view.send_invoice_to_store ? "yes" : "no"}</strong>
-          </Text>
-          <Text size="small">
-            Store payments booked in ERPNext:{" "}
-            <strong>{view.record_payments ? "yes (not yet built: a Payment Entry needs a submitted invoice)" : "no"}</strong>
-          </Text>
+        <div className="flex items-center gap-2">
+          <Switch checked={sendInvoice} onCheckedChange={(v) => setSendInvoice(Boolean(v))} />
+          <Label>Customers can download ERPNext invoices</Label>
         </div>
       </section>
 

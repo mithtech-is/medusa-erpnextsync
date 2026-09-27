@@ -631,6 +631,43 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /** The stored PDF for one invoice, or null. Callers check ownership. */
+    /**
+     * Keep the customers' invoice copies current: an invoice ERPNext has
+     * since submitted (or cancelled) gets its status and PDF refreshed;
+     * one never fetched is fetched. Runs from the hourly reconcile.
+     */
+    async refreshInvoicePdfs(limit = 50): Promise<{ skipped?: string; checked: number; refreshed: number; failed: number }> {
+        const settings = await this.findSettingsRow()
+        if (!receivesErpInvoices(settings as any)) return { skipped: "off", checked: 0, refreshed: 0, failed: 0 }
+        const rest = await this.restClient()
+        if (!rest) return { skipped: "not-configured", checked: 0, refreshed: 0, failed: 0 }
+        const rows: any[] = await this.listErpnextInvoices(
+            { source: "erpnext", status: { $ne: "submitted" } } as any,
+            { take: limit, order: { created_at: "DESC" } },
+        )
+        let refreshed = 0
+        let failed = 0
+        for (const inv of rows) {
+            const doc = await rest.client.get(`/api/resource/Sales%20Invoice/${encodeURIComponent(String(inv.number))}`)
+            if (doc.ok === false) {
+                if (doc.status === 404) await this.updateErpnextInvoices([{ id: inv.id, status: "deleted" }])
+                else failed += 1
+                continue
+            }
+            const docstatus = Number(doc.data?.docstatus ?? 0)
+            const status = docstatus === 1 ? "submitted" : docstatus === 2 ? "cancelled" : "draft"
+            const changed = status !== inv.status
+            if (changed) await this.updateErpnextInvoices([{ id: inv.id, status }])
+            if (status === "cancelled") continue
+            if (changed || !inv.fetched_at) {
+                const r = await this.fetchInvoicePdf(inv.id)
+                if (r.ok) refreshed += 1
+                else failed += 1
+            }
+        }
+        return { checked: rows.length, refreshed, failed }
+    }
+
     async openInvoice(invoiceId: string) {
         const [invoice] = await this.listErpnextInvoices({ id: invoiceId }, { take: 1 })
         if (!invoice?.object_key) return null
@@ -4003,8 +4040,12 @@ class ErpnextModuleService extends MedusaService({
                 currency: order?.currency_code ? String(order.currency_code).toUpperCase() : null,
                 status: "draft",
             }
-            if (existing) await this.updateErpnextInvoices([{ id: existing.id, ...facts }])
-            else await this.createErpnextInvoices([facts])
+            const saved = existing
+                ? (await this.updateErpnextInvoices([{ id: existing.id, ...facts }]))[0]
+                : (await this.createErpnextInvoices([facts]))[0]
+            // The customer's copy: fetched now as a draft, and again by the
+            // hourly reconcile once ERPNext submits it.
+            if (saved?.id && receivesErpInvoices((await this.findSettingsRow()) as any)) await this.fetchInvoicePdf(saved.id)
         } catch (err: any) {
             console.warn("[erpnext] invoice row not recorded:", describeError(err))
         }

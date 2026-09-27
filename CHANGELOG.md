@@ -3,6 +3,17 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.5.3 — 2026-09-27
+
+- **Customers can download ERPNext invoices** is a real switch now: when on, the Sales Invoice PDF
+  is fetched from ERPNext when the invoice is raised and refreshed by the hourly reconcile once
+  ERPNext submits it (`refreshInvoicePdfs`), kept in the configured invoice storage and served to
+  the signed-in customer through the store routes. The read-only "Orders and invoices" summary is
+  gone; what an order becomes stays under Pushing to ERPNext. Store-side invoice numbering and
+  payment booking are no longer shown, since the REST push does not honour them.
+- The "Default phone region" control is gone from Settings: store phone numbers carry their country
+  code. The `phone` transform still falls back to IN for a number without one.
+
 ## 0.5.2 — 2026-09-27
 
 - **Documents tab**: one row per ERPNext document tied to a store record — DocType, the document

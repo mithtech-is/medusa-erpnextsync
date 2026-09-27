@@ -154,6 +154,14 @@ export default async function reconciliation(container: MedusaContainer) {
             err?.message,
         )
     }
+    // Customers' invoice copies: fetch the ones never fetched, refresh the
+    // ones ERPNext has since submitted.
+    try {
+        const r = await erpnext.refreshInvoicePdfs?.()
+        if (r && !r.skipped) console.log(`[erpnext-recon] invoice PDFs: checked=${r.checked} refreshed=${r.refreshed} failed=${r.failed}`)
+    } catch (err: any) {
+        console.warn("[erpnext-recon] invoice PDF refresh failed:", err?.message)
+    }
     // Stock and prices: re-read every linked Item's Bin and selling price,
     // so a delivery that never reached us is caught within the hour.
     try {
