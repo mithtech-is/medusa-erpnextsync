@@ -22,7 +22,13 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   reporting drift on the Events tab; ERPNext's figure is authoritative. Settings gain `sync_wallet`,
   `sync_credit`, `erpnext_wallet_bank_account` (migration `20260927170000`) and a section on the
   page. `npm run rehearsal` runs `rehearsal/wallet-credit.fixerp.spec.ts` against a live site.
-  Closes `pending_work/2026-09-04-wallet-sync.md` and `2026-09-07-credit-line.md`.
+  Closes `pending_work/2026-09-04-wallet-sync.md` and `2026-09-07-credit-line.md`, now under
+  `pending_work/done/` with the rehearsal that proved each.
+- The wallet rehearsal no longer cancels the lending documents it made: a draw and its repayment
+  net to zero on the Loan, and cancelling a Loan Disbursement needs cancel rights on Loan Repayment
+  Schedule the API user lacks — cancelling only the repayment left every run's draw outstanding
+  until the test line was used up. It now asserts the wallet and the line end where they began,
+  repays after a failed expectation, and prints a cleanup failure instead of swallowing it.
 
 ## 0.5.4 — 2026-09-27
 

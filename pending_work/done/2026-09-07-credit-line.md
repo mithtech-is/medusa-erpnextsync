@@ -1,7 +1,17 @@
 # Credit line sync
 
-**Status:** decided and built, 2026-09-27. The line of credit is ERPNext's;
-the store draws on it at checkout and follows it, and keeps no ledger.
+**Status:** closed 2026-09-27 — decided, built and rehearsed. The line of
+credit is ERPNext's; the store draws on it at checkout and follows it, and
+keeps no ledger. No question stays open. `npm run rehearsal` against
+`fixerp.localhost` (Loan `ACC-LOAN-2026-00014`, limit 5000) passed on
+2026-09-27: the Loan webhook body plans as an announcement, a draw of 1200
+lowers the available limit, the same key replayed draws nothing, the draw's
+own wallet row is ERPNext's (never pushed back), a repayment from the wallet
+restores the limit and replays on its key, and the wallet and the line end
+where they began. The lending documents stay, repaid: cancelling a Loan
+Disbursement needs cancel rights on *Loan Repayment Schedule* that the API
+user lacks, and a half-cancelled pair (the earlier rehearsal's cleanup)
+left each run's draw outstanding until the test line was used up.
 **Side:** both. The ERPNext side is the Frappe `lending` app through
 `customer_wallet`; the store side is `@mithtech-medusa/wallet-loc`'s
 `providers/wallet-loc-credit`.

@@ -32,15 +32,15 @@ The working order is:
 - Each file states scope, what already exists, dependencies, the phase it
   belongs to, and the questions it is waiting on.
 - This folder is tracked in git on purpose. Never add it to `.gitignore`.
-- When an item ships, delete its file in the same PR (the PR description links
-  the file's last revision).
+- When an item ships, move its file to `done/` in the same commit, with the
+  status line saying what closed it (the rehearsal that proved it, the date).
+  A file in `done/` is the record of the seam and the decisions; nothing in
+  it is still waiting.
 
 ## What is in here
 
 | File | Waiting on |
 |---|---|
-| `2026-09-04-wallet-sync.md` | decided and built (2026-09-27) — the file records the seam |
-| `2026-09-07-credit-line.md` | decided and built (2026-09-27) — the file records the seam |
 | `2026-09-04-pricing-rules-and-mrp.md` | decided — MRP is removed entirely |
 | `2026-09-04-variant-attributes.md` | decided — options, attributes, barcode/UOM/brand |
 | `2026-09-04-inbound-price-path.md` | Q1–Q3 (target price list decided) |
@@ -57,8 +57,14 @@ The working order is:
 | `2026-09-14-store-payments-and-gateway-settlement.md` | Phase 2 — orders, invoices, payments over REST |
 | `2026-09-26-phase-2-push-over-rest.md` | Phase 2 — what the paused push has to restore, the seams ready for it, the questions |
 
-Wallet and credit line were waiting on two applications that now exist:
-`customer_wallet` on ERPNext (wallet DocTypes, the line of credit on Frappe
-`lending`) and `@mithtech-medusa/wallet-loc` on the store. Both syncs are
-built (`src/modules/erpnext/wallet-sync.ts`); their files stay as the record
-of the seam and of the decisions taken.
+## Done
+
+| File | Closed by |
+|---|---|
+| `done/2026-09-04-wallet-sync.md` | wallet mirrored row for row (`src/modules/erpnext/wallet-sync.ts`); rehearsed against fixerp.localhost 2026-09-27 |
+| `done/2026-09-07-credit-line.md` | the line of credit followed, not mirrored (Loan webhook → `erpnext.credit_line.updated`); rehearsed 2026-09-27 |
+
+Both were waiting on two applications that now exist: `customer_wallet` on
+ERPNext (wallet DocTypes, the line of credit on Frappe `lending`) and
+`@mithtech-medusa/wallet-loc` on the store. The files record the seam and
+the decisions taken.

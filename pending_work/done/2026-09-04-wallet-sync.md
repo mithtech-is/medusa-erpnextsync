@@ -1,8 +1,14 @@
 # Wallet sync
 
-**Status:** decided and built, 2026-09-27 (`src/modules/erpnext/wallet-sync.ts`,
-the wallet methods on the module service, `src/subscribers/wallet-forward.ts`,
-`src/jobs/push-wallet-transactions.ts`, `rehearsal/wallet-credit.fixerp.spec.ts`).
+**Status:** closed 2026-09-27 — decided, built and rehearsed
+(`src/modules/erpnext/wallet-sync.ts`, the wallet methods on the module service,
+`src/subscribers/wallet-forward.ts`, `src/jobs/push-wallet-transactions.ts`).
+No question stays open. `npm run rehearsal` against `fixerp.localhost`
+(customer CRN-01629, wallet `WAL-CRN-01629`) passed 5/5 on 2026-09-27: id
+pairing, a pushed deposit replayed on its key and never posted twice, a Buy
+Settlement reversed by pair (a second reversal refused), an overdraw refused
+with nothing posted, ERPNext's own rows planned as store movements and the
+store's own echoes skipped, and the wallet ending where it began.
 **Side:** both. The ERPNext side is the `customer_wallet` Frappe app
 (`frappe16/apps/customer_wallet`); the store side is `@mithtech-medusa/wallet-loc`.
 

@@ -27,9 +27,17 @@ import {
  * the push makes, replayed, reversed. Inbound: the Wallet Transaction,
  * Wallet and Loan documents ERPNext holds are turned into the webhook
  * bodies Frappe would send and planned. The credit line is drawn on and
- * repaid through the app's own methods. Everything posted is cancelled
- * and deleted where ERPNext allows (a submitted Wallet Transaction is
- * append-only and stays).
+ * repaid through the app's own methods.
+ *
+ * Nothing posted is cancelled. A submitted Wallet Transaction is
+ * append-only, so the wallet is put back by reversal; a draw and its
+ * repayment net to zero on the Loan and stay as lending documents, because
+ * cancelling a Loan Disbursement needs cancel rights on Loan Repayment
+ * Schedule that the API user lacks (and the sync never needs). Cancelling
+ * only the repayment, as an earlier version did, left every rehearsal's
+ * draw outstanding and used up the test line. The last test asserts that
+ * the wallet and the line end where they began; a cleanup failure is
+ * printed, never swallowed.
  */
 const URL_ = process.env.ERPNEXT_URL
 const KEY = process.env.ERPNEXT_API_KEY
@@ -69,7 +77,7 @@ describe.skipIf(!live)("wallet and credit line against a live customer_wallet si
     const stamp = Date.now().toString(36)
     const customer = CUSTOMER!
     const walletName = `WAL-${customer}`
-    const cleanup: Array<() => Promise<void>> = []
+    const cleanup: Array<{ what: string; run: () => Promise<unknown> }> = []
     let previousMedusaId: string | null = null
     let company: string | null = null
 
@@ -81,7 +89,13 @@ describe.skipIf(!live)("wallet and credit line against a live customer_wallet si
     })
 
     afterAll(async () => {
-        for (const step of cleanup.reverse()) await step().catch(() => undefined)
+        for (const step of cleanup.reverse()) {
+            try {
+                await step.run()
+            } catch (err) {
+                console.warn(`cleanup: could not ${step.what}: ${(err as Error).message}`)
+            }
+        }
         await client.put(`/api/resource/${enc(WALLET_DOCTYPE)}/${enc(walletName)}`, { medusa_id: previousMedusaId })
     })
 
@@ -170,13 +184,17 @@ describe.skipIf(!live)("wallet and credit line against a live customer_wallet si
     })
 
     it("draws on the Loan and repays it through the app's methods; the Loan webhook announces the change", async () => {
+        const walletBefore = majorToMinor(ok(await client.get(`/api/resource/${enc(WALLET_DOCTYPE)}/${enc(walletName)}`), "read Wallet").balance_available)
         let credit = ok(await client.post(`/api/method/customer_wallet.api.credit.get_credit`, { customer }), "get_credit")
         if (!credit) {
             credit = ok(await client.post(`/api/method/customer_wallet.api.credit.open_credit_line`, { customer, limit: 5000, medusa_id: `cus_${stamp}`, origin: "Medusa" }), "open_credit_line")
             const loan = credit.name
-            cleanup.push(async () => {
-                await client.post(`/api/method/frappe.client.cancel`, { doctype: LOAN_DOCTYPE, name: loan })
-                await client.delete(`/api/resource/${enc(LOAN_DOCTYPE)}/${enc(loan)}`)
+            cleanup.push({
+                what: `cancel and delete the Loan ${loan} this rehearsal opened`,
+                run: async () => {
+                    ok(await client.post(`/api/method/frappe.client.cancel`, { doctype: LOAN_DOCTYPE, name: loan }), "cancel Loan")
+                    ok(await client.delete(`/api/resource/${enc(LOAN_DOCTYPE)}/${enc(loan)}`), "delete Loan")
+                },
             })
         }
         const loanDoc = ok(await client.get(`/api/resource/${enc(LOAN_DOCTYPE)}/${enc(credit.name)}`), "read Loan")
@@ -187,9 +205,14 @@ describe.skipIf(!live)("wallet and credit line against a live customer_wallet si
 
         const drawn = ok(await client.post(`/api/method/customer_wallet.api.credit.draw`, { customer, amount: 1200, idempotency_key: `wlc_${stamp}:credit`, medusa_id: `wlc_${stamp}:credit:draw`, origin: "Medusa" }), "draw")
         const ld = drawn.loan_disbursement.name
-        cleanup.push(async () => {
-            await client.post(`/api/method/frappe.client.cancel`, { doctype: "Loan Disbursement", name: ld })
-            await client.delete(`/api/resource/${enc("Loan Disbursement")}/${enc(ld)}`)
+        // Should an expectation below fail, the draw is still repaid from the wallet it landed in, so the line is not left used up.
+        let repaid = false
+        cleanup.push({
+            what: `repay the draw ${ld} after a failure`,
+            run: async () => {
+                if (repaid) return
+                ok(await client.post(`/api/method/customer_wallet.api.credit.repay_from_wallet`, { customer, amount: 1200, idempotency_key: `wlc_${stamp}:credit:cleanup`, medusa_id: `wlc_${stamp}:credit:cleanup`, origin: "Medusa", loan_disbursement: ld }), "repay after a failure")
+            },
         })
         expect(drawn.replayed).toBe(false)
         expect(majorToMinor(drawn.credit.available_limit_amount)).toBe(availableBefore - 120_000)
@@ -203,15 +226,15 @@ describe.skipIf(!live)("wallet and credit line against a live customer_wallet si
         const mirror: MedusaWalletRow = { id: "wtx_mirror", wallet_id: `wal_${stamp}`, customer_id: `cus_${stamp}`, direction: "credit", amount_minor: 120_000, kind: "grant_credit", bucket: "main", idempotency_key: `wlc_${stamp}:credit:draw`, metadata: { source: "credit_line_draw" } }
         expect(planOutboundWalletRow({ row: mirror, customer, company, link: null, paired: true, bank_account: null, posting_date: "2026-09-27" })).toMatchObject({ action: "skip" })
 
-        const repaid = ok(await client.post(`/api/method/customer_wallet.api.credit.repay_from_wallet`, { customer, amount: 1200, idempotency_key: `wlc_${stamp}:credit:cancel`, medusa_id: `wlc_${stamp}:credit:cancel`, origin: "Medusa", loan_disbursement: ld }), "repay")
-        for (const r of repaid.loan_repayments) {
-            cleanup.push(async () => {
-                await client.post(`/api/method/frappe.client.cancel`, { doctype: "Loan Repayment", name: r.name })
-                await client.delete(`/api/resource/${enc("Loan Repayment")}/${enc(r.name)}`)
-            })
-        }
-        expect(repaid.replayed).toBe(false)
-        expect(majorToMinor(repaid.credit.available_limit_amount)).toBe(availableBefore)
+        const repayment = ok(await client.post(`/api/method/customer_wallet.api.credit.repay_from_wallet`, { customer, amount: 1200, idempotency_key: `wlc_${stamp}:credit:cancel`, medusa_id: `wlc_${stamp}:credit:cancel`, origin: "Medusa", loan_disbursement: ld }), "repay")
+        repaid = true
+        expect(repayment.replayed).toBe(false)
+        expect(repayment.loan_repayments).toHaveLength(1)
+        expect(majorToMinor(repayment.credit.available_limit_amount)).toBe(availableBefore)
         expect(ok(await client.post(`/api/method/customer_wallet.api.credit.repay_from_wallet`, { customer, amount: 1200, idempotency_key: `wlc_${stamp}:credit:cancel`, medusa_id: `wlc_${stamp}:credit:cancel`, origin: "Medusa" }), "repay again").replayed).toBe(true)
+
+        // Both ledgers end where they began: the draw went into the wallet, the repayment came out of it.
+        expect(majorToMinor(ok(await client.get(`/api/resource/${enc(WALLET_DOCTYPE)}/${enc(walletName)}`), "read Wallet").balance_available)).toBe(walletBefore)
+        expect(majorToMinor(ok(await client.post(`/api/method/customer_wallet.api.credit.get_credit`, { customer }), "get_credit again").available_limit_amount)).toBe(availableBefore)
     })
 })
