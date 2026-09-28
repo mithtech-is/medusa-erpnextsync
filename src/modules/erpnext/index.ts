@@ -4027,6 +4027,10 @@ class ErpnextModuleService extends MedusaService({
             if (input.kind === "Billing") addresses.billing = out.name
             else addresses.shipping = out.name
         }
+        // A checkout that ships and bills to one place often records only
+        // the shipping address; without this ERPNext bills the customer's
+        // first saved address instead of the one on the order.
+        if (!addresses.billing && addresses.shipping) addresses.billing = addresses.shipping
 
         const codes = new Map<string, string | null>()
         const lineCodes = new Map<string, string | null>()

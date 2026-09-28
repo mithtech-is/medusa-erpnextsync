@@ -184,7 +184,48 @@ export type AddressInput = {
     gstin?: string | null
 }
 
+/** GST state codes (the first two digits of a GSTIN) by state name. */
+const GST_STATE_CODES: Record<string, string> = {
+    "jammu and kashmir": "01", "himachal pradesh": "02", punjab: "03", chandigarh: "04", uttarakhand: "05",
+    haryana: "06", delhi: "07", rajasthan: "08", "uttar pradesh": "09", bihar: "10", sikkim: "11",
+    "arunachal pradesh": "12", nagaland: "13", manipur: "14", mizoram: "15", tripura: "16", meghalaya: "17",
+    assam: "18", "west bengal": "19", jharkhand: "20", odisha: "21", chhattisgarh: "22", "madhya pradesh": "23",
+    gujarat: "24", "dadra and nagar haveli and daman and diu": "26", maharashtra: "27", karnataka: "29",
+    goa: "30", lakshadweep: "31", kerala: "32", "tamil nadu": "33", puducherry: "34",
+    "andaman and nicobar islands": "35", telangana: "36", "andhra pradesh": "37", ladakh: "38",
+}
+const GST_STATE_ALIASES: Record<string, string> = {
+    "nct of delhi": "delhi", "new delhi": "delhi", orissa: "odisha", pondicherry: "puducherry",
+    uttaranchal: "uttarakhand", "daman and diu": "dadra and nagar haveli and daman and diu",
+    "dadra and nagar haveli": "dadra and nagar haveli and daman and diu",
+}
+
+/**
+ * The GSTIN an address may carry. India Compliance refuses an Address
+ * whose GSTIN belongs to another state, so a GSTIN is put on an address
+ * only when its state code matches the address's state; an address whose
+ * state is not recognised keeps a GSTIN typed for it, but never borrows
+ * the customer's.
+ */
+export function gstinForAddress(
+    state: unknown,
+    own: unknown,
+    customers: unknown,
+): string | null {
+    const clean = (v: unknown) => {
+        const g = String(v ?? "").trim().toUpperCase()
+        return /^[0-9]{2}[0-9A-Z]{13}$/.test(g) ? g : null
+    }
+    const key = String(state ?? "").trim().toLowerCase().replace(/&/g, "and").replace(/\s+/g, " ")
+    const code = GST_STATE_CODES[GST_STATE_ALIASES[key] ?? key] ?? null
+    const typed = clean(own)
+    if (typed) return !code || typed.startsWith(code) ? typed : null
+    const inherited = clean(customers)
+    return inherited && code && inherited.startsWith(code) ? inherited : null
+}
+
 function addressFrom(a: any, kind: "Billing" | "Shipping", id: string, extra: Partial<AddressInput> = {}): AddressInput {
+    const state = a?.province ?? a?.state ?? null
     return {
         id,
         kind,
@@ -192,21 +233,30 @@ function addressFrom(a: any, kind: "Billing" | "Shipping", id: string, extra: Pa
         line1: a?.address_1 ?? a?.line1 ?? null,
         line2: a?.address_2 ?? a?.line2 ?? null,
         city: a?.city ?? null,
-        state: a?.province ?? a?.state ?? null,
+        state,
         postal_code: a?.postal_code ?? null,
         country_code: a?.country_code ?? null,
         phone: a?.phone ?? null,
+        gstin: gstinForAddress(state, a?.metadata?.gstin, null),
         ...extra,
     }
 }
 
 /** A customer's addresses: its own, and the company's GST-registered
- *  billing address when there is one (that is the invoice address). */
+ *  billing address when there is one (that is the invoice address). An
+ *  address in the state of the customer's GSTIN carries it, so invoices
+ *  billed there are B2B. */
 export function addressesOfCustomer(record: any): AddressInput[] {
     const out: AddressInput[] = []
+    const customerGstin = record?.gstin ?? record?.metadata?.gstin ?? null
     for (const a of Array.isArray(record?.addresses) ? record.addresses : []) {
         if (!a?.id) continue
-        out.push(addressFrom(a, a.is_default_shipping && !a.is_default_billing ? "Shipping" : "Billing", String(a.id)))
+        const state = a?.province ?? a?.state ?? null
+        out.push(
+            addressFrom(a, a.is_default_shipping && !a.is_default_billing ? "Shipping" : "Billing", String(a.id), {
+                gstin: gstinForAddress(state, a?.metadata?.gstin, customerGstin),
+            }),
+        )
     }
     const cba = record?.company_billing_address
     if (cba && (cba.line1 || cba.address_1)) {

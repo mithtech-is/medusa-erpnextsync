@@ -8,6 +8,7 @@ import {
     buildSalesOrderDoc,
     customerDisplayName,
     directionForCreated,
+    gstinForAddress,
     isOwnWrite,
     money,
     orderFullyPaid,
@@ -425,5 +426,44 @@ describe("the taxes template for the place of supply", () => {
         expect(supplyStateKey({ gst_state_number: "7", state: "Delhi" })).toBe("07")
         expect(supplyStateKey({ state: " Maharashtra " })).toBe("maharashtra")
         expect(supplyStateKey(null)).toBeNull()
+    })
+})
+
+describe("GSTIN on addresses", () => {
+    const G = "29ZZZPZ0001Z1Z5"
+
+    it("puts the customer's GSTIN on an address in the GSTIN's state only", () => {
+        expect(gstinForAddress("Karnataka", null, G)).toBe(G)
+        expect(gstinForAddress("Maharashtra", null, G)).toBeNull()
+        expect(gstinForAddress("Somewhere", null, G)).toBeNull()
+    })
+
+    it("keeps a GSTIN typed for the address, unless it belongs to another state", () => {
+        expect(gstinForAddress("karnataka", " 29zzzpz0001z1z5 ", null)).toBe(G)
+        expect(gstinForAddress("Maharashtra", G, null)).toBeNull()
+        expect(gstinForAddress("Unknownland", G, null)).toBe(G)
+    })
+
+    it("reads state aliases and ignores malformed GSTINs", () => {
+        expect(gstinForAddress("NCT of Delhi", "07AAAAA0000A1Z5", null)).toBe("07AAAAA0000A1Z5")
+        expect(gstinForAddress("Karnataka", "29X", null)).toBeNull()
+    })
+
+    it("gives a customer's saved addresses in that state the customer's GSTIN", () => {
+        const list = addressesOfCustomer({
+            metadata: { gstin: G },
+            addresses: [
+                { id: "a1", address_1: "1 Main St", city: "Bengaluru", province: "Karnataka", country_code: "in" },
+                { id: "a2", address_1: "2 Side St", city: "Pune", province: "Maharashtra", country_code: "in" },
+            ],
+        })
+        expect(list.map((a) => [a.id, a.gstin])).toEqual([["a1", G], ["a2", null]])
+    })
+
+    it("carries a GSTIN typed at checkout onto the order's address", () => {
+        const [ship] = addressesOfOrder({
+            shipping_address: { id: "oa1", address_1: "2 Test St", city: "Bengaluru", province: "Karnataka", metadata: { gstin: G } },
+        })
+        expect(ship).toMatchObject({ id: "oa1", kind: "Shipping", gstin: G })
     })
 })
