@@ -35,6 +35,44 @@ export function frappeRound(num: number, precision: number): number {
     return (sign * n) / multiplier
 }
 
+export type RoundingMethod = "Banker's Rounding" | "Banker's Rounding (legacy)" | "Commercial Rounding"
+
+/** Frappe's `rounded(num, precision)` under the site's System Settings method. */
+export function frappeRounded(num: number, precision: number, method: string | null | undefined): number {
+    if (method === "Commercial Rounding") {
+        if (!Number.isFinite(num) || num === 0) return 0
+        const ulp = 2 ** (Math.floor(Math.log2(Math.abs(num))) - 52)
+        return Number((num + Math.sign(num) * ulp).toFixed(precision))
+    }
+    if (method === "Banker's Rounding (legacy)") {
+        const multiplier = 10 ** precision
+        const n = Number((precision ? num * multiplier : num).toFixed(8))
+        const floor = Math.floor(n)
+        const decimal = n - floor
+        let out: number
+        if (!precision && decimal === 0.5) out = floor % 2 === 0 ? floor : floor + 1
+        else if (decimal === 0.5) out = floor + 1
+        else out = Math.round(n)
+        return precision ? out / multiplier : out
+    }
+    return frappeRound(num, precision)
+}
+
+/**
+ * ERPNext's rounded total (`round_based_on_smallest_currency_fraction`):
+ * to the currency's smallest fraction when it has one (0.05, say), else to
+ * the unit under the site's rounding method.
+ */
+export function roundedTotal(grandTotal: number, rule: { method?: string | null; smallestFraction?: number | null } = {}): number {
+    const fraction = Number(rule.smallestFraction) || 0
+    if (fraction > 0) {
+        const remainder = frappeRound(grandTotal % fraction, 2)
+        const value = remainder > fraction / 2 ? grandTotal + fraction - remainder : grandTotal - remainder
+        return frappeRound(value, 2)
+    }
+    return frappeRound(frappeRounded(grandTotal, 0, rule.method ?? "Banker's Rounding"), 2)
+}
+
 export type EstimateLine = {
     /** Net unit rate as sent to ERPNext (price less the line's discount), to the paisa. */
     rate: number
@@ -64,6 +102,8 @@ export function estimateSalesTotals(args: {
     shipping: number
     interState: boolean
     roundTotal: boolean
+    /** System Settings rounding method and the currency's smallest fraction; Banker's to the unit when not given. */
+    rounding?: { method?: string | null; smallestFraction?: number | null }
 }): SalesEstimate {
     const lines = args.lines.map((l) => {
         const amount = frappeRound(frappeRound(l.rate, 2) * l.qty, 2)
@@ -100,7 +140,7 @@ export function estimateSalesTotals(args: {
     let total = netTotal
     for (const t of taxes) total = frappeRound(total + t, 2)
     const grandTotal = frappeRound(total, 2)
-    const payable = args.roundTotal ? frappeRound(grandTotal, 0) : grandTotal
+    const payable = args.roundTotal ? roundedTotal(grandTotal, args.rounding) : grandTotal
     const gstTotal = frappeRound(taxes.slice(shipping > 0 ? 1 : 0).reduce((s, t) => s + t, 0), 2)
     return {
         netTotal,

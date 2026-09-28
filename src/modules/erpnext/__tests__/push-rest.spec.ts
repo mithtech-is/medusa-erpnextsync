@@ -205,14 +205,16 @@ describe("the Sales Order", () => {
     })
 
     it("totals: shipping is net of its tax, and known figures win over the residual", () => {
-        expect(orderTotals({ total: 100, shipping_subtotal: 10, discount_total: 5, items: [{ unit_price: 95, quantity: 1, tax_total: 0 }] })).toEqual({ subtotal: 95, tax: 0, shipping: 10, discount: 5, grand: 100 })
+        expect(orderTotals({ total: 100, shipping_total: 10, shipping_tax_total: 0, discount_total: 5, items: [{ unit_price: 95, quantity: 1, tax_total: 0 }] })).toEqual({ subtotal: 95, tax: 0, shipping: 10, discount: 5, grand: 100 })
         expect(orderTotals({ total: 3538.82, items: order.items })).toMatchObject({ shipping: 1.18 })
     })
 
     it("reads net shipping from the subtotal, the methods, or the total less its tax", () => {
-        expect(shippingNet({ shipping_subtotal: 199, shipping_total: 234.82 })).toBe(199)
         expect(shippingNet({ shipping_methods: [{ amount: 199, adjustments: [{ amount: 50 }] }, { amount: 10 }] })).toBe(159)
-        expect(shippingNet({ shipping_total: 234.82, shipping_tax_total: 35.82 })).toBe(199)
+        expect(shippingNet({ shipping_total: 234.82, shipping_tax_total: 35.82, shipping_subtotal: 199 })).toBe(199)
+        // A free-shipping promotion: the subtotal is before it, the total after.
+        expect(shippingNet({ shipping_total: 0, shipping_tax_total: 0, shipping_subtotal: 199 })).toBe(0)
+        expect(shippingNet({ shipping_subtotal: 199 })).toBe(199)
         expect(shippingNet({})).toBeNull()
     })
 })

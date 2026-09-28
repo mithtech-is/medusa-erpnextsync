@@ -368,10 +368,13 @@ export function orderTotals(order: any): OrderTotals {
     return { subtotal, tax, shipping, discount, grand }
 }
 
-/** The order's shipping before tax and after any shipping discount, or
- *  null when Medusa gave no figure for it. */
+/**
+ * The order's shipping before tax and after any shipping discount, or null
+ * when Medusa gave no figure for it. Medusa's `shipping_subtotal` is taken
+ * before discounts, so it comes last: `shipping_total` less its tax is the
+ * discounted net.
+ */
 export function shippingNet(order: any): number | null {
-    if (order?.shipping_subtotal != null) return money(order.shipping_subtotal)
     const methods = Array.isArray(order?.shipping_methods) ? order.shipping_methods : null
     if (methods && methods.length) {
         return money(
@@ -384,6 +387,7 @@ export function shippingNet(order: any): number | null {
     if (order?.shipping_total != null && order?.shipping_tax_total != null) {
         return money(Number(order.shipping_total) - Number(order.shipping_tax_total))
     }
+    if (order?.shipping_subtotal != null) return money(order.shipping_subtotal)
     return null
 }
 

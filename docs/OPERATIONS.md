@@ -185,8 +185,8 @@ on_update` / `on_trash` on the selling price list).
 - Fulfil store orders in ERPNext: submit the Sales Order, make a Delivery
   Note from it. The note's ledger entries create the Medusa fulfilment,
   shipped, with the LR number as tracking. Do not also fulfil in Medusa
-  Admin. Cancelling the note cancels the fulfilment where Medusa allows;
-  otherwise the event row says to cancel it by hand.
+  Admin. Cancelling the note fails its event row with what to do: Medusa
+  does not cancel a shipped fulfilment, so record a return there.
 - A selling price on the store's list is the variant's price in that
   currency. Tiers, customer prices and dated prices are skipped and the
   row says why.

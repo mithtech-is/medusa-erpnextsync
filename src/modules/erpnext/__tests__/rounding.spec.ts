@@ -42,7 +42,20 @@ describe("the cart's rounding line", () => {
         expect(planCartRounding({ cart: cart({ items: [{ unit_price: 10, quantity: 1, tax_lines: [] }] }), companyState: "29", roundTotal: true })).toMatchObject({ action: "clear" })
     })
 
-    it("refuses to paper over a real disagreement", () => {
-        expect(planCartRounding({ cart: cart({ total: 1300 }), companyState: "29", roundTotal: true })).toMatchObject({ action: "skip" })
+    it("refuses to paper over a real disagreement, and clears its line", () => {
+        expect(planCartRounding({ cart: cart({ total: 1300 }), companyState: "29", roundTotal: true })).toMatchObject({ action: "clear" })
+    })
+
+    it("leaves other credit lines to come off the rounded total", () => {
+        // A ₹500 gift card: Medusa's total is 1183.60 - 500 = 683.60, and the buyer owes 1184 - 500.
+        const plan = planCartRounding({ cart: cart({ total: 683.6, credit_lines: [{ reference: "gift-card", amount: 500 }] }), companyState: "29", roundTotal: true })
+        expect(plan).toMatchObject({ action: "set", amount: -0.4 })
+    })
+
+    it("follows the site's rounding method and the currency's smallest fraction", () => {
+        const half = cart({ items: [{ unit_price: 1000.5, quantity: 1, tax_lines: [{ rate: 0 }] }], shipping_methods: [], total: 1000.5 })
+        expect(planCartRounding({ cart: half, companyState: "29", roundTotal: true })).toMatchObject({ amount: 0.5 })
+        expect(planCartRounding({ cart: half, companyState: "29", roundTotal: true, rounding: { method: "Commercial Rounding" } })).toMatchObject({ amount: -0.5 })
+        expect(planCartRounding({ cart: cart(), companyState: "29", roundTotal: true, rounding: { smallestFraction: 0.05 } })).toMatchObject({ amount: 0 })
     })
 })
