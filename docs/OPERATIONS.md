@@ -77,7 +77,8 @@ DocType; the pair is its identity and there is one per pair.
   the DocType, its Custom Fields and its Property Setters; the push fills a
   Customer's name, type and contact and a Sales Order's party, dates,
   currency and lines itself, and Settings fill customer group, territory
-  and company. Everything else needs a pair or a fixed value on the mapping
+  and company (group and territory only on a new Customer or where
+  ERPNext has them blank). Everything else needs a pair or a fixed value on the mapping
   (a Link needs a name that exists on that site — the value picker lists
   them).
 - **`HTTP 403: … Server Scripts are disabled`** — the site has a Server
@@ -101,8 +102,12 @@ DocType; the pair is its identity and there is one per pair.
   from it, as the form does.
 - **Taxes**: with a taxes template in Settings its rows are put on every
   Sales Order and Sales Invoice ahead of the shipping charge, so the
-  ERPNext grand total equals the store's order total. Without one, the
-  documents carry no tax rows and ERPNext's total is the net amount.
+  ERPNext grand total equals the store's order total. An order shipped to
+  another state than the company address's gets the company's sibling
+  template whose Tax Category is inter-state (and the other way round), so
+  India Compliance accepts it; name the in-state template in Settings.
+  Without one, the documents carry no tax rows and ERPNext's total is the
+  net amount.
 - The Sales Invoice is a draft that names the draft Sales Order's rows.
   Submit the order first, then the invoice; ERPNext refuses the other way
   round.

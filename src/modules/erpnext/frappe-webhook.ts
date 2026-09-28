@@ -187,3 +187,14 @@ export function planFrappeEvent(args: {
         reason: republish ? "selected again; republishing" : "selected for ERPNext → Medusa",
     }
 }
+
+/**
+ * The payload a document selected again writes. Republishing takes a
+ * product we drafted back on sale, but a status the mapping produced from
+ * the document itself (a disabled Item mapped to draft) is the document's
+ * own answer and wins.
+ */
+export function withRepublish(payload: Record<string, any>, republish: boolean): Record<string, any> {
+    if (!republish || payload?.status !== undefined) return payload
+    return { ...payload, status: "published" }
+}
