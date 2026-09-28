@@ -30,6 +30,17 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   until the test line was used up. It now asserts the wallet and the line end where they began,
   repays after a failed expectation, and prints a cleanup failure instead of swallowing it.
 
+## 0.5.6 — 2026-09-28
+
+- **Registered buyers get a B2B invoice.** A customer's GSTIN now reaches the ERPNext Addresses
+  that invoices are billed to: a GSTIN typed for an address at checkout (`metadata.gstin`) goes on
+  that address, and the customer's own GSTIN goes on their saved addresses in the GSTIN's state
+  (`gstinForAddress`; India Compliance refuses a GSTIN from another state). Before, every Address
+  was Unregistered, so the Sales Order and Invoice had no billed-to GSTIN.
+- **An order without a billing address is billed where it ships.** A checkout that records only
+  the shipping address left ERPNext to bill the customer's first saved Address, which could be a
+  different one; the shipping Address is now the billing Address too.
+
 ## 0.5.5 — 2026-09-28
 
 Found by the production sync test on erp.splendax.com ↔ splendax.com.
