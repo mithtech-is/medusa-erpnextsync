@@ -3,6 +3,38 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.5.5 — 2026-09-28
+
+Found by the production sync test on erp.splendax.com ↔ splendax.com.
+
+- **A disabled Item selected again stays draft.** Republishing a drafted product no longer
+  overrides a status the mapping produced from the document (`status <- disabled`); before, a
+  disabled Item deselected and selected again went back on sale.
+- **An edit made inside the echo window reaches ERPNext.** Within three minutes of an inbound
+  write every push for that record was dropped as an echo and never retried, so a person editing
+  the customer a minute after ERPNext changed it lost the edit. A push is now an echo only when
+  every value it carries is already on the ERPNext document (`pushChangesRemote`).
+- **Customer pushes leave ERPNext's choices alone.** The Settings customer group and territory,
+  and an "Unregistered" GST category, fill a new Customer or a blank field only; they no longer
+  overwrite what an ERPNext user set on every save in the store.
+- **A customer's email and phone reach ERPNext.** ERPNext keeps `Customer.email_id` and
+  `mobile_no` as read-only copies of the primary Contact, so writing them on the Customer was
+  undone on save. The push now puts them on the primary Contact first (`primaryContactPatch`).
+- **Customers the store creates are selected.** A Customer made by a push (or from a guest order)
+  carries `medusa_sync` (`Both`, or `Medusa → ERPNext`), like any other pushed document. Before,
+  it was left blank, the hourly reconcile recorded it as unselected, and every later push of that
+  customer was refused as `record-direction`. Existing Customers affected: set their Sync to
+  Medusa in ERPNext.
+- **Guest customers are named after the person.** A guest checkout leaves Medusa a customer with
+  only an email; the push now takes the name, phone and company from the order's billing address
+  instead of naming the ERPNext Customer after the email address (`withOrderContact`).
+- **The taxes template follows the place of supply.** Settings name one template; an order
+  shipped to another state was refused by India Compliance ("Cannot charge CGST/SGST for
+  inter-state supplies"). The push now uses the company's sibling template whose Tax Category
+  matches (inter-state or not, reverse charge or not), comparing the shipping address's GST state
+  with the company address's (`taxTemplateForSupply`). A site without those Tax Category fields,
+  or with no single match, keeps the Settings template.
+
 ## 0.5.4 — 2026-09-27
 
 - On a one-way sync the field pairs show a fixed arrow instead of a three-way choice; switching a
