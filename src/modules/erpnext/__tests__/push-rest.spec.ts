@@ -152,6 +152,55 @@ describe("the Sales Order", () => {
     it("totals: known shipping and discount win over the residual", () => {
         expect(orderTotals({ total: 100, shipping_total: 10, discount_total: 5, items: [{ unit_price: 95, quantity: 1, tax_total: 0 }] })).toEqual({ subtotal: 95, tax: 0, shipping: 10, discount: 5, grand: 100 })
     })
+
+    it("totals: the lines' tax is the tax when the lines report it", () => {
+        expect(orderTotals({
+            total: 170.21,
+            shipping_total: 100,
+            items: [{ unit_price: 59.5, quantity: 1, tax_total: 10.71 }],
+        })).toEqual({ subtotal: 59.5, tax: 10.71, shipping: 100, discount: 0, grand: 170.21 })
+    })
+
+    it("totals: shipping comes from the methods when no shipping_total is given", () => {
+        expect(orderTotals({
+            total: 170.21,
+            shipping_methods: [{ amount: 100 }],
+            items: [{ unit_price: 59.5, quantity: 1, tax_total: 10.71 }],
+        })).toEqual({ subtotal: 59.5, tax: 10.71, shipping: 100, discount: 0, grand: 170.21 })
+    })
+
+    it("totals: with shipping known, an unexplained charge is tax, not a fatter delivery line", () => {
+        // The lines report no tax (charged on the shipping method, or only
+        // at order level). 170.21 - 59.50 - 100 is the GST, and used to
+        // arrive as "Medusa Shipping 110.71" with no tax at all.
+        expect(orderTotals({
+            total: 170.21,
+            shipping_methods: [{ amount: 100 }],
+            items: [{ unit_price: 59.5, quantity: 1, tax_total: 0 }],
+        })).toEqual({ subtotal: 59.5, tax: 10.71, shipping: 100, discount: 0, grand: 170.21 })
+    })
+
+    it("totals: with no shipping named at all, the remainder is still shipping", () => {
+        expect(orderTotals({ total: 170.21, items: [{ unit_price: 59.5, quantity: 1, tax_total: 0 }] }))
+            .toEqual({ subtotal: 59.5, tax: 0, shipping: 110.71, discount: 0, grand: 170.21 })
+    })
+
+    it("totals: a shortfall nobody named is a discount", () => {
+        expect(orderTotals({ total: 139.5, shipping_total: 100, items: [{ unit_price: 59.5, quantity: 1, tax_total: 0 }] }))
+            .toEqual({ subtotal: 59.5, tax: 0, shipping: 100, discount: 20, grand: 139.5 })
+    })
+
+    it("totals: every case adds up to the store's grand total", () => {
+        for (const order of [
+            { total: 170.21, shipping_total: 100, items: [{ unit_price: 59.5, quantity: 1, tax_total: 10.71 }] },
+            { total: 170.21, shipping_methods: [{ amount: 100 }], items: [{ unit_price: 59.5, quantity: 1, tax_total: 0 }] },
+            { total: 139.5, shipping_total: 100, items: [{ unit_price: 59.5, quantity: 1 }] },
+            { total: 100, shipping_total: 10, discount_total: 5, items: [{ unit_price: 95, quantity: 1, tax_total: 0 }] },
+        ]) {
+            const t = orderTotals(order)
+            expect(Math.round((t.subtotal + t.tax + t.shipping - t.discount) * 100) / 100).toBe(t.grand)
+        }
+    })
 })
 
 describe("invoicing rules", () => {

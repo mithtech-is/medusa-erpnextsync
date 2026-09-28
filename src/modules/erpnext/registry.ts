@@ -482,6 +482,14 @@ const orderEntity: EntityDescriptor = {
                 "created_at",
                 "shipping_total",
                 "discount_total",
+                // What the store actually charged for delivery, as stored
+                // on the methods. `shipping_total` is computed and is not
+                // always there; without either, the delivery charge and
+                // the tax are indistinguishable and orderTotals has to
+                // guess (it used to guess "all shipping", hiding the GST).
+                "shipping_methods.id",
+                "shipping_methods.name",
+                "shipping_methods.amount",
                 "summary.*",
                 "items.id",
                 "items.title",
