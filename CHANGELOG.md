@@ -3,6 +3,49 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.6.0 — 2026-09-29
+
+GST is ERPNext's: India Compliance computes it, and the store charges exactly what ERPNext will
+invoice.
+
+- **ERPNext picks the taxes.** Sales Orders and Invoices carry the company address, and their tax
+  rows come from ERPNext's own `get_party_details`: India Compliance chooses the In-state or
+  Out-state template from the billing, shipping and company addresses. Each line is taxed at its
+  Item Tax Template's rate. The Settings taxes template, `withTemplateTaxes` and
+  `taxTemplateForSupply` are gone. A push that gets no tax rows fails instead of writing a
+  document without GST.
+- **Shipping is taxed at the rates of the goods it carries.** Net shipping goes as an `Actual`
+  row on the shipping account ahead of the GST rows, which become "On Previous Row Total". ERPNext
+  then spreads it over the lines by value and taxes each share at that line's rate, and India
+  Compliance adds it to each line's taxable value. Before, shipping including Medusa's GST was an
+  untaxed freight row.
+- **Discounts sit on the lines they hit.** Each line carries its price, its per-unit share of the
+  promotions, and its net rate. There is no document-level discount any more, so shipping is never
+  discounted. Pricing rules are ignored on store documents.
+- **The store's total is ERPNext's rounded total.** `POST /store/carts/:id/erpnext-rounding` keeps
+  one cart credit line (`erpnext-rounding`) at the difference, using ERPNext's own arithmetic
+  (`erpnext-arithmetic.ts`: banker's rounding, rows rounded separately, shipping spread by value).
+  It refreshes the payment collection with it. It follows Global Defaults > Disable Rounded Total,
+  and it refuses to cover a gap over ₹1.
+- **Products carry their GST rate.** The Item pull (webhook and 5-minute pull) resolves the Item
+  Tax Template ERPNext would pick (the Item's, else its group's) and records its rate as a product
+  rule on the tax region of the company's country, creating a "GST n%" rate when needed.
+  `metadata.gst_rate` and `metadata.gst_template` are display copies. An Item with no template is
+  charged the region's default rate.
+- **No stock double count.** The level written to Medusa adds back what Medusa still reserves for
+  store orders whose Sales Order is submitted, so each unit is held once
+  (`sellableQty(bin, safety, heldByStore)`).
+- **Delivery Notes ship store orders.** A Delivery Note's ledger entries (the existing Stock Ledger
+  Entry webhook) create a Medusa fulfilment for the store order's lines, marked shipped with the
+  LR number as tracking. A cancelled note cancels it where Medusa allows. No new webhook.
+- **A re-push refreshes a draft Sales Invoice** instead of stopping at "already exists".
+- **Address book changes sync.** Creating, editing or deleting a saved address pushes the customer
+  (workflow hooks announce `customer.updated`). An address's type comes from
+  `metadata.address_type`, else its default flags.
+- **Pushed Contacts get a person's name** when ERPNext made them without one.
+- `GET /store/erpnext/orders/:id/gst` returns ERPNext's GST for a customer's order (the invoice,
+  else the order): lines with taxable value and CGST/SGST/IGST, tax rows and rounded total.
+
 ## 0.5.6 — 2026-09-28
 
 - **Registered buyers get a B2B invoice.** A customer's GSTIN now reaches the ERPNext Addresses

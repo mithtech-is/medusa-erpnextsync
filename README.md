@@ -54,11 +54,23 @@ get more than a flat document:
   addresses (plus the company's GST-registered billing address) as linked
   **Address** documents.
 - **Sales Order**: one line per order line (the product's link, else its
-  SKU), the customer, both addresses, the order number as PO number,
-  shipping as an "Actual" charge on the configured account, a discount on
-  the grand total; and once the order is paid in full a draft **Sales
-  Invoice** made from it. Everything is created as a draft; an ERPNext
-  user submits.
+  SKU) at its price less its share of the promotions, the customer, both
+  addresses and the company address, the order number as PO number, and
+  the tax rows ERPNext's own `get_party_details` chooses for the place of
+  supply (India Compliance). Shipping is an "Actual" row on the configured
+  account ahead of the GST rows, which apply to it, so it is taxed at the
+  rates of the goods it carries. Once the order is paid in full, a draft
+  **Sales Invoice** is made from it (a re-push refreshes a draft one).
+  Everything is created as a draft; an ERPNext user submits.
+
+**GST, charged as ERPNext will invoice it.** Each pulled product is
+charged at its Item's Item Tax Template rate, written as a product rule on
+the tax region of the company's country. The storefront calls
+`POST /store/carts/:id/erpnext-rounding` before checkout and payment. That
+keeps one cart credit line at whatever makes the cart's total ERPNext's
+rounded total, worked out with ERPNext's own arithmetic.
+`GET /store/erpnext/orders/:id/gst` returns ERPNext's GST for a customer's
+order.
 
 A cancelled order deletes its draft documents (or cancels submitted
 ones); a deleted customer or product is disabled, never deleted.
@@ -73,6 +85,15 @@ adds (a ledger entry at the warehouse, a Sales Order submit or cancel, an
 Item Price on the list), are re-read by the hourly reconcile and by every
 catalogue pull, and move only for an Item that moves ERPNext → Medusa.
 Nothing is written back.
+
+Store orders are held once. Medusa reserves an order's stock, and once the
+order's Sales Order is submitted ERPNext reserves it too. The level written
+to Medusa therefore adds back Medusa's own reservations for those orders.
+
+Goods leave through ERPNext. A Delivery Note made from a store order's
+Sales Order creates the Medusa fulfilment for those lines, marked shipped,
+so the storefront shows the order shipped without anyone fulfilling it in
+Medusa Admin.
 
 ## A sync across several DocTypes
 

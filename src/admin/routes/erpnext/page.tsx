@@ -900,8 +900,11 @@ const SettingsTab: React.FC<{
           Where a document the store writes lands. Every field is optional:
           blank means ERPNext's own default (the default Company, the
           Selling Settings price list, no customer group or territory).
-          Without a shipping account an order's shipping is not booked and
-          the sync row says so.
+          GST is ERPNext's: India Compliance picks the taxes template for
+          the place of supply, and each line is taxed at its Item Tax
+          Template. Shipping goes on the shipping account ahead of the GST
+          rows, so it is taxed at the rates of the goods it carries; without
+          a shipping account it is not booked and the sync row says so.
         </Text>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           {(
@@ -911,7 +914,6 @@ const SettingsTab: React.FC<{
               ["erpnext_customer_group", "Customer group for new customers", "ERPNext default"],
               ["erpnext_territory", "Territory for new customers", "ERPNext default"],
               ["erpnext_shipping_account", "Shipping account head", "not booked"],
-              ["erpnext_taxes_template", "Sales taxes and charges template", "none"],
             ] as Array<[keyof typeof pushCfg, string, string]>
           ).map(([key, label, fallback]) => (
             <div key={key}>

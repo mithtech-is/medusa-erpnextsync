@@ -33,9 +33,23 @@ function num(v: unknown): number {
     return Number.isFinite(n) ? n : 0
 }
 
-/** On hand, less what is promised, less the buffer; never negative. */
-export function sellableQty(bin: { actual_qty?: unknown; reserved_qty?: unknown } | null | undefined, safety: unknown): number {
-    const available = num(bin?.actual_qty) - num(bin?.reserved_qty) - Math.max(0, num(safety))
+/**
+ * On hand, less what is promised, less the buffer; never negative.
+ *
+ * `heldByStore` is what Medusa itself still reserves for store orders
+ * whose Sales Order is submitted. ERPNext's `reserved_qty` counts those
+ * units too, and Medusa subtracts its own reservations from the level
+ * written here, so they are added back: each unit is held once, by Medusa
+ * until its Sales Order is submitted and by ERPNext after. The sum stays
+ * right after a Delivery Note (on hand and reserved both drop) and after
+ * Medusa consumes the reservation on fulfilment.
+ */
+export function sellableQty(
+    bin: { actual_qty?: unknown; reserved_qty?: unknown } | null | undefined,
+    safety: unknown,
+    heldByStore: unknown = 0,
+): number {
+    const available = num(bin?.actual_qty) - num(bin?.reserved_qty) - Math.max(0, num(safety)) + Math.max(0, num(heldByStore))
     return Math.max(0, available)
 }
 

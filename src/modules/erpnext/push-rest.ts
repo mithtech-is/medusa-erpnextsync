@@ -1,3 +1,4 @@
+import { frappeRound } from "./erpnext-arithmetic"
 import { formatInZone } from "./mapping-engine"
 
 /**
@@ -21,11 +22,15 @@ export type PushDefaults = {
     priceList: string | null
     customerGroup?: string | null
     territory?: string | null
-    /** Account head that books shipping as an "Actual" charge. Without it
-     *  shipping is not booked and the sync row says so. */
+    /** Account head of the shipping row. Without it shipping is not booked
+     *  and the sync row says so. */
     shippingAccount?: string | null
-    /** Sales Taxes and Charges Template applied to sales documents. */
+    /** Settings' taxes template. Unused since 0.6.0: ERPNext chooses the
+     *  template for the place of supply itself. */
     taxesTemplate?: string | null
+    /** The company's own address, which India Compliance needs for the
+     *  place of supply and the seller GSTIN. */
+    companyAddress?: string | null
 }
 
 /** Does the target DocType have this field? Custom fields included. */
@@ -104,11 +109,19 @@ export function buildCustomerDoc(args: {
  * the new value, or a primary row is added. Null when nothing changes.
  */
 export function primaryContactPatch(
-    contact: { email_ids?: any[] | null; phone_nos?: any[] | null } | null | undefined,
-    want: { email?: string | null; phone?: string | null },
-): { email_ids?: any[]; phone_nos?: any[] } | null {
+    contact: { email_ids?: any[] | null; phone_nos?: any[] | null; first_name?: string | null; last_name?: string | null } | null | undefined,
+    want: { email?: string | null; phone?: string | null; first_name?: string | null; last_name?: string | null },
+): { email_ids?: any[]; phone_nos?: any[]; first_name?: string; last_name?: string } | null {
     if (!contact) return null
-    const patch: { email_ids?: any[]; phone_nos?: any[] } = {}
+    const patch: { email_ids?: any[]; phone_nos?: any[]; first_name?: string; last_name?: string } = {}
+    // ERPNext makes a company's Contact with no person's name at all; the
+    // store's person fills a blank one and never renames a Contact.
+    const first = String(want.first_name ?? "").trim()
+    if (first && !String(contact.first_name ?? "").trim()) {
+        patch.first_name = first
+        const last = String(want.last_name ?? "").trim()
+        if (last && !String(contact.last_name ?? "").trim()) patch.last_name = last
+    }
     const email = String(want.email ?? "").trim().toLowerCase()
     if (email) {
         const rows = childRows(contact.email_ids)
@@ -122,7 +135,7 @@ export function primaryContactPatch(
         const next = promote(rows, "phone", phone, "is_primary_mobile_no", (a, b) => digits(a) === digits(b))
         if (next) patch.phone_nos = next
     }
-    return patch.email_ids || patch.phone_nos ? patch : null
+    return patch.email_ids || patch.phone_nos || patch.first_name ? patch : null
 }
 
 function childRows(rows: any[] | null | undefined): any[] {
@@ -207,6 +220,14 @@ const GST_STATE_ALIASES: Record<string, string> = {
  * state is not recognised keeps a GSTIN typed for it, but never borrows
  * the customer's.
  */
+/** A state's two-digit GST code from its name, an alias, or the code itself; null when unknown. */
+export function gstStateCodeOf(state: unknown): string | null {
+    const raw = String(state ?? "").trim()
+    if (/^\d{1,2}$/.test(raw)) return raw.padStart(2, "0")
+    const key = raw.toLowerCase().replace(/&/g, "and").replace(/\s+/g, " ")
+    return GST_STATE_CODES[GST_STATE_ALIASES[key] ?? key] ?? null
+}
+
 export function gstinForAddress(
     state: unknown,
     own: unknown,
@@ -242,6 +263,16 @@ function addressFrom(a: any, kind: "Billing" | "Shipping", id: string, extra: Pa
     }
 }
 
+/** Billing or Shipping: the type the storefront recorded on the address,
+ *  else the default flags (an address only ever used for shipping is a
+ *  shipping address), else Billing. */
+export function addressKind(a: any): "Billing" | "Shipping" {
+    const typed = String(a?.metadata?.address_type ?? "").trim().toLowerCase()
+    if (typed === "shipping") return "Shipping"
+    if (typed === "billing") return "Billing"
+    return a?.is_default_shipping && !a?.is_default_billing ? "Shipping" : "Billing"
+}
+
 /** A customer's addresses: its own, and the company's GST-registered
  *  billing address when there is one (that is the invoice address). An
  *  address in the state of the customer's GSTIN carries it, so invoices
@@ -253,7 +284,7 @@ export function addressesOfCustomer(record: any): AddressInput[] {
         if (!a?.id) continue
         const state = a?.province ?? a?.state ?? null
         out.push(
-            addressFrom(a, a.is_default_shipping && !a.is_default_billing ? "Shipping" : "Billing", String(a.id), {
+            addressFrom(a, addressKind(a), String(a.id), {
                 gstin: gstinForAddress(state, a?.metadata?.gstin, customerGstin),
             }),
         )
@@ -318,22 +349,86 @@ export function buildAddressDoc(args: {
 export type OrderTotals = { subtotal: number; tax: number; shipping: number; discount: number; grand: number }
 
 /**
- * What the order adds up to. The line rates are the unit prices, tax is
- * the lines' tax, and whatever the grand total has beyond those is
- * shipping (when positive) or a discount (when negative), so ERPNext's
- * grand total reconciles to Medusa's exactly.
+ * What the order adds up to. The line rates are the unit prices and tax is
+ * the lines' tax. Shipping is net of its tax: GST on it is ERPNext's to
+ * compute. When Medusa gives no shipping figure, whatever the grand total
+ * has beyond the lines is shipping (when positive) or a discount (when
+ * negative).
  */
 export function orderTotals(order: any): OrderTotals {
     const items = Array.isArray(order?.items) ? order.items : []
     const subtotal = money(items.reduce((s: number, li: any) => s + money(li?.unit_price) * (Number(li?.quantity) || 1), 0))
     const tax = money(items.reduce((s: number, li: any) => s + money(li?.tax_total), 0))
     const grand = money(order?.total)
-    const shippingKnown = order?.shipping_total != null ? money(order.shipping_total) : null
+    const shippingKnown = shippingNet(order)
     const discountKnown = order?.discount_total != null ? money(order.discount_total) : null
     const residual = money(grand - subtotal - tax)
     const shipping = shippingKnown ?? Math.max(0, residual)
     const discount = discountKnown ?? Math.max(0, -residual)
     return { subtotal, tax, shipping, discount, grand }
+}
+
+/** The order's shipping before tax and after any shipping discount, or
+ *  null when Medusa gave no figure for it. */
+export function shippingNet(order: any): number | null {
+    if (order?.shipping_subtotal != null) return money(order.shipping_subtotal)
+    const methods = Array.isArray(order?.shipping_methods) ? order.shipping_methods : null
+    if (methods && methods.length) {
+        return money(
+            methods.reduce((s: number, m: any) => {
+                const off = (Array.isArray(m?.adjustments) ? m.adjustments : []).reduce((a: number, adj: any) => a + money(adj?.amount), 0)
+                return s + money(m?.amount) - off
+            }, 0),
+        )
+    }
+    if (order?.shipping_total != null && order?.shipping_tax_total != null) {
+        return money(Number(order.shipping_total) - Number(order.shipping_tax_total))
+    }
+    return null
+}
+
+/**
+ * A sales line: the unit price, the line's share of the promotions per
+ * unit, and the net rate ERPNext will tax. The discount is on the line
+ * the promotion hit, so it lowers that line's taxable value and nothing
+ * else; ERPNext's document-level discount would spread it over every line
+ * and the shipping too.
+ */
+export function salesLine(li: any): { price_list_rate: number; discount_amount: number; rate: number; qty: number } {
+    const qty = Number(li?.quantity) || 1
+    const price = frappeRound(money(li?.unit_price), 2)
+    const off = (Array.isArray(li?.adjustments) ? li.adjustments : []).reduce((s: number, a: any) => s + money(a?.amount), 0)
+    const perUnit = off > 0 ? frappeRound(off / qty, 2) : 0
+    return { price_list_rate: price, discount_amount: perUnit, rate: frappeRound(price - perUnit, 2), qty }
+}
+
+/**
+ * The tax rows for a sales document: the GST rows ERPNext chose for the
+ * place of supply, with shipping as an `Actual` row ahead of them when
+ * there is shipping. The GST rows then apply to "the previous row's
+ * total", so ERPNext spreads the shipping over the lines by value and
+ * taxes each share at that line's rate.
+ */
+export function supplyTaxes(args: {
+    gstRows: any[] | null | undefined
+    shipping: number
+    shippingAccount: string | null | undefined
+}): { taxes: any[]; notes: string[] } {
+    const gst = (args.gstRows ?? [])
+        .filter((r) => r && typeof r === "object")
+        .map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CHILD_META_KEYS.has(k) && k !== "row_id")))
+    const shipping = money(args.shipping)
+    if (shipping <= 0) return { taxes: gst, notes: [] }
+    if (!args.shippingAccount) {
+        return { taxes: gst, notes: [`shipping ${shipping} not booked: no shipping account configured`] }
+    }
+    return {
+        taxes: [
+            { charge_type: "Actual", account_head: args.shippingAccount, description: "Shipping", tax_amount: shipping },
+            ...gst.map((r) => ({ ...r, charge_type: "On Previous Row Total", row_id: "1" })),
+        ],
+        notes: [],
+    }
 }
 
 export type SalesOrderBuild =
@@ -377,15 +472,13 @@ export function buildSalesOrderDoc(args: {
         lines.push({
             item_code: code,
             item_name: li?.title ?? li?.variant?.product?.title ?? code,
-            qty: Number(li?.quantity) || 1,
-            rate: money(li?.unit_price),
+            ...salesLine(li),
             delivery_date,
         })
     }
     if (missing.length) {
         return { ok: false, reason: `no ERPNext Item for: ${missing.join(", ")}`, missing }
     }
-    const totals = orderTotals(order)
     const currency = String(order?.currency_code ?? "").toUpperCase() || undefined
     const notes: string[] = []
     const doc: Record<string, any> = {
@@ -398,31 +491,16 @@ export function buildSalesOrderDoc(args: {
         conversion_rate: 1,
         price_list_currency: currency,
         plc_conversion_rate: 1,
+        // The store has priced every line; an ERPNext pricing rule must not
+        // price it again.
+        ignore_pricing_rule: 1,
         items: lines,
     }
     if (defaults.company) doc.company = defaults.company
     if (defaults.priceList) doc.selling_price_list = defaults.priceList
     if (args.addresses.billing) doc.customer_address = args.addresses.billing
     if (args.addresses.shipping) doc.shipping_address_name = args.addresses.shipping
-    if (defaults.taxesTemplate) doc.taxes_and_charges = defaults.taxesTemplate
-    if (totals.shipping > 0) {
-        if (defaults.shippingAccount) {
-            doc.taxes = [
-                {
-                    charge_type: "Actual",
-                    account_head: defaults.shippingAccount,
-                    description: "Shipping",
-                    tax_amount: totals.shipping,
-                },
-            ]
-        } else {
-            notes.push(`shipping ${totals.shipping} not booked: no shipping account configured`)
-        }
-    }
-    if (totals.discount > 0) {
-        doc.apply_discount_on = "Grand Total"
-        doc.discount_amount = totals.discount
-    }
+    if (defaults.companyAddress) doc.company_address = defaults.companyAddress
     if (has("medusa_order_id") && order?.id) doc.medusa_order_id = order.id
     return { ok: true, doc, notes }
 }
@@ -497,68 +575,6 @@ const CHILD_META_KEYS = new Set([
     "__islocal",
     "__unsaved",
 ])
-
-/**
- * A Sales Taxes and Charges Template's rows, ahead of whatever the
- * document already carries (the shipping charge). ERPNext expands the
- * template itself only for a new document with no tax rows at all, so a
- * document that books shipping, or an update, would otherwise lose the
- * template's GST rows.
- */
-export function withTemplateTaxes(doc: Record<string, any>, templateRows: any[] | null | undefined): Record<string, any> {
-    const rows = (templateRows ?? [])
-        .filter((r) => r && typeof r === "object")
-        .map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CHILD_META_KEYS.has(k))))
-    if (!rows.length) return doc
-    return { ...doc, taxes: [...rows, ...(Array.isArray(doc.taxes) ? doc.taxes : [])] }
-}
-
-export type TaxTemplateInfo = { name: string; company?: string | null; tax_category?: string | null; disabled?: number | boolean | null }
-export type TaxCategoryInfo = { name: string; is_inter_state?: number | boolean | null; is_reverse_charge?: number | boolean | null }
-
-/** A state as the GST rules compare it: its code when known, else its name. */
-export function supplyStateKey(address: { gst_state_number?: unknown; state?: unknown } | null | undefined): string | null {
-    const code = String(address?.gst_state_number ?? "").trim()
-    if (code) return code.padStart(2, "0")
-    const name = String(address?.state ?? "").trim().toLowerCase()
-    return name || null
-}
-
-/**
- * The taxes template for where the goods go.
- *
- * Settings name one template, and GST will not take intra-state tax
- * (CGST + SGST) on a supply that crosses a state line, nor IGST on one
- * that does not; ERPNext refuses the document. When the supply's state and
- * the company's differ from what the named template's Tax Category says,
- * the company's one other template of the matching kind (inter-state or
- * not, reverse charge or not) is used. Unknown states, a template without
- * a category, or no single match leave the Settings template as it is.
- */
-export function taxTemplateForSupply(args: {
-    configured: string | null | undefined
-    templates: TaxTemplateInfo[]
-    categories: TaxCategoryInfo[]
-    companyState: string | null | undefined
-    supplyState: string | null | undefined
-}): string | null {
-    const configured = args.configured ? String(args.configured) : null
-    if (!configured || !args.companyState || !args.supplyState) return configured
-    const flag = (v: unknown) => v === true || Number(v) === 1
-    const categoryOf = (name: string | null | undefined) => args.categories.find((c) => c.name === name)
-    const base = args.templates.find((t) => t.name === configured)
-    const baseCategory = categoryOf(base?.tax_category)
-    if (!base || !baseCategory) return configured
-    const interState = args.companyState !== args.supplyState
-    if (flag(baseCategory.is_inter_state) === interState) return configured
-    const matches = args.templates.filter((t) => {
-        if (t.name === configured || flag(t.disabled)) return false
-        if ((t.company ?? null) !== (base.company ?? null)) return false
-        const c = categoryOf(t.tax_category)
-        return Boolean(c) && flag(c!.is_inter_state) === interState && flag(c!.is_reverse_charge) === flag(baseCategory.is_reverse_charge)
-    })
-    return matches.length === 1 ? matches[0].name : configured
-}
 
 /** Has the order been paid in full? Captured payments cover the total,
  *  or Medusa already says so. */
@@ -642,7 +658,7 @@ export function transportFilledFields(doctype: string, defaults: Partial<PushDef
             "base_grand_total",
         ]) out.add(f)
         if (defaults.company) out.add("company")
-        if (defaults.taxesTemplate) out.add("taxes_and_charges")
+        for (const f of ["taxes_and_charges", "taxes", "company_address"]) out.add(f)
     }
     return out
 }

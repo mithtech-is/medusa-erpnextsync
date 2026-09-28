@@ -17,6 +17,17 @@ describe("sellableQty", () => {
         expect(sellableQty({ actual_qty: "7.5", reserved_qty: "2.5" }, "-1")).toBe(5)
         expect(sellableQty(null, 3)).toBe(0)
     })
+    it("adds back what Medusa holds for store orders ERPNext reserves too, so no unit is held twice", () => {
+        // 10 on hand; one store order of 3 submitted in ERPNext (reserved 3,
+        // Medusa still holds 3), one store order of 2 not yet submitted (Medusa holds 2).
+        const level = sellableQty({ actual_qty: 10, reserved_qty: 3 }, 0, 3)
+        expect(level).toBe(10)
+        expect(level - (3 + 2)).toBe(5)
+        // After the Delivery Note: on hand and reserved drop by 3, Medusa still holds its 3.
+        expect(sellableQty({ actual_qty: 7, reserved_qty: 0 }, 0, 3) - (3 + 2)).toBe(5)
+        // After Medusa fulfils too: nothing added back, nothing held for that order.
+        expect(sellableQty({ actual_qty: 7, reserved_qty: 0 }, 0, 0) - 2).toBe(5)
+    })
     it("takes the Item's own safety stock when set, else the store's", () => {
         expect(safetyFor(4, 10)).toBe(4)
         expect(safetyFor(0, 10)).toBe(10)

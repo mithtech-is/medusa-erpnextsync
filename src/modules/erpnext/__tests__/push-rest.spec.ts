@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+    addressKind,
     addressesOfCustomer,
     addressesOfOrder,
     buildAddressDoc,
@@ -14,13 +15,14 @@ import {
     orderFullyPaid,
     orderTotals,
     primaryContactPatch,
-    supplyStateKey,
-    taxTemplateForSupply,
+    salesLine,
+    shippingNet,
+    supplyTaxes,
+    gstStateCodeOf,
     withOrderContact,
     transportFilledFields,
     wantsSalesInvoice,
     wantsSalesOrder,
-    withTemplateTaxes,
 } from "../push-rest"
 
 const has = (fields: string[]) => (f: string) => fields.includes(f)
@@ -161,9 +163,9 @@ describe("the Sales Order", () => {
     const codes = new Map([["li_1", "BOLT-1"]])
     const itemCodeFor = (li: any) => codes.get(li.id) ?? null
 
-    it("carries the lines, the dates in the site's timezone, and reconciles the total as shipping", () => {
+    it("carries the lines at their price, the dates in the site's timezone, and the company address", () => {
         // now === the order date, so delivery is a week out from a fixed clock, not the wall clock.
-        const out = buildSalesOrderDoc({ order, customerName: "Rao Traders", itemCodeFor, addresses: { billing: "Rao Traders-Billing" }, defaults: { ...defaults, shippingAccount: "Freight - FIPL" }, has: has([]), timezone: "Asia/Kolkata", now: new Date("2026-09-26T04:30:00.000Z") })
+        const out = buildSalesOrderDoc({ order, customerName: "Rao Traders", itemCodeFor, addresses: { billing: "Rao Traders-Billing" }, defaults: { ...defaults, companyAddress: "Fixcent-Billing" }, has: has([]), timezone: "Asia/Kolkata", now: new Date("2026-09-26T04:30:00.000Z") })
         expect(out.ok).toBe(true)
         if (!out.ok) return
         expect(out.doc).toMatchObject({
@@ -174,24 +176,26 @@ describe("the Sales Order", () => {
             po_no: "#42",
             currency: "INR",
             company: "FIXCENT INDIA PRIVATE LIMITED",
+            company_address: "Fixcent-Billing",
             selling_price_list: "Standard Selling",
             customer_address: "Rao Traders-Billing",
+            ignore_pricing_rule: 1,
         })
-        expect(out.doc.items).toEqual([{ item_code: "BOLT-1", item_name: "Bolt", qty: 2, rate: 1499, delivery_date: "2026-10-03" }])
-        // 3538.82 − 2×1499 − 539.64 = 1.18 of shipping
-        expect(out.doc.taxes).toEqual([{ charge_type: "Actual", account_head: "Freight - FIPL", description: "Shipping", tax_amount: 1.18 }])
+        expect(out.doc.items).toEqual([
+            { item_code: "BOLT-1", item_name: "Bolt", qty: 2, price_list_rate: 1499, discount_amount: 0, rate: 1499, delivery_date: "2026-10-03" },
+        ])
+        // Taxes are ERPNext's to choose; the builder sends none and no document-level discount.
+        expect(out.doc).not.toHaveProperty("taxes")
+        expect(out.doc).not.toHaveProperty("taxes_and_charges")
+        expect(out.doc).not.toHaveProperty("discount_amount")
         expect(out.notes).toEqual([])
     })
 
-    it("says when shipping cannot be booked, and books a discount on the grand total", () => {
-        const discounted = { ...order, total: 3400 }
+    it("puts a promotion on the line it hit, before tax", () => {
+        const discounted = { ...order, items: [{ ...order.items[0], adjustments: [{ amount: 199.8 }, { amount: 100 }] }] }
         const out = buildSalesOrderDoc({ order: discounted, customerName: "c", itemCodeFor, addresses: {}, defaults, has: has(["medusa_order_id"]) })
-        expect(out.ok).toBe(true)
-        if (!out.ok) return
-        expect(out.doc).toMatchObject({ apply_discount_on: "Grand Total", discount_amount: 137.64, medusa_order_id: "order_1" })
-        expect(out.doc).not.toHaveProperty("taxes")
-        const unbooked = buildSalesOrderDoc({ order, customerName: "c", itemCodeFor, addresses: {}, defaults, has: has([]) })
-        expect(unbooked.ok && unbooked.notes[0]).toMatch(/shipping 1.18 not booked/)
+        expect(out.ok && out.doc.items[0]).toMatchObject({ qty: 2, price_list_rate: 1499, discount_amount: 149.9, rate: 1349.1 })
+        expect(out.ok && out.doc).toMatchObject({ medusa_order_id: "order_1" })
     })
 
     it("stops on a line with no ERPNext Item, naming it", () => {
@@ -200,8 +204,16 @@ describe("the Sales Order", () => {
         expect(buildSalesOrderDoc({ order: { ...order, items: [] }, customerName: "c", itemCodeFor, addresses: {}, defaults, has: has([]) })).toMatchObject({ ok: false })
     })
 
-    it("totals: known shipping and discount win over the residual", () => {
-        expect(orderTotals({ total: 100, shipping_total: 10, discount_total: 5, items: [{ unit_price: 95, quantity: 1, tax_total: 0 }] })).toEqual({ subtotal: 95, tax: 0, shipping: 10, discount: 5, grand: 100 })
+    it("totals: shipping is net of its tax, and known figures win over the residual", () => {
+        expect(orderTotals({ total: 100, shipping_subtotal: 10, discount_total: 5, items: [{ unit_price: 95, quantity: 1, tax_total: 0 }] })).toEqual({ subtotal: 95, tax: 0, shipping: 10, discount: 5, grand: 100 })
+        expect(orderTotals({ total: 3538.82, items: order.items })).toMatchObject({ shipping: 1.18 })
+    })
+
+    it("reads net shipping from the subtotal, the methods, or the total less its tax", () => {
+        expect(shippingNet({ shipping_subtotal: 199, shipping_total: 234.82 })).toBe(199)
+        expect(shippingNet({ shipping_methods: [{ amount: 199, adjustments: [{ amount: 50 }] }, { amount: 10 }] })).toBe(159)
+        expect(shippingNet({ shipping_total: 234.82, shipping_tax_total: 35.82 })).toBe(199)
+        expect(shippingNet({})).toBeNull()
     })
 })
 
@@ -251,7 +263,8 @@ describe("transportFilledFields", () => {
         for (const f of ["customer", "transaction_date", "delivery_date", "currency", "selling_price_list", "items", "company"]) {
             expect(so.has(f)).toBe(true)
         }
-        expect(so.has("taxes_and_charges")).toBe(false)
+        // ERPNext chooses the taxes and the push sends them, with the company address.
+        for (const f of ["taxes_and_charges", "taxes", "company_address"]) expect(so.has(f)).toBe(true)
         expect(transportFilledFields("Sales Order", {}).has("company")).toBe(false)
         expect(transportFilledFields("Item", { company: "Mith" }).size).toBe(0)
     })
@@ -285,7 +298,7 @@ describe("the Sales Invoice built against a draft Sales Order", () => {
         expect(out.doc.delivery_date).toBeUndefined()
         expect(out.doc).toMatchObject({ posting_date: "2026-09-26", due_date: "2026-09-26", set_posting_time: 1, po_no: "#7", customer: "Rao Traders", custom_sales_type: "Service & Sales" })
         expect(out.doc.contact_email).toBeUndefined()
-        expect(out.doc.items).toEqual([{ item_code: "BOLT-1", item_name: "Bolt", qty: 2, rate: 1499, sales_order: "SAL-ORD-2026-00271", so_detail: "row1" }])
+        expect(out.doc.items).toEqual([{ item_code: "BOLT-1", item_name: "Bolt", qty: 2, price_list_rate: 1499, discount_amount: 0, rate: 1499, sales_order: "SAL-ORD-2026-00271", so_detail: "row1" }])
     })
 
     it("leaves a line unlinked when the order has no row for it, and links nothing without an order", () => {
@@ -305,24 +318,39 @@ describe("the Sales Invoice built against a draft Sales Order", () => {
     })
 })
 
-describe("withTemplateTaxes", () => {
-    it("puts the template's rows ahead of the shipping row, stripped of Frappe's row bookkeeping", () => {
-        const doc = { customer: "c", taxes: [{ charge_type: "Actual", account_head: "Freight - F", tax_amount: 100 }] }
-        const out = withTemplateTaxes(doc, [
-            { name: "abc", idx: 1, parent: "T", parenttype: "Sales Taxes and Charges Template", doctype: "Sales Taxes and Charges", charge_type: "On Net Total", account_head: "Output Tax CGST - F", rate: 9, description: "CGST" },
-            { name: "def", idx: 2, charge_type: "On Net Total", account_head: "Output Tax SGST - F", rate: 9, description: "SGST" },
-        ])
+describe("the tax rows of a sales document", () => {
+    const gstRows = [
+        { name: "row-1", idx: 1, parent: "x", charge_type: "On Net Total", account_head: "Output Tax SGST - SGPL", rate: 9, description: "SGST" },
+        { name: "row-2", idx: 2, parent: "x", charge_type: "On Net Total", account_head: "Output Tax CGST - SGPL", rate: 9, description: "CGST" },
+    ]
+
+    it("puts shipping ahead of the GST rows, which then tax it at each line's rate", () => {
+        const out = supplyTaxes({ gstRows, shipping: 100, shippingAccount: "Freight and Forwarding Charges - SGPL" })
+        expect(out.notes).toEqual([])
         expect(out.taxes).toEqual([
-            { charge_type: "On Net Total", account_head: "Output Tax CGST - F", rate: 9, description: "CGST" },
-            { charge_type: "On Net Total", account_head: "Output Tax SGST - F", rate: 9, description: "SGST" },
-            { charge_type: "Actual", account_head: "Freight - F", tax_amount: 100 },
+            { charge_type: "Actual", account_head: "Freight and Forwarding Charges - SGPL", description: "Shipping", tax_amount: 100 },
+            { charge_type: "On Previous Row Total", row_id: "1", account_head: "Output Tax SGST - SGPL", rate: 9, description: "SGST" },
+            { charge_type: "On Previous Row Total", row_id: "1", account_head: "Output Tax CGST - SGPL", rate: 9, description: "CGST" },
         ])
-        expect(doc.taxes).toHaveLength(1)
     })
-    it("leaves the document alone without a template", () => {
-        const doc = { customer: "c" }
-        expect(withTemplateTaxes(doc, null)).toBe(doc)
-        expect(withTemplateTaxes(doc, [])).toBe(doc)
+
+    it("sends ERPNext's rows as they are without shipping", () => {
+        const out = supplyTaxes({ gstRows, shipping: 0, shippingAccount: "Freight" })
+        expect(out.taxes.map((t) => t.charge_type)).toEqual(["On Net Total", "On Net Total"])
+        expect(out.taxes[0]).not.toHaveProperty("name")
+    })
+
+    it("says when shipping cannot be booked", () => {
+        const out = supplyTaxes({ gstRows, shipping: 199, shippingAccount: null })
+        expect(out.taxes).toHaveLength(2)
+        expect(out.notes[0]).toMatch(/shipping 199 not booked/)
+    })
+})
+
+describe("a sales line", () => {
+    it("rounds the per-unit discount and the net rate to the paisa, as ERPNext does", () => {
+        expect(salesLine({ unit_price: 1234.55, quantity: 2, adjustments: [{ amount: 246.91 }] })).toEqual({ price_list_rate: 1234.55, discount_amount: 123.46, rate: 1111.09, qty: 2 })
+        expect(salesLine({ unit_price: 1599, quantity: 1 })).toEqual({ price_list_rate: 1599, discount_amount: 0, rate: 1599, qty: 1 })
     })
 })
 
@@ -359,6 +387,11 @@ describe("the primary Contact", () => {
         })
     })
 
+    it("gives a nameless Contact the store's person, and never renames one", () => {
+        expect(primaryContactPatch({ first_name: "", email_ids: [], phone_nos: [] }, { first_name: "Asha", last_name: "Rao" })).toEqual({ first_name: "Asha", last_name: "Rao" })
+        expect(primaryContactPatch({ first_name: "Asha K", email_ids: [], phone_nos: [] }, { first_name: "Asha", last_name: "Rao" })).toBeNull()
+    })
+
     it("ignores blank values and a missing Contact", () => {
         expect(primaryContactPatch(contact, { email: "", phone: null })).toBeNull()
         expect(primaryContactPatch(null, { email: "a@b.c" })).toBeNull()
@@ -385,47 +418,14 @@ describe("the customer as an order knows them", () => {
     })
 })
 
-describe("the taxes template for the place of supply", () => {
-    const templates = [
-        { name: "Output GST In-state - SGPL", company: "SGPL", tax_category: "In-State", disabled: 0 },
-        { name: "Output GST Out-state - SGPL", company: "SGPL", tax_category: "Out-State", disabled: 0 },
-        { name: "Output GST RCM In-state - SGPL", company: "SGPL", tax_category: "Reverse Charge In-State", disabled: 0 },
-        { name: "Output GST RCM Out-state - SGPL", company: "SGPL", tax_category: "Reverse Charge Out-State", disabled: 0 },
-    ]
-    const categories = [
-        { name: "In-State", is_inter_state: 0, is_reverse_charge: 0 },
-        { name: "Out-State", is_inter_state: 1, is_reverse_charge: 0 },
-        { name: "Reverse Charge In-State", is_inter_state: 0, is_reverse_charge: 1 },
-        { name: "Reverse Charge Out-State", is_inter_state: 1, is_reverse_charge: 1 },
-    ]
-    const pick = (configured: string, supplyState: string | null, companyState: string | null = "29") =>
-        taxTemplateForSupply({ configured, templates, categories, companyState, supplyState })
-
-    it("keeps the in-state template for a supply inside the company's state", () => {
-        expect(pick("Output GST In-state - SGPL", "29")).toBe("Output GST In-state - SGPL")
-    })
-
-    it("switches to the inter-state template for another state", () => {
-        expect(pick("Output GST In-state - SGPL", "27")).toBe("Output GST Out-state - SGPL")
-    })
-
-    it("switches back when an inter-state template meets an intra-state supply, keeping reverse charge", () => {
-        expect(pick("Output GST RCM Out-state - SGPL", "29")).toBe("Output GST RCM In-state - SGPL")
-    })
-
-    it("keeps the Settings template when a state is unknown or the match is not unique", () => {
-        expect(pick("Output GST In-state - SGPL", null)).toBe("Output GST In-state - SGPL")
-        expect(pick("Output GST In-state - SGPL", "27", null)).toBe("Output GST In-state - SGPL")
-        const twice = [...templates, { name: "Output GST Out-state 2 - SGPL", company: "SGPL", tax_category: "Out-State", disabled: 0 }]
-        expect(taxTemplateForSupply({ configured: "Output GST In-state - SGPL", templates: twice, categories, companyState: "29", supplyState: "27" })).toBe(
-            "Output GST In-state - SGPL",
-        )
-    })
-
-    it("compares states by GST code, else by name", () => {
-        expect(supplyStateKey({ gst_state_number: "7", state: "Delhi" })).toBe("07")
-        expect(supplyStateKey({ state: " Maharashtra " })).toBe("maharashtra")
-        expect(supplyStateKey(null)).toBeNull()
+describe("GST state codes", () => {
+    it("come from a state's name, an alias or the code itself", () => {
+        expect(gstStateCodeOf("Karnataka")).toBe("29")
+        expect(gstStateCodeOf("NCT of Delhi")).toBe("07")
+        expect(gstStateCodeOf("27")).toBe("27")
+        expect(gstStateCodeOf("7")).toBe("07")
+        expect(gstStateCodeOf("Atlantis")).toBeNull()
+        expect(gstStateCodeOf(null)).toBeNull()
     })
 })
 
@@ -458,6 +458,13 @@ describe("GSTIN on addresses", () => {
             ],
         })
         expect(list.map((a) => [a.id, a.gstin])).toEqual([["a1", G], ["a2", null]])
+    })
+
+    it("types an address as the storefront recorded it, else from the default flags", () => {
+        expect(addressKind({ metadata: { address_type: "shipping" }, is_default_billing: true })).toBe("Shipping")
+        expect(addressKind({ metadata: { address_type: "Billing" } })).toBe("Billing")
+        expect(addressKind({ is_default_shipping: true, is_default_billing: false })).toBe("Shipping")
+        expect(addressKind({})).toBe("Billing")
     })
 
     it("carries a GSTIN typed at checkout onto the order's address", () => {
