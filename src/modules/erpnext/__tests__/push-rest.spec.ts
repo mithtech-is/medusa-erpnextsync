@@ -12,6 +12,10 @@ import {
     money,
     orderFullyPaid,
     orderTotals,
+    primaryContactPatch,
+    supplyStateKey,
+    taxTemplateForSupply,
+    withOrderContact,
     transportFilledFields,
     wantsSalesInvoice,
     wantsSalesOrder,
@@ -47,6 +51,52 @@ describe("the Customer document", () => {
         })
         expect(doc).toMatchObject({ customer_name: "Rao Traders", customer_type: "Company", gstin: "29ABCDE1234F1Z5", gst_category: "Registered Regular", customer_group: "Commercial" })
         expect(doc).not.toHaveProperty("mobile_no")
+    })
+
+    it("gives a new customer the Settings group, territory and GST category", () => {
+        const doc = buildCustomerDoc({
+            record,
+            mapped: {},
+            has: has(["customer_group", "territory", "gst_category"]),
+            defaults: { ...defaults, customerGroup: "Individual", territory: "India" },
+            remote: null,
+        })
+        expect(doc).toMatchObject({ customer_group: "Individual", territory: "India", gst_category: "Unregistered" })
+    })
+
+    it("leaves an existing customer's group, territory and GST category as ERPNext has them", () => {
+        const doc = buildCustomerDoc({
+            record,
+            mapped: {},
+            has: has(["customer_group", "territory", "gst_category"]),
+            defaults: { ...defaults, customerGroup: "Individual", territory: "India" },
+            remote: { customer_group: "Commercial", territory: "Rest Of The World", gst_category: "Registered Regular" },
+        })
+        expect(doc).not.toHaveProperty("customer_group")
+        expect(doc).not.toHaveProperty("territory")
+        expect(doc).not.toHaveProperty("gst_category")
+    })
+
+    it("fills an existing customer's blank group and territory from Settings", () => {
+        const doc = buildCustomerDoc({
+            record,
+            mapped: {},
+            has: has(["customer_group", "territory"]),
+            defaults: { ...defaults, customerGroup: "Individual", territory: "India" },
+            remote: { customer_group: null, territory: "" },
+        })
+        expect(doc).toMatchObject({ customer_group: "Individual", territory: "India" })
+    })
+
+    it("still marks an existing customer registered when the store sends a GSTIN", () => {
+        const doc = buildCustomerDoc({
+            record,
+            mapped: { gstin: "29ZZZPZ0001Z1Z5" },
+            has: has(["gstin", "gst_category"]),
+            defaults,
+            remote: { gst_category: "Unregistered" },
+        })
+        expect(doc).toMatchObject({ gstin: "29ZZZPZ0001Z1Z5", gst_category: "Registered Regular" })
     })
 
     it("names a customer by company, then person, then email", () => {
@@ -272,5 +322,108 @@ describe("withTemplateTaxes", () => {
         const doc = { customer: "c" }
         expect(withTemplateTaxes(doc, null)).toBe(doc)
         expect(withTemplateTaxes(doc, [])).toBe(doc)
+    })
+})
+
+describe("the primary Contact", () => {
+    const contact = {
+        name: "Amit Rao",
+        email_ids: [{ name: "e1", email_id: "amit@example.com", is_primary: 1, doctype: "Contact Email", parent: "Amit Rao" }],
+        phone_nos: [{ name: "p1", phone: "+919845012345", is_primary_mobile_no: 1, is_primary_phone: 0 }],
+    }
+
+    it("changes nothing when the Contact already has the store's values", () => {
+        expect(primaryContactPatch(contact, { email: "Amit@Example.com", phone: "+91 98450 12345" })).toBeNull()
+    })
+
+    it("puts a new phone on the primary mobile row, keeping the row", () => {
+        const patch = primaryContactPatch(contact, { phone: "+919000000004" })
+        expect(patch).toEqual({ phone_nos: [{ name: "p1", phone: "+919000000004", is_primary_mobile_no: 1, is_primary_phone: 0 }] })
+    })
+
+    it("makes an existing row primary rather than duplicating it", () => {
+        const two = { ...contact, email_ids: [...contact.email_ids, { name: "e2", email_id: "rao@work.in", is_primary: 0 }] }
+        const patch = primaryContactPatch(two, { email: "rao@work.in" })
+        expect(patch?.email_ids).toEqual([
+            { name: "e1", email_id: "amit@example.com", is_primary: 0 },
+            { name: "e2", email_id: "rao@work.in", is_primary: 1 },
+        ])
+    })
+
+    it("adds a primary row to a Contact that has none", () => {
+        const patch = primaryContactPatch({ email_ids: [], phone_nos: [] }, { email: "new@x.in", phone: "+919000000001" })
+        expect(patch).toEqual({
+            email_ids: [{ email_id: "new@x.in", is_primary: 1 }],
+            phone_nos: [{ phone: "+919000000001", is_primary_mobile_no: 1 }],
+        })
+    })
+
+    it("ignores blank values and a missing Contact", () => {
+        expect(primaryContactPatch(contact, { email: "", phone: null })).toBeNull()
+        expect(primaryContactPatch(null, { email: "a@b.c" })).toBeNull()
+    })
+})
+
+describe("the customer as an order knows them", () => {
+    const order = { billing_address: { first_name: "ZZ Test", last_name: "Sync 2", phone: "+919000000009", company: "" } }
+
+    it("names a nameless guest from the billing address", () => {
+        const rec = withOrderContact({ id: "cus_1", email: "g@x.in", first_name: null, last_name: "" }, order)
+        expect(rec).toMatchObject({ first_name: "ZZ Test", last_name: "Sync 2", phone: "+919000000009" })
+        expect(customerDisplayName(rec)).toBe("ZZ Test Sync 2")
+    })
+
+    it("keeps what the customer record already says", () => {
+        const rec = withOrderContact({ id: "cus_1", first_name: "Amit", last_name: "Rao", phone: "+911" }, order)
+        expect(rec).toMatchObject({ first_name: "Amit", last_name: "Rao", phone: "+911" })
+    })
+
+    it("leaves a record alone when the order has no address", () => {
+        const rec = { id: "cus_1" }
+        expect(withOrderContact(rec, {})).toBe(rec)
+    })
+})
+
+describe("the taxes template for the place of supply", () => {
+    const templates = [
+        { name: "Output GST In-state - SGPL", company: "SGPL", tax_category: "In-State", disabled: 0 },
+        { name: "Output GST Out-state - SGPL", company: "SGPL", tax_category: "Out-State", disabled: 0 },
+        { name: "Output GST RCM In-state - SGPL", company: "SGPL", tax_category: "Reverse Charge In-State", disabled: 0 },
+        { name: "Output GST RCM Out-state - SGPL", company: "SGPL", tax_category: "Reverse Charge Out-State", disabled: 0 },
+    ]
+    const categories = [
+        { name: "In-State", is_inter_state: 0, is_reverse_charge: 0 },
+        { name: "Out-State", is_inter_state: 1, is_reverse_charge: 0 },
+        { name: "Reverse Charge In-State", is_inter_state: 0, is_reverse_charge: 1 },
+        { name: "Reverse Charge Out-State", is_inter_state: 1, is_reverse_charge: 1 },
+    ]
+    const pick = (configured: string, supplyState: string | null, companyState: string | null = "29") =>
+        taxTemplateForSupply({ configured, templates, categories, companyState, supplyState })
+
+    it("keeps the in-state template for a supply inside the company's state", () => {
+        expect(pick("Output GST In-state - SGPL", "29")).toBe("Output GST In-state - SGPL")
+    })
+
+    it("switches to the inter-state template for another state", () => {
+        expect(pick("Output GST In-state - SGPL", "27")).toBe("Output GST Out-state - SGPL")
+    })
+
+    it("switches back when an inter-state template meets an intra-state supply, keeping reverse charge", () => {
+        expect(pick("Output GST RCM Out-state - SGPL", "29")).toBe("Output GST RCM In-state - SGPL")
+    })
+
+    it("keeps the Settings template when a state is unknown or the match is not unique", () => {
+        expect(pick("Output GST In-state - SGPL", null)).toBe("Output GST In-state - SGPL")
+        expect(pick("Output GST In-state - SGPL", "27", null)).toBe("Output GST In-state - SGPL")
+        const twice = [...templates, { name: "Output GST Out-state 2 - SGPL", company: "SGPL", tax_category: "Out-State", disabled: 0 }]
+        expect(taxTemplateForSupply({ configured: "Output GST In-state - SGPL", templates: twice, categories, companyState: "29", supplyState: "27" })).toBe(
+            "Output GST In-state - SGPL",
+        )
+    })
+
+    it("compares states by GST code, else by name", () => {
+        expect(supplyStateKey({ gst_state_number: "7", state: "Delhi" })).toBe("07")
+        expect(supplyStateKey({ state: " Maharashtra " })).toBe("maharashtra")
+        expect(supplyStateKey(null)).toBeNull()
     })
 })

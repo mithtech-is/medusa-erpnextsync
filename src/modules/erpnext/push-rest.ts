@@ -53,14 +53,23 @@ export function customerDisplayName(record: any): string {
  * The Customer document: whatever the mapping produced, with the
  * mandatory and the well-known fields filled from the record when the
  * mapping left them out. A mapped value always wins.
+ *
+ * `remote` is the Customer as ERPNext holds it now, when it exists. The
+ * Settings defaults (customer group, territory) and an "Unregistered" GST
+ * category only fill what is blank there: they are what a new customer
+ * starts with, not a value to put back over an ERPNext user's choice on
+ * every save in the store.
  */
 export function buildCustomerDoc(args: {
     record: any
     mapped: Record<string, any>
     has: HasField
     defaults: PushDefaults
+    remote?: Record<string, any> | null
 }): Record<string, any> {
     const { record, has, defaults } = args
+    const remote = args.remote ?? null
+    const blankThere = (field: string) => !remote || remote[field] === null || remote[field] === undefined || remote[field] === ""
     const doc: Record<string, any> = { ...args.mapped }
     if (!doc.customer_name) doc.customer_name = customerDisplayName(record)
     if (!doc.customer_type) {
@@ -70,13 +79,91 @@ export function buildCustomerDoc(args: {
     if (has("mobile_no") && doc.mobile_no === undefined && record?.phone) doc.mobile_no = record.phone
     if (has("gstin") && doc.gstin === undefined && record?.gstin) doc.gstin = record.gstin
     if (has("gst_category") && doc.gst_category === undefined) {
-        doc.gst_category = doc.gstin || record?.gstin ? "Registered Regular" : "Unregistered"
+        if (doc.gstin || record?.gstin) doc.gst_category = "Registered Regular"
+        else if (blankThere("gst_category")) doc.gst_category = "Unregistered"
     }
-    if (has("customer_group") && doc.customer_group === undefined && defaults.customerGroup) {
+    if (has("customer_group") && doc.customer_group === undefined && defaults.customerGroup && blankThere("customer_group")) {
         doc.customer_group = defaults.customerGroup
     }
-    if (has("territory") && doc.territory === undefined && defaults.territory) doc.territory = defaults.territory
+    if (has("territory") && doc.territory === undefined && defaults.territory && blankThere("territory")) {
+        doc.territory = defaults.territory
+    }
     return doc
+}
+
+// ── Contact ──────────────────────────────────────────────────────────
+
+/**
+ * What a customer's primary Contact must change to carry the store's email
+ * and phone.
+ *
+ * ERPNext keeps a Customer's `email_id` and `mobile_no` as read-only copies
+ * fetched from its primary Contact, so writing them on the Customer is
+ * undone by the next save; the Contact's rows are where they live. A value
+ * the Contact already has is made primary; otherwise the primary row takes
+ * the new value, or a primary row is added. Null when nothing changes.
+ */
+export function primaryContactPatch(
+    contact: { email_ids?: any[] | null; phone_nos?: any[] | null } | null | undefined,
+    want: { email?: string | null; phone?: string | null },
+): { email_ids?: any[]; phone_nos?: any[] } | null {
+    if (!contact) return null
+    const patch: { email_ids?: any[]; phone_nos?: any[] } = {}
+    const email = String(want.email ?? "").trim().toLowerCase()
+    if (email) {
+        const rows = childRows(contact.email_ids)
+        const next = promote(rows, "email_id", email, "is_primary", (a, b) => a.toLowerCase() === b)
+        if (next) patch.email_ids = next
+    }
+    const phone = String(want.phone ?? "").trim()
+    if (phone) {
+        const rows = childRows(contact.phone_nos)
+        const digits = (v: string) => v.replace(/[^\d]/g, "")
+        const next = promote(rows, "phone", phone, "is_primary_mobile_no", (a, b) => digits(a) === digits(b))
+        if (next) patch.phone_nos = next
+    }
+    return patch.email_ids || patch.phone_nos ? patch : null
+}
+
+function childRows(rows: any[] | null | undefined): any[] {
+    return (Array.isArray(rows) ? rows : [])
+        .filter((r) => r && typeof r === "object")
+        .map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => k === "name" || !CHILD_META_KEYS.has(k))))
+}
+
+/** The rows with `value` as the one primary row, or null when it already is. */
+function promote(
+    rows: any[],
+    field: string,
+    value: string,
+    flag: string,
+    same: (a: string, b: string) => boolean,
+): any[] | null {
+    const hit = rows.findIndex((r) => same(String(r?.[field] ?? ""), value))
+    const primary = rows.findIndex((r) => Number(r?.[flag]) === 1)
+    if (hit >= 0 && hit === primary) return null
+    if (hit >= 0) return rows.map((r, i) => ({ ...r, [flag]: i === hit ? 1 : 0 }))
+    if (primary >= 0) return rows.map((r, i) => (i === primary ? { ...r, [field]: value } : r))
+    return [...rows.map((r) => ({ ...r, [flag]: 0 })), { [field]: value, [flag]: 1 }]
+}
+
+/**
+ * The customer as an order knows them. A guest checkout leaves Medusa a
+ * customer with an email and nothing else, while the order's billing
+ * address carries the name, phone and company; without them ERPNext names
+ * the Customer after the email address. The record's own values win.
+ */
+export function withOrderContact(record: any, order: any): any {
+    const a = order?.billing_address ?? order?.shipping_address ?? null
+    if (!record || !a) return record
+    const fill = (own: unknown, from: unknown) => (String(own ?? "").trim() ? own : String(from ?? "").trim() || own)
+    return {
+        ...record,
+        first_name: fill(record.first_name, a.first_name),
+        last_name: fill(record.last_name, a.last_name),
+        phone: fill(record.phone, a.phone),
+        company_name: fill(record.company_name, a.company),
+    }
 }
 
 // ── Addresses ────────────────────────────────────────────────────────
@@ -374,6 +461,53 @@ export function withTemplateTaxes(doc: Record<string, any>, templateRows: any[] 
         .map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CHILD_META_KEYS.has(k))))
     if (!rows.length) return doc
     return { ...doc, taxes: [...rows, ...(Array.isArray(doc.taxes) ? doc.taxes : [])] }
+}
+
+export type TaxTemplateInfo = { name: string; company?: string | null; tax_category?: string | null; disabled?: number | boolean | null }
+export type TaxCategoryInfo = { name: string; is_inter_state?: number | boolean | null; is_reverse_charge?: number | boolean | null }
+
+/** A state as the GST rules compare it: its code when known, else its name. */
+export function supplyStateKey(address: { gst_state_number?: unknown; state?: unknown } | null | undefined): string | null {
+    const code = String(address?.gst_state_number ?? "").trim()
+    if (code) return code.padStart(2, "0")
+    const name = String(address?.state ?? "").trim().toLowerCase()
+    return name || null
+}
+
+/**
+ * The taxes template for where the goods go.
+ *
+ * Settings name one template, and GST will not take intra-state tax
+ * (CGST + SGST) on a supply that crosses a state line, nor IGST on one
+ * that does not; ERPNext refuses the document. When the supply's state and
+ * the company's differ from what the named template's Tax Category says,
+ * the company's one other template of the matching kind (inter-state or
+ * not, reverse charge or not) is used. Unknown states, a template without
+ * a category, or no single match leave the Settings template as it is.
+ */
+export function taxTemplateForSupply(args: {
+    configured: string | null | undefined
+    templates: TaxTemplateInfo[]
+    categories: TaxCategoryInfo[]
+    companyState: string | null | undefined
+    supplyState: string | null | undefined
+}): string | null {
+    const configured = args.configured ? String(args.configured) : null
+    if (!configured || !args.companyState || !args.supplyState) return configured
+    const flag = (v: unknown) => v === true || Number(v) === 1
+    const categoryOf = (name: string | null | undefined) => args.categories.find((c) => c.name === name)
+    const base = args.templates.find((t) => t.name === configured)
+    const baseCategory = categoryOf(base?.tax_category)
+    if (!base || !baseCategory) return configured
+    const interState = args.companyState !== args.supplyState
+    if (flag(baseCategory.is_inter_state) === interState) return configured
+    const matches = args.templates.filter((t) => {
+        if (t.name === configured || flag(t.disabled)) return false
+        if ((t.company ?? null) !== (base.company ?? null)) return false
+        const c = categoryOf(t.tax_category)
+        return Boolean(c) && flag(c!.is_inter_state) === interState && flag(c!.is_reverse_charge) === flag(baseCategory.is_reverse_charge)
+    })
+    return matches.length === 1 ? matches[0].name : configured
 }
 
 /** Has the order been paid in full? Captured payments cover the total,

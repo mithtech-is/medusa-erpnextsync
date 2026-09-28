@@ -34,7 +34,7 @@ import {
 } from "./push-guard"
 import { evaluateTrigger, presetCondition, validateTrigger } from "./trigger"
 import { mergeDirection, mergeEvents, mergeFieldPairs, pairUidOf } from "./pair-identity"
-import { entityRefOf, isWithinEchoWindow } from "./echo"
+import { entityRefOf, isWithinEchoWindow, pushChangesRemote } from "./echo"
 import { OUTBOUND_PAUSED, OUTBOUND_PAUSED_MESSAGE, pausedResult } from "./outbound"
 import {
     DEFAULT_SYNC_DOCTYPES,
@@ -49,13 +49,19 @@ import {
     type SyncDoctype,
     withSelectionFilter,
 } from "./selection"
-import { FrappeWebhookBody, frappeEventId, planFrappeEvent, supersededBy } from "./frappe-webhook"
+import { FrappeWebhookBody, frappeEventId, planFrappeEvent, supersededBy, withRepublish } from "./frappe-webhook"
 import { makeFrappeClient, type FrappeClient } from "./frappe-client"
 import {
     addressesOfCustomer,
     addressesOfOrder,
     buildAddressDoc,
     buildCustomerDoc,
+    primaryContactPatch,
+    withOrderContact,
+    supplyStateKey,
+    taxTemplateForSupply,
+    type TaxCategoryInfo,
+    type TaxTemplateInfo,
     buildSalesInvoiceDoc,
     buildSalesOrderDoc,
     directionForCreated,
@@ -3331,9 +3337,18 @@ class ErpnextModuleService extends MedusaService({
         }
         // ERPNext's own change coming home: an inbound write touched this
         // record moments ago, and the event it emitted is what brought us
-        // here. Pushing it back would only bounce it again.
+        // here. Pushing it back would only bounce it again. A push that
+        // would change the document is a person's edit made inside the
+        // window, and travels.
         const entityRef = `${args.mapping.medusa_entity}:${args.record?.id ?? ""}`
-        if (args.record?.id != null && (await this.recentInboundEcho(entityRef))) {
+        if (
+            args.record?.id != null &&
+            (await this.recentInboundEcho(entityRef)) &&
+            !pushChangesRemote(
+                transform.payload,
+                await this.linkedRemoteDoc(rest.client, args.mapping.medusa_entity, String(args.record.id), String(args.mapping.doctype)),
+            )
+        ) {
             await this.upsertEventRow(
                 { event: args.event, event_id: args.event_id, data: args.record },
                 {
@@ -3506,6 +3521,62 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /**
+     * The Settings taxes template, or its sibling when the supply crosses
+     * (or does not cross) a state line the template assumes. Anything that
+     * cannot be read keeps the Settings template.
+     */
+    private async taxesTemplateForSupply(
+        client: FrappeClient,
+        defaults: PushDefaults,
+        supplyAddress: string | null,
+    ): Promise<string | null> {
+        const configured = defaults.taxesTemplate ?? null
+        if (!configured || !supplyAddress) return configured
+        try {
+            const now = Date.now()
+            const company = defaults.company ?? ""
+            let site = _gstSiteCache.get(company)
+            if (!site || site.expiresAt < now) {
+                const list = async (doctype: string, fields: string[], filters: any[] = []) => {
+                    const res = await client.get(`/api/resource/${encodeURIComponent(doctype)}`, {
+                        fields: JSON.stringify(fields),
+                        filters: JSON.stringify(filters),
+                        limit_page_length: "500",
+                    })
+                    return res.ok === true && Array.isArray(res.data) ? res.data : null
+                }
+                const companyAddresses = await list(
+                    "Address",
+                    ["name", "gst_state_number", "state"],
+                    [
+                        ["Dynamic Link", "link_doctype", "=", "Company"],
+                        ["Dynamic Link", "link_name", "=", company],
+                        ["is_your_company_address", "=", 1],
+                    ],
+                )
+                site = {
+                    companyState: supplyStateKey(companyAddresses?.[0]),
+                    templates: (await list("Sales Taxes and Charges Template", ["name", "company", "tax_category", "disabled"])) ?? [],
+                    categories: (await list("Tax Category", ["name", "is_inter_state", "is_reverse_charge"])) ?? [],
+                    expiresAt: now + 60 * 60 * 1000,
+                }
+                _gstSiteCache.set(company, site)
+            }
+            const res = await client.get(`/api/resource/Address/${encodeURIComponent(supplyAddress)}`)
+            const supplyState = res.ok === true ? supplyStateKey(res.data) : null
+            return taxTemplateForSupply({
+                configured,
+                templates: site.templates,
+                categories: site.categories,
+                companyState: site.companyState,
+                supplyState,
+            })
+        } catch {
+            return configured
+        }
+    }
+
+    /**
      * What ERPNext's form does on its own: expand the taxes template and
      * render the Terms and Conditions text from `tc_name`. Neither happens
      * for a REST write on its own (the template only on a brand-new
@@ -3559,6 +3630,20 @@ class ErpnextModuleService extends MedusaService({
         } catch {
             return false
         }
+    }
+
+    /** The ERPNext document this Medusa record became, or null when there
+     *  is no link or it cannot be read. */
+    private async linkedRemoteDoc(
+        client: FrappeClient,
+        medusa_entity: string,
+        medusa_id: string,
+        doctype: string,
+    ): Promise<Record<string, any> | null> {
+        const link = await this.remoteNameFor(medusa_entity, medusa_id, doctype)
+        if (!link?.erpnext_name) return null
+        const res = await client.get(`/api/resource/${encodeURIComponent(doctype)}/${encodeURIComponent(link.erpnext_name)}`)
+        return res.ok && res.data ? res.data : null
     }
 
     /** The ERPNext name this Medusa record became, from the link table. */
@@ -3738,7 +3823,7 @@ class ErpnextModuleService extends MedusaService({
      * email as a last resort.
      */
     private async pushCustomerDoc(ctx: PushContext): Promise<PushOutcome> {
-        const { client, mapping, record } = ctx
+        const { client, cfg, mapping, record } = ctx
         const has = await this.hasFieldFn("Customer")
         const defaults = await this.pushDefaults(client)
         const link = record?.id != null ? await this.remoteNameFor("customer", String(record.id), "Customer") : null
@@ -3748,7 +3833,31 @@ class ErpnextModuleService extends MedusaService({
         }
         if (existing && mapping.allow_update === false) return { ok: true, status: "skipped", reason: "update not allowed by the mapping" }
         if (!existing && mapping.allow_create === false) return { ok: true, status: "skipped", reason: "create not allowed by the mapping" }
-        const doc = buildCustomerDoc({ record, mapped: ctx.payload, has, defaults })
+        const notes: string[] = []
+        let remote: Record<string, any> | null = null
+        if (existing) {
+            const res = await client.get(`/api/resource/Customer/${encodeURIComponent(existing)}`)
+            if (res.ok && res.data) remote = res.data
+            else if (res.status === 404) existing = null
+        }
+        const doc = buildCustomerDoc({ record, mapped: ctx.payload, has, defaults, remote })
+        // A Customer this store creates is selected in ERPNext from the
+        // start, so the reconcile keeps it and later pushes are not refused
+        // as unselected.
+        let stamped: string | undefined
+        if (!existing && isSyncDoctype("Customer", cfg.sync_doctypes) && doc[SELECTION_FIELD] === undefined) {
+            stamped = directionForCreated(mapping.direction)
+            doc[SELECTION_FIELD] = stamped
+        }
+        // The Contact first: the Customer's email and phone are fetched from
+        // it when the Customer is saved.
+        if (remote?.customer_primary_contact) {
+            const contact = await this.syncPrimaryContact(client, String(remote.customer_primary_contact), {
+                email: doc.email_id,
+                phone: doc.mobile_no,
+            })
+            if (contact.ok === false) notes.push(`contact ${remote.customer_primary_contact}: ${contact.reason}`)
+        }
         const written = await this.writeRemote(client, "Customer", existing, doc)
         if (written.ok === false) return written
         if (record?.id != null) {
@@ -3759,14 +3868,29 @@ class ErpnextModuleService extends MedusaService({
                 medusa_id: String(record.id),
                 mapping_id: mapping.id,
                 state: "active",
+                ...(stamped !== undefined ? { remote_direction: stamped } : {}),
             })
         }
-        const notes: string[] = []
         for (const input of addressesOfCustomer(record)) {
             const out = await this.syncAddress(client, written.name, input)
             if (out.ok === false) notes.push(`address ${input.id}: ${out.reason}`)
         }
         return { ok: true, status: "success", action: written.created ? "created" : "updated", name: written.name, notes }
+    }
+
+    /** Put the store's email and phone on a customer's primary Contact. */
+    private async syncPrimaryContact(
+        client: FrappeClient,
+        contactName: string,
+        want: { email?: string | null; phone?: string | null },
+    ): Promise<{ ok: true; changed: boolean } | { ok: false; reason: string }> {
+        const res = await client.get(`/api/resource/Contact/${encodeURIComponent(contactName)}`)
+        if (res.ok !== true || !res.data) return { ok: false, reason: `not readable (HTTP ${res.status ?? "?"})` }
+        const patch = primaryContactPatch(res.data, want)
+        if (!patch) return { ok: true, changed: false }
+        const written = await this.writeRemote(client, "Contact", contactName, patch)
+        if (written.ok === false) return { ok: false, reason: written.error }
+        return { ok: true, changed: true }
     }
 
     /** One Address document for a customer, keyed by the Medusa address id. */
@@ -3814,7 +3938,7 @@ class ErpnextModuleService extends MedusaService({
                         mapping: customerMapping,
                         event: "customer.updated",
                         event_id: `order:${order.id}:customer:${order.customer_id}`,
-                        record: customer,
+                        record: withOrderContact(customer, order),
                         container,
                     })
                     if (pushed.ok && pushed.status === "success") {
@@ -3843,6 +3967,10 @@ class ErpnextModuleService extends MedusaService({
             has,
             defaults: await this.pushDefaults(client),
         })
+        // Made from an order, so it is the store's: selected Medusa → ERPNext,
+        // which the reconcile leaves alone.
+        const stamped = isSyncDoctype("Customer", ctx.cfg.sync_doctypes) ? directionForCreated("push") : undefined
+        if (stamped) doc[SELECTION_FIELD] = stamped
         const written = await this.writeRemote(client, "Customer", null, doc)
         if (written.ok === false) return { ok: false, error: `customer: ${written.error}` }
         await this.recordLink({
@@ -3851,6 +3979,7 @@ class ErpnextModuleService extends MedusaService({
             medusa_entity: "customer",
             medusa_id: order?.customer_id ? String(order.customer_id) : `email:${email}`,
             state: "active",
+            ...(stamped ? { remote_direction: stamped } : {}),
         })
         return { ok: true, name: written.name }
     }
@@ -3904,7 +4033,10 @@ class ErpnextModuleService extends MedusaService({
         for (const li of Array.isArray(order?.items) ? order.items : []) {
             lineCodes.set(String(li?.id ?? li?.title), await this.itemCodeForLine(client, li, codes))
         }
-        const defaults = await this.pushDefaults(client)
+        const settingsDefaults = await this.pushDefaults(client)
+        const taxesTemplate = await this.taxesTemplateForSupply(client, settingsDefaults, addresses.shipping ?? addresses.billing ?? null)
+        if (taxesTemplate && taxesTemplate !== settingsDefaults.taxesTemplate) notes.push(`taxes: ${taxesTemplate} for the place of supply`)
+        const defaults = { ...settingsDefaults, taxesTemplate }
         const timezone = await this.siteTimezone()
         const orderDocument = settings?.order_document ?? null
         const wantSO = wantsSalesOrder(orderDocument) || mapping.doctype === "Sales Order"
@@ -4599,9 +4731,7 @@ class ErpnextModuleService extends MedusaService({
                 continue
             }
             const rowName = row?.name != null ? String(row.name) : keyValue
-            const payload = draftedByName.has(rowName)
-                ? { ...transform.payload, status: "published" }
-                : transform.payload
+            const payload = withRepublish(transform.payload, draftedByName.has(rowName))
             const outcome = await entity.upsertByKey(
                 args.container,
                 mapping.key_medusa_field,
@@ -5012,7 +5142,7 @@ class ErpnextModuleService extends MedusaService({
                 })
                 continue
             }
-            const payload = plan.republish ? { ...transform.payload, status: "published" } : transform.payload
+            const payload = withRepublish(transform.payload, plan.republish)
             const outcome = await entity.upsertByKey(scope, mapping.key_medusa_field, plan.key, payload)
             if (outcome.ok && outcome.id) {
                 await this.recordLink({
@@ -5202,7 +5332,7 @@ class ErpnextModuleService extends MedusaService({
                 key_field: mapping.key_medusa_field,
                 key_value: plan.key,
                 republish: plan.republish,
-                payload: plan.republish ? { ...transform.payload, status: "published" } : transform.payload,
+                payload: withRepublish(transform.payload, plan.republish),
                 skipped_fields: transform.skippedFields,
                 link: linkView,
             })
@@ -5480,6 +5610,11 @@ let _apiUserCache: { value: string | null; expiresAt: number } | null = null
 /** ERPNext Country names by ISO code, per process. */
 let _countryCache: { map: Map<string, string>; expiresAt: number } | null = null
 const _taxTemplateCache = new Map<string, { rows: any[]; expiresAt: number }>()
+/** Per company: its GST state and the site's templates and tax categories. */
+const _gstSiteCache = new Map<
+    string,
+    { companyState: string | null; templates: TaxTemplateInfo[]; categories: TaxCategoryInfo[]; expiresAt: number }
+>()
 /** ERPNext's own defaults for pushed documents, per process. */
 let _defaultsCache: { company: string | null; priceList: string | null; expiresAt: number } | null = null
 

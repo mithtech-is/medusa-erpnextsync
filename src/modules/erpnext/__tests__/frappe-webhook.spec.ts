@@ -8,6 +8,7 @@ import {
     safeEq,
     supersededBy,
     verifyFrappeSignature,
+    withRepublish,
 } from "../frappe-webhook"
 
 /**
@@ -220,5 +221,20 @@ describe("replaying a stored delivery", () => {
         expect(supersededBy(body, [{ status: "success", payload: { doctype: "Item", name: "SKU-1", doc: { modified: "2026-09-26 09:00:00" } } }])).toBe(false)
         expect(supersededBy(body, [{ status: "failed", payload: { doctype: "Item", name: "SKU-1", doc: { modified: "2026-09-26 11:00:00" } } }])).toBe(false)
         expect(supersededBy(body, [])).toBe(false)
+    })
+})
+
+describe("withRepublish", () => {
+    it("puts a drafted product selected again back on sale", () => {
+        expect(withRepublish({ title: "A" }, true)).toEqual({ title: "A", status: "published" })
+    })
+
+    it("keeps a status the mapping produced, so a disabled Item selected again stays draft", () => {
+        expect(withRepublish({ title: "A", status: "draft" }, true)).toEqual({ title: "A", status: "draft" })
+    })
+
+    it("leaves an ordinary update alone", () => {
+        const payload = { title: "A" }
+        expect(withRepublish(payload, false)).toBe(payload)
     })
 })

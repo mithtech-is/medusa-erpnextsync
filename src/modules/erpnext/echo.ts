@@ -54,3 +54,41 @@ export function isWithinEchoWindow(
     if (!Number.isFinite(t)) return false
     return now - t <= window && now - t >= -window
 }
+
+/**
+ * Does a push carry anything the ERPNext document does not already hold?
+ *
+ * Time alone cannot tell an echo from a person: someone editing the record
+ * here a minute after ERPNext changed it is inside the window too, and
+ * dropping that edit loses it for good. An echo repeats what ERPNext just
+ * wrote, so it changes nothing there; anything that would change a field
+ * is a real edit and must travel. A document that could not be read counts
+ * as changed.
+ */
+export function pushChangesRemote(
+    payload: Record<string, any> | null | undefined,
+    remote: Record<string, any> | null | undefined,
+): boolean {
+    if (!remote) return true
+    for (const [field, value] of Object.entries(payload ?? {})) {
+        if (value === undefined) continue
+        if (!sameRemoteValue(value, remote[field])) return true
+    }
+    return false
+}
+
+/** Frappe answers 0/1 for a Check, numbers for a Float and "" or null for
+ *  an empty field, whatever the push sent; compare what the values mean. */
+function sameRemoteValue(ours: unknown, theirs: unknown): boolean {
+    const blank = (v: unknown) => v === null || v === undefined || (typeof v === "string" && v.trim() === "")
+    if (blank(ours) || blank(theirs)) return blank(ours) && blank(theirs)
+    if (typeof ours === "object" || typeof theirs === "object") return JSON.stringify(ours) === JSON.stringify(theirs)
+    const a = String(ours).trim()
+    const b = String(theirs).trim()
+    if (a === b) return true
+    const na = Number(a)
+    const nb = Number(b)
+    if (Number.isFinite(na) && Number.isFinite(nb)) return na === nb
+    if (typeof ours === "boolean" || typeof theirs === "boolean") return Boolean(ours) === (b === "1" || b === "true")
+    return false
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { ECHO_WINDOW_MS, entityRefOf, isWithinEchoWindow } from "../echo"
+import { ECHO_WINDOW_MS, entityRefOf, isWithinEchoWindow, pushChangesRemote } from "../echo"
 
 describe("entityRefOf", () => {
     it("names the record a mapping-driven apply wrote", () => {
@@ -60,5 +60,26 @@ describe("echo window", () => {
 
     it("tolerates a small clock skew forward", () => {
         expect(isWithinEchoWindow(new Date(now + 2_000), now)).toBe(true)
+    })
+})
+
+describe("pushChangesRemote", () => {
+    const remote = { email_id: "zz@example.com", mobile_no: "+919000000001", gstin: "29ZZZPZ0001Z1Z5", disabled: 0, qty: 2 }
+
+    it("is false for an echo: every value is already on the document", () => {
+        expect(pushChangesRemote({ email_id: "zz@example.com", mobile_no: "+919000000001", gstin: "29ZZZPZ0001Z1Z5" }, remote)).toBe(false)
+    })
+
+    it("is true for an edit made inside the window", () => {
+        expect(pushChangesRemote({ email_id: "zz@example.com", mobile_no: "+919000000004" }, remote)).toBe(true)
+    })
+
+    it("reads Frappe's 0/1, numbers and blanks as the values they mean", () => {
+        expect(pushChangesRemote({ disabled: false, qty: "2", pan: "" }, { ...remote, pan: null })).toBe(false)
+        expect(pushChangesRemote({ disabled: true }, remote)).toBe(true)
+    })
+
+    it("counts a document it could not read as changed", () => {
+        expect(pushChangesRemote({ email_id: "zz@example.com" }, null)).toBe(true)
     })
 })
