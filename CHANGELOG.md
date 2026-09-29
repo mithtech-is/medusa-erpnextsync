@@ -3,6 +3,21 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.6.1 — 2026-09-29
+
+Found by the production test of 0.6.0.
+
+- **A new product gets its price at once.** An Item and its first Item Price are saved together
+  and the price's webhook could land before the product existed, leaving the product unpriced
+  until the 5-minute pull. A product created from an Item webhook now reads its stock and price
+  itself.
+- **The store's total is exactly ERPNext's rounded total.** When shipping is shared across
+  several GST rates, Medusa's tax can leave a fraction of a paisa (order total 7140.000306772).
+  The rounding line now takes that fraction too.
+- **A cancelled Delivery Note stays a failed event.** Frappe redelivers a webhook that fails, and
+  the redelivery passed because the first attempt had already marked the link. The link is now
+  left as it is, so the event keeps saying to record a return in Medusa.
+
 ## 0.6.0 — 2026-09-29
 
 GST is ERPNext's: India Compliance computes it, and the store charges exactly what ERPNext will

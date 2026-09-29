@@ -4522,14 +4522,15 @@ class ErpnextModuleService extends MedusaService({
                 // Medusa cancels a fulfilment only before it ships, and a
                 // Delivery Note's fulfilment is shipped at once. Taking the
                 // goods back is a return in Medusa, which a person decides;
-                // the failed row says so.
+                // the failed row says so. The link stays as it is, so every
+                // redelivery and retry of this entry fails the same way
+                // instead of passing once the state has moved.
                 results.push({
                     entity: "fulfillment",
                     id: fulfillmentId,
                     ok: false,
                     error: `${dn.name} was cancelled in ERPNext; order ${orderId}'s fulfilment ${fulfillmentId} is shipped in Medusa, so record a return there (or cancel the order)`,
                 })
-                await this.recordLink({ doctype: DELIVERY_NOTE_DOCTYPE, erpnext_name: key, medusa_entity: "fulfillment", medusa_id: done.medusa_id, state: "drafted" })
                 continue
             }
             if (Number(note.docstatus) !== 1) continue
@@ -5484,6 +5485,16 @@ class ErpnextModuleService extends MedusaService({
                         if (gst.notes.length) console.warn("[erpnext] GST rate:", gst.notes.join("; "))
                     } catch (err: any) {
                         console.warn("[erpnext] GST rate refresh failed:", describeError(err))
+                    }
+                    // An Item and its first Item Price are saved together, and
+                    // the price's webhook can land before the product exists;
+                    // a new product reads its price and stock itself.
+                    if (outcome.created) {
+                        try {
+                            await this.refreshStockAndPrices(scope, [body.name])
+                        } catch (err: any) {
+                            console.warn("[erpnext] stock/price for a new product failed:", describeError(err))
+                        }
                     }
                 }
             }

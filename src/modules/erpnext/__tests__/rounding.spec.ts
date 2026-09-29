@@ -22,6 +22,13 @@ describe("the cart's rounding line", () => {
         if (plan.action === "set") expect(plan.estimate.payable).toBe(1184)
     })
 
+    it("takes the fraction of a paisa a shipping share's tax leaves, so the total is exactly ERPNext's", () => {
+        // Production order #10: Medusa's total before rounding was 7140.440306772.
+        const plan = planCartRounding({ cart: cart({ total: 1183.600306772 }), companyState: "29", roundTotal: true })
+        expect(plan).toMatchObject({ action: "set" })
+        if (plan.action === "set") expect(1183.600306772 - plan.amount).toBeCloseTo(1184, 9)
+    })
+
     it("works from the total before its own line, so it is stable on a second run", () => {
         const plan = planCartRounding({
             cart: cart({ total: 1184, credit_lines: [{ reference: ROUNDING_REFERENCE, amount: -0.4 }] }),

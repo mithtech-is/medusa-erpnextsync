@@ -75,5 +75,7 @@ export function planCartRounding(args: {
             reason: `store total ${frappeRound(before, 2)} and ERPNext's ${estimate.grandTotal} differ by more than ${MAX_GAP}`,
         }
     }
-    return { action: "set", amount: frappeRound(before - estimate.payable, 2), estimate, interState }
+    // Not rounded to the paisa: a shipping share's tax can leave Medusa's
+    // total a fraction of a paisa off, and the line must take that too.
+    return { action: "set", amount: Number((before - estimate.payable).toFixed(9)), estimate, interState }
 }
