@@ -30,6 +30,72 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   until the test line was used up. It now asserts the wallet and the line end where they began,
   repays after a failed expectation, and prints a cleanup failure instead of swallowing it.
 
+## 0.6.1 — 2026-09-29
+
+Found by the production test of 0.6.0.
+
+- **A new product gets its price at once.** An Item and its first Item Price are saved together
+  and the price's webhook could land before the product existed, leaving the product unpriced
+  until the 5-minute pull. A product created from an Item webhook now reads its stock and price
+  itself.
+- **The store's total is exactly ERPNext's rounded total.** When shipping is shared across
+  several GST rates, Medusa's tax can leave a fraction of a paisa (order total 7140.000306772).
+  The rounding line now takes that fraction too.
+- **A cancelled Delivery Note stays a failed event.** Frappe redelivers a webhook that fails, and
+  the redelivery passed because the first attempt had already marked the link. The link is now
+  left as it is, so the event keeps saying to record a return in Medusa.
+
+## 0.6.0 — 2026-09-29
+
+GST is ERPNext's: India Compliance computes it, and the store charges exactly what ERPNext will
+invoice.
+
+- **ERPNext picks the taxes.** Sales Orders and Invoices carry the company address, and their tax
+  rows come from ERPNext's own `get_party_details`: India Compliance chooses the In-state or
+  Out-state template from the billing, shipping and company addresses. Each line is taxed at its
+  Item Tax Template's rate. The Settings taxes template, `withTemplateTaxes` and
+  `taxTemplateForSupply` are gone. A push that gets no tax rows fails instead of writing a
+  document without GST.
+- **Shipping is taxed at the rates of the goods it carries.** Net shipping goes as an `Actual`
+  row on the shipping account ahead of the GST rows, which become "On Previous Row Total". ERPNext
+  then spreads it over the lines by value and taxes each share at that line's rate, and India
+  Compliance adds it to each line's taxable value. Before, shipping including Medusa's GST was an
+  untaxed freight row.
+- **Discounts sit on the lines they hit.** Each line carries its price, its per-unit share of the
+  promotions, and its net rate. There is no document-level discount any more, so shipping is never
+  discounted. Pricing rules are ignored on store documents.
+- **The store's total is ERPNext's rounded total.** `POST /store/carts/:id/erpnext-rounding` keeps
+  one cart credit line (`erpnext-rounding`) at the difference, using ERPNext's own arithmetic
+  (`erpnext-arithmetic.ts`: rows rounded separately, shipping spread by value, the grand total
+  rounded by the site's System Settings method and the currency's smallest fraction). It refreshes
+  the payment collection with it and follows Global Defaults > Disable Rounded Total. It clears the
+  line rather than cover a gap over ₹1, and other credit lines (gift cards) come off the rounded
+  total unchanged. Store-facing ERPNext reads time out after 5 s.
+- **Products carry their GST rate.** The Item pull (webhook and 5-minute pull) resolves the Item
+  Tax Template ERPNext would pick (the Item's, else its group's) and records its rate as a product
+  rule on the tax region of the company's country, creating a "GST n%" rate when needed.
+  `metadata.gst_rate` and `metadata.gst_template` are display copies. An Item with no template is
+  charged the region's default rate; a template or group that cannot be read leaves the rate as
+  it is.
+- **No stock double count.** The level written to Medusa adds back what Medusa still reserves for
+  store orders whose Sales Order is submitted and still to deliver (not Closed or Completed), so
+  each unit is held once (`sellableQty(bin, safety, heldByStore)`).
+- **Delivery Notes ship store orders.** A Delivery Note's ledger entries (the existing Stock Ledger
+  Entry webhook) create a Medusa fulfilment for the store order's lines, marked shipped with the
+  LR number as tracking. A shipment that fails is retried, and a note is never fulfilled twice. A
+  cancelled note becomes a failed event saying to record a return: Medusa does not cancel a
+  shipped fulfilment. No new webhook.
+- **A re-push refreshes a draft Sales Invoice** instead of stopping at "already exists".
+- **Address book changes sync.** Creating or editing a saved address pushes the customer (workflow
+  hooks announce `customer.updated`); deleting one disables its ERPNext Address and pushes the
+  customer (a middleware on the delete routes). An address's type comes from
+  `metadata.address_type`, else its default flags.
+- **Discounted shipping reaches ERPNext discounted:** the shipping row is the net after shipping
+  promotions, not Medusa's pre-discount `shipping_subtotal`.
+- **Pushed Contacts get a person's name** when ERPNext made them without one.
+- `GET /store/erpnext/orders/:id/gst` returns ERPNext's GST for a customer's order (the invoice,
+  else the order): lines with taxable value and CGST/SGST/IGST, tax rows and rounded total.
+
 ## 0.5.6 — 2026-09-28
 
 - **Registered buyers get a B2B invoice.** A customer's GSTIN now reaches the ERPNext Addresses

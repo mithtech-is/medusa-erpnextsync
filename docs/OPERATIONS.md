@@ -176,9 +176,17 @@ up ERPNext again: it adds the Webhooks (`Stock Ledger Entry after_insert`
 at that warehouse, `Sales Order on_submit` / `on_cancel`, `Item Price
 on_update` / `on_trash` on the selling price list).
 
-- A level is `actual − reserved − safety`, never negative, read from the
-  Bin when an event arrives, not from the event. The Item's own
-  `safety_stock` wins over the Settings buffer when it is set.
+- A level is `actual − reserved − safety + held`, never negative, read from
+  the Bin when an event arrives, not from the event.
+  - `held` is what Medusa still reserves for store orders whose Sales Order
+    is submitted: ERPNext reserves those units too, so without it each
+    order would count twice.
+  - The Item's own `safety_stock` wins over the Settings buffer when it is set.
+- Fulfil store orders in ERPNext: submit the Sales Order, make a Delivery
+  Note from it. The note's ledger entries create the Medusa fulfilment,
+  shipped, with the LR number as tracking. Do not also fulfil in Medusa
+  Admin. Cancelling the note fails its event row with what to do: Medusa
+  does not cancel a shipped fulfilment, so record a return there.
 - A selling price on the store's list is the variant's price in that
   currency. Tiers, customer prices and dated prices are skipped and the
   row says why.
@@ -244,6 +252,24 @@ Rehearse the seam against a live site with `npm run rehearsal`
 (`ERPNEXT_URL`, `ERPNEXT_API_KEY`, `ERPNEXT_API_SECRET`,
 `ERPNEXT_TEST_CUSTOMER`); it posts and reverses movements, draws on and
 repays the customer's line, and cleans up the lending documents it made.
+
+## GST
+
+ERPNext computes it (India Compliance) and the store charges the same:
+
+- A Sales Order or Invoice gets its tax rows from `get_party_details`, so
+  the template follows the place of supply, and each line is taxed at its
+  Item Tax Template. Shipping is an Actual row on the Settings shipping
+  account ahead of the GST rows ("On Previous Row Total"), taxed at the
+  rates of the goods it carries.
+- A pulled product is charged at its Item's template rate (the Item's,
+  else its group's), recorded as a product rule on a "GST n%" rate of the
+  tax region of the company's country. A change of an Item Group's taxes
+  alone reaches products the next time each Item is saved or pulled.
+- The storefront calls `POST /store/carts/:id/erpnext-rounding` before
+  checkout and payment, so the cart's total is ERPNext's rounded total.
+  "skipped: … differ by more than 1" means the store and ERPNext disagree
+  on a rate or a price; fix the data, do not round over it.
 
 ## The catalogue
 

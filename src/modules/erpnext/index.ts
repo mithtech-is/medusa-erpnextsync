@@ -58,10 +58,10 @@ import {
     buildCustomerDoc,
     primaryContactPatch,
     withOrderContact,
-    supplyStateKey,
-    taxTemplateForSupply,
-    type TaxCategoryInfo,
-    type TaxTemplateInfo,
+    shippingNet,
+    orderTotals,
+    supplyTaxes,
+    gstStateCodeOf,
     buildSalesInvoiceDoc,
     buildSalesOrderDoc,
     directionForCreated,
@@ -70,7 +70,6 @@ import {
     transportFilledFields,
     wantsSalesInvoice,
     wantsSalesOrder,
-    withTemplateTaxes,
     type AddressInput,
     type HasField,
     type PushDefaults,
@@ -121,6 +120,14 @@ import {
     normalizeProductPolicy,
     LINK_KEY,
 } from "./product-policy"
+import { effectiveItemTaxTemplate, planProductTaxRule, type ItemTaxRow } from "./item-gst"
+import { deliveryNoteOf, planDeliveryFulfilment, salesOrdersOf, DELIVERY_NOTE_DOCTYPE } from "./delivery"
+import { ROUNDING_REFERENCE, planCartRounding } from "./rounding"
+import {
+    createOrderFulfillmentWorkflow,
+    createOrderShipmentWorkflow,
+    refreshPaymentCollectionForCartWorkflow,
+} from "@medusajs/medusa/core-flows"
 
 /** Write a dotted path into a plain object, creating what it passes through. */
 function setByPath(target: Record<string, any>, dotted: string, value: any): void {
@@ -646,6 +653,59 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /** Invoices for one order, newest first, without storage internals. */
+    /**
+     * The GST on an order as ERPNext computed it: the Sales Invoice when
+     * one exists, else the Sales Order. Null when ERPNext has neither yet
+     * or cannot be read; the storefront then shows Medusa's own lines.
+     */
+    async gstForOrder(orderId: string): Promise<any | null> {
+        const rest = await this.restClient(STORE_TIMEOUT_MS)
+        if (!rest) return null
+        for (const [entity, doctype] of [["invoice", "Sales Invoice"], ["order", "Sales Order"]] as const) {
+            const link = await this.remoteNameFor(entity, orderId, doctype)
+            if (!link?.erpnext_name) continue
+            const res = await rest.client.get(`/api/resource/${encodeURIComponent(doctype)}/${encodeURIComponent(link.erpnext_name)}`)
+            if (res.ok !== true || !res.data) continue
+            const d = res.data
+            if (Number(d.docstatus) === 2) continue
+            const n = (v: unknown) => (v === null || v === undefined || v === "" ? null : Number(v))
+            return {
+                doctype,
+                name: String(d.name),
+                docstatus: Number(d.docstatus),
+                place_of_supply: d.place_of_supply ?? null,
+                company_gstin: d.company_gstin ?? null,
+                billing_address_gstin: d.billing_address_gstin ?? null,
+                items: (Array.isArray(d.items) ? d.items : []).map((it: any) => ({
+                    item_code: it.item_code,
+                    item_name: it.item_name,
+                    hsn: it.gst_hsn_code ?? null,
+                    qty: n(it.qty),
+                    rate: n(it.rate),
+                    net_amount: n(it.net_amount),
+                    taxable_value: n(it.taxable_value),
+                    cgst_rate: n(it.cgst_rate),
+                    cgst_amount: n(it.cgst_amount),
+                    sgst_rate: n(it.sgst_rate),
+                    sgst_amount: n(it.sgst_amount),
+                    igst_rate: n(it.igst_rate),
+                    igst_amount: n(it.igst_amount),
+                })),
+                taxes: (Array.isArray(d.taxes) ? d.taxes : []).map((t: any) => ({
+                    description: t.description ?? t.account_head,
+                    gst_tax_type: t.gst_tax_type ?? null,
+                    tax_amount: n(t.tax_amount_after_discount_amount ?? t.tax_amount),
+                })),
+                net_total: n(d.net_total),
+                total_taxes_and_charges: n(d.total_taxes_and_charges),
+                grand_total: n(d.grand_total),
+                rounding_adjustment: n(d.rounding_adjustment),
+                rounded_total: n(d.rounded_total),
+            }
+        }
+        return null
+    }
+
     async invoicesForOrder(orderId: string) {
         const rows = await this.listErpnextInvoices({ order_id: orderId }, { order: { created_at: "DESC" } })
         return rows.map((r: any) => ({
@@ -3472,18 +3532,19 @@ class ErpnextModuleService extends MedusaService({
     // Medusa → ERPNext over plain Frappe REST
     // ─────────────────────────────────────────────────────────────────
 
-    private async restClient(): Promise<{ client: FrappeClient; cfg: ActiveConfig } | null> {
+    private async restClient(timeoutMs?: number): Promise<{ client: FrappeClient; cfg: ActiveConfig } | null> {
         const cfg = await this.getActiveConfig()
         const creds = await this.frappeApiCreds()
         if (!cfg.erpnext_url || !creds) return null
         // A write runs ERPNext's validations and naming before it answers;
         // a Customer or a Sales Order takes longer than a read. The push
-        // runs on the worker, so waiting costs nothing but the wait.
+        // runs on the worker, so waiting costs nothing but the wait. A
+        // storefront request passes its own short timeout instead.
         return {
             client: makeFrappeClient({
                 baseUrl: cfg.erpnext_url,
                 token: creds,
-                timeoutMs: Math.max(cfg.request_timeout_ms, PUSH_TIMEOUT_MS),
+                timeoutMs: timeoutMs ?? Math.max(cfg.request_timeout_ms, PUSH_TIMEOUT_MS),
             }),
             cfg,
         }
@@ -3541,83 +3602,84 @@ class ErpnextModuleService extends MedusaService({
         return Array.from(transportFilledFields(doctype, rest ? await this.pushDefaults(rest.client) : {}))
     }
 
-    /** A Sales Taxes and Charges Template's rows, cached for an hour. */
-    private async templateTaxes(client: FrappeClient, name: string | null | undefined): Promise<any[]> {
-        if (!name) return []
-        const now = Date.now()
-        const hit = _taxTemplateCache.get(name)
-        if (hit && hit.expiresAt > now) return hit.rows
-        const res = await client.get(`/api/resource/Sales%20Taxes%20and%20Charges%20Template/${encodeURIComponent(name)}`)
-        if (res.ok !== true) return []
-        const rows: any[] = Array.isArray(res.data?.taxes) ? res.data.taxes : []
-        _taxTemplateCache.set(name, { rows, expiresAt: now + 60 * 60 * 1000 })
-        return rows
-    }
-
-    /**
-     * The Settings taxes template, or its sibling when the supply crosses
-     * (or does not cross) a state line the template assumes. Anything that
-     * cannot be read keeps the Settings template.
-     */
-    private async taxesTemplateForSupply(
+    /** The company's own address, its GST state and its country, cached for an hour. */
+    private async companySite(
         client: FrappeClient,
-        defaults: PushDefaults,
-        supplyAddress: string | null,
-    ): Promise<string | null> {
-        const configured = defaults.taxesTemplate ?? null
-        if (!configured || !supplyAddress) return configured
-        try {
-            const now = Date.now()
-            const company = defaults.company ?? ""
-            let site = _gstSiteCache.get(company)
-            if (!site || site.expiresAt < now) {
-                const list = async (doctype: string, fields: string[], filters: any[] = []) => {
-                    const res = await client.get(`/api/resource/${encodeURIComponent(doctype)}`, {
-                        fields: JSON.stringify(fields),
-                        filters: JSON.stringify(filters),
-                        limit_page_length: "500",
-                    })
-                    return res.ok === true && Array.isArray(res.data) ? res.data : null
-                }
-                const companyAddresses = await list(
-                    "Address",
-                    ["name", "gst_state_number", "state"],
-                    [
-                        ["Dynamic Link", "link_doctype", "=", "Company"],
-                        ["Dynamic Link", "link_name", "=", company],
-                        ["is_your_company_address", "=", 1],
-                    ],
-                )
-                site = {
-                    companyState: supplyStateKey(companyAddresses?.[0]),
-                    templates: (await list("Sales Taxes and Charges Template", ["name", "company", "tax_category", "disabled"])) ?? [],
-                    categories: (await list("Tax Category", ["name", "is_inter_state", "is_reverse_charge"])) ?? [],
-                    expiresAt: now + 60 * 60 * 1000,
-                }
-                _gstSiteCache.set(company, site)
-            }
-            const res = await client.get(`/api/resource/Address/${encodeURIComponent(supplyAddress)}`)
-            const supplyState = res.ok === true ? supplyStateKey(res.data) : null
-            return taxTemplateForSupply({
-                configured,
-                templates: site.templates,
-                categories: site.categories,
-                companyState: site.companyState,
-                supplyState,
-            })
-        } catch {
-            return configured
+        company: string | null,
+    ): Promise<{ address: string | null; state: string | null; countryCode: string | null }> {
+        const key = company ?? ""
+        const now = Date.now()
+        const hit = _companySiteCache.get(key)
+        if (hit && hit.expiresAt > now) return hit
+        const out = { address: null as string | null, state: null as string | null, countryCode: null as string | null, expiresAt: now + 60 * 60 * 1000 }
+        if (!company) return out
+        const res = await client.get("/api/resource/Address", {
+            fields: JSON.stringify(["name", "gst_state_number", "state"]),
+            filters: JSON.stringify([
+                ["Dynamic Link", "link_doctype", "=", "Company"],
+                ["Dynamic Link", "link_name", "=", company],
+                ["is_your_company_address", "=", 1],
+            ]),
+            limit_page_length: "5",
+        })
+        const row = res.ok === true && Array.isArray(res.data) ? res.data[0] : null
+        out.address = row?.name ? String(row.name) : null
+        out.state = gstStateCodeOf(row?.gst_state_number) ?? gstStateCodeOf(row?.state)
+        const co = await client.get(`/api/resource/Company/${encodeURIComponent(company)}`)
+        const countryName = co.ok === true ? co.data?.country : null
+        if (countryName) {
+            const c = await client.get(`/api/resource/Country/${encodeURIComponent(String(countryName))}`)
+            if (c.ok === true && c.data?.code) out.countryCode = String(c.data.code).toLowerCase()
         }
+        // An unreadable site is not an answer to keep for an hour.
+        if (res.ok === true) _companySiteCache.set(key, out)
+        return out
     }
 
     /**
-     * What ERPNext's form does on its own: expand the taxes template and
-     * render the Terms and Conditions text from `tc_name`. Neither happens
-     * for a REST write on its own (the template only on a brand-new
-     * document with no tax rows; the terms never).
+     * The tax rows ERPNext's own form would put on a sales document:
+     * India Compliance picks the taxes template for the place of supply
+     * inside `get_party_details`, from the billing, shipping and company
+     * addresses. Shipping goes ahead of them as its own row (see
+     * `supplyTaxes`). A failure stops the push rather than writing a
+     * document without GST.
      */
-    private async completeSalesDoc(client: FrappeClient, doc: Record<string, any>, defaults: PushDefaults): Promise<Record<string, any>> {
-        let out = withTemplateTaxes(doc, await this.templateTaxes(client, defaults.taxesTemplate))
+    private async salesTaxes(
+        client: FrappeClient,
+        args: {
+            doctype: string
+            customer: string
+            defaults: PushDefaults
+            addresses: { billing?: string | null; shipping?: string | null }
+            date: string
+            shipping: number
+        },
+    ): Promise<{ ok: true; template: string | null; rows: any[]; notes: string[] } | { ok: false; error: string }> {
+        const res = await client.post("/api/method/erpnext.accounts.party.get_party_details", {
+            party: args.customer,
+            party_type: "Customer",
+            doctype: args.doctype,
+            company: args.defaults.company,
+            posting_date: args.date,
+            party_address: args.addresses.billing ?? null,
+            shipping_address: args.addresses.shipping ?? null,
+            company_address: args.defaults.companyAddress ?? null,
+        })
+        if (res.ok === false) return { ok: false, error: `taxes for ${args.customer}: ${res.error}` }
+        const gstRows: any[] = Array.isArray(res.data?.taxes) ? res.data.taxes : []
+        if (!gstRows.length) {
+            return { ok: false, error: `ERPNext chose no taxes for ${args.customer} (template "${res.data?.taxes_and_charges ?? ""}")` }
+        }
+        const built = supplyTaxes({ gstRows, shipping: args.shipping, shippingAccount: args.defaults.shippingAccount })
+        return { ok: true, template: res.data?.taxes_and_charges ? String(res.data.taxes_and_charges) : null, rows: built.taxes, notes: built.notes }
+    }
+
+    /**
+     * What ERPNext's form does on its own and a REST write does not:
+     * render the Terms and Conditions text from `tc_name`.
+     */
+    private async completeSalesDoc(client: FrappeClient, doc: Record<string, any>): Promise<Record<string, any>> {
+        let out = doc
         if (out.tc_name && !out.terms) {
             const res = await client.post(
                 "/api/method/erpnext.setup.doctype.terms_and_conditions.terms_and_conditions.get_terms_and_conditions",
@@ -3633,23 +3695,40 @@ class ErpnextModuleService extends MedusaService({
         const row: any = await this.findSettingsRow()
         const now = Date.now()
         if (!_defaultsCache || _defaultsCache.expiresAt < now) {
+            let readable = true
             const single = async (doctype: string, field: string) => {
                 const res = await client.get("/api/method/frappe.client.get_single_value", { doctype, field })
+                if (res.ok !== true) readable = false
                 return res.ok && res.data ? String(res.data) : null
             }
-            _defaultsCache = {
+            const read = {
                 company: await single("Global Defaults", "default_company"),
                 priceList: await single("Selling Settings", "selling_price_list"),
                 expiresAt: now + 60 * 60 * 1000,
             }
+            // An unreadable site is not an answer to keep for an hour.
+            if (readable) _defaultsCache = read
+            else return this.defaultsFrom(row, read, client)
+        }
+        return this.defaultsFrom(row, _defaultsCache, client)
+    }
+
+    private async defaultsFrom(row: any, site: { company: string | null; priceList: string | null }, client: FrappeClient): Promise<PushDefaults> {
+        const company = row?.erpnext_company || site.company
+        let companyAddress: string | null = null
+        try {
+            companyAddress = (await this.companySite(client, company)).address
+        } catch {
+            companyAddress = null
         }
         return {
-            company: row?.erpnext_company || _defaultsCache.company,
-            priceList: row?.erpnext_price_list || _defaultsCache.priceList,
+            company,
+            priceList: row?.erpnext_price_list || site.priceList,
             customerGroup: row?.erpnext_customer_group || null,
             territory: row?.erpnext_territory || null,
             shippingAccount: row?.erpnext_shipping_account || null,
             taxesTemplate: row?.erpnext_taxes_template || null,
+            companyAddress,
         }
     }
 
@@ -3889,6 +3968,8 @@ class ErpnextModuleService extends MedusaService({
             const contact = await this.syncPrimaryContact(client, String(remote.customer_primary_contact), {
                 email: doc.email_id,
                 phone: doc.mobile_no,
+                first_name: record?.first_name ?? null,
+                last_name: record?.last_name ?? null,
             })
             if (contact.ok === false) notes.push(`contact ${remote.customer_primary_contact}: ${contact.reason}`)
         }
@@ -3916,7 +3997,7 @@ class ErpnextModuleService extends MedusaService({
     private async syncPrimaryContact(
         client: FrappeClient,
         contactName: string,
-        want: { email?: string | null; phone?: string | null },
+        want: { email?: string | null; phone?: string | null; first_name?: string | null; last_name?: string | null },
     ): Promise<{ ok: true; changed: boolean } | { ok: false; reason: string }> {
         const res = await client.get(`/api/resource/Contact/${encodeURIComponent(contactName)}`)
         if (res.ok !== true || !res.data) return { ok: false, reason: `not readable (HTTP ${res.status ?? "?"})` }
@@ -4045,7 +4126,7 @@ class ErpnextModuleService extends MedusaService({
      * short.
      */
     private async pushSalesDocument(ctx: PushContext): Promise<PushOutcome> {
-        const { client, mapping, record: order, cfg } = ctx
+        const { client, mapping, record: order } = ctx
         const settings: any = await this.findSettingsRow()
         const notes: string[] = []
         const customer = await this.ensureCustomerForOrder(ctx)
@@ -4071,11 +4152,19 @@ class ErpnextModuleService extends MedusaService({
         for (const li of Array.isArray(order?.items) ? order.items : []) {
             lineCodes.set(String(li?.id ?? li?.title), await this.itemCodeForLine(client, li, codes))
         }
-        const settingsDefaults = await this.pushDefaults(client)
-        const taxesTemplate = await this.taxesTemplateForSupply(client, settingsDefaults, addresses.shipping ?? addresses.billing ?? null)
-        if (taxesTemplate && taxesTemplate !== settingsDefaults.taxesTemplate) notes.push(`taxes: ${taxesTemplate} for the place of supply`)
-        const defaults = { ...settingsDefaults, taxesTemplate }
+        const defaults = await this.pushDefaults(client)
         const timezone = await this.siteTimezone()
+        const taxes = await this.salesTaxes(client, {
+            doctype: "Sales Order",
+            customer: customer.name,
+            defaults,
+            addresses,
+            date: formatInZone(new Date(), timezone, false),
+            shipping: shippingNet(order) ?? orderTotals(order).shipping,
+        })
+        if (taxes.ok === false) return { ok: false, error: taxes.error }
+        notes.push(...taxes.notes)
+        const taxFields = { taxes_and_charges: taxes.template ?? undefined, taxes: taxes.rows }
         const orderDocument = settings?.order_document ?? null
         const wantSO = wantsSalesOrder(orderDocument) || mapping.doctype === "Sales Order"
         const wantSI = wantsSalesInvoice(orderDocument) || mapping.doctype === "Sales Invoice"
@@ -4107,7 +4196,7 @@ class ErpnextModuleService extends MedusaService({
             }
             if (!soName) {
                 if (!existing && mapping.allow_create === false) return { ok: true, status: "skipped", reason: "create not allowed by the mapping" }
-                const doc = await this.completeSalesDoc(client, { ...build.doc, ...ctx.payload, items: build.doc.items }, defaults)
+                const doc = await this.completeSalesDoc(client, { ...build.doc, ...ctx.payload, ...taxFields, items: build.doc.items })
                 const written = await this.writeRemote(client, "Sales Order", existing, doc)
                 if (written.ok === false) return written
                 soName = written.name
@@ -4125,12 +4214,23 @@ class ErpnextModuleService extends MedusaService({
 
         if (wantSI && orderFullyPaid(order)) {
             const invoiced = await this.remoteNameFor("invoice", String(order.id), "Sales Invoice")
+            let draftInvoice: string | null = null
+            let invoiceDone = false
             if (invoiced?.erpnext_name) {
-                notes.push(`invoice ${invoiced.erpnext_name} already exists`)
-            } else {
-                const made = await this.makeSalesInvoice(ctx, soName, customer.name, addresses, lineCodes, defaults, timezone)
+                const state = await client.get(`/api/resource/Sales%20Invoice/${encodeURIComponent(invoiced.erpnext_name)}`)
+                if (state.ok === true && Number(state.data?.docstatus) === 0) draftInvoice = invoiced.erpnext_name
+                else if (!(state.ok === false && state.status === 404)) {
+                    notes.push(`invoice ${invoiced.erpnext_name} already exists`)
+                    invoiceDone = true
+                }
+            }
+            if (!invoiceDone) {
+                const made = await this.makeSalesInvoice(ctx, soName, customer.name, addresses, lineCodes, defaults, timezone, taxFields, draftInvoice)
                 if (made.ok === false) notes.push(`invoice not raised: ${made.error}`)
-                else {
+                else if (draftInvoice) {
+                    notes.push(`draft invoice ${made.name} refreshed`)
+                    action = action === "unchanged" ? "invoiced" : `${action},invoiced`
+                } else {
                     notes.push(`invoice ${made.name} raised as a draft`)
                     action = action === "unchanged" ? "invoiced" : `${action},invoiced`
                 }
@@ -4139,8 +4239,9 @@ class ErpnextModuleService extends MedusaService({
         return { ok: true, status: "success", action, name: soName ?? undefined, notes }
     }
 
-    /** A draft Sales Invoice: from the Sales Order when there is one, else
-     *  built like one. Recorded in `erpnext_invoice` for the storefront. */
+    /** A draft Sales Invoice, new or refreshed: from the Sales Order when
+     *  it is submitted, else built like one. Recorded in `erpnext_invoice`
+     *  for the storefront. */
     private async makeSalesInvoice(
         ctx: PushContext,
         soName: string | null,
@@ -4149,6 +4250,8 @@ class ErpnextModuleService extends MedusaService({
         lineCodes: Map<string, string | null>,
         defaults: PushDefaults,
         timezone: string | null,
+        taxFields: { taxes_and_charges?: string; taxes: any[] },
+        existing: string | null = null,
     ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
         const { client, record: order } = ctx
         let doc: Record<string, any> | null = null
@@ -4169,6 +4272,9 @@ class ErpnextModuleService extends MedusaService({
             for (const it of Array.isArray(doc.items) ? doc.items : []) {
                 for (const k of ["name", "__islocal", "__unsaved", "parent", "docstatus"]) delete it[k]
             }
+            for (const t of Array.isArray(doc.taxes) ? doc.taxes : []) {
+                for (const k of ["name", "__islocal", "__unsaved", "parent", "docstatus"]) delete t[k]
+            }
             doc.posting_date = formatInZone(new Date(), timezone, false)
             doc.set_posting_time = 1
         } else {
@@ -4186,9 +4292,9 @@ class ErpnextModuleService extends MedusaService({
                 payload: ctx.payload,
             })
             if (build.ok === false) return { ok: false, error: build.reason }
-            doc = await this.completeSalesDoc(client, build.doc, defaults)
+            doc = await this.completeSalesDoc(client, { ...build.doc, ...taxFields })
         }
-        const written = await this.writeRemote(client, "Sales Invoice", null, doc)
+        const written = await this.writeRemote(client, "Sales Invoice", existing, doc)
         if (written.ok === false) return { ok: false, error: written.error }
         await this.recordLink({
             doctype: "Sales Invoice",
@@ -4199,7 +4305,7 @@ class ErpnextModuleService extends MedusaService({
             state: "active",
         })
         try {
-            const [existing] = await this.listErpnextInvoices({ number: written.name }, { take: 1 })
+            const [known] = await this.listErpnextInvoices({ number: written.name }, { take: 1 })
             const facts = {
                 order_id: String(order.id),
                 customer_id: order?.customer_id ? String(order.customer_id) : null,
@@ -4210,8 +4316,8 @@ class ErpnextModuleService extends MedusaService({
                 currency: order?.currency_code ? String(order.currency_code).toUpperCase() : null,
                 status: "draft",
             }
-            const saved = existing
-                ? (await this.updateErpnextInvoices([{ id: existing.id, ...facts }]))[0]
+            const saved = known
+                ? (await this.updateErpnextInvoices([{ id: known.id, ...facts }]))[0]
                 : (await this.createErpnextInvoices([facts]))[0]
             // The customer's copy: fetched now as a draft, and again by the
             // hourly reconcile once ERPNext submits it.
@@ -4254,6 +4360,8 @@ class ErpnextModuleService extends MedusaService({
                     }
                     results.push(await this.applyStockLevel(scope, pair.item_code))
                 }
+                const dn = pairs.length ? deliveryNoteOf(body.doc) : null
+                if (dn) results.push(...(await this.applyDeliveryNote(scope, dn)))
             }
         }
         if (body.doctype === ITEM_PRICE_DOCTYPE) {
@@ -4320,8 +4428,212 @@ class ErpnextModuleService extends MedusaService({
             fieldname: "safety_stock",
         })
         const safety = safetyFor(item.ok === true ? item.data?.safety_stock : 0, cfg.erpnext_safety_stock)
-        const qty = sellableQty(Array.isArray(bins.data) ? bins.data[0] : null, safety)
+        const held = await this.storeHolds(scope, rest.client, [itemCode])
+        const qty = sellableQty(Array.isArray(bins.data) ? bins.data[0] : null, safety, held.get(itemCode) ?? 0)
         return this.writeStockLevel(scope, itemCode, cfg.medusa_stock_location_id, qty)
+    }
+
+    /**
+     * What Medusa still reserves, at the store's location, for store
+     * orders whose Sales Order ERPNext has submitted, by Item code. ERPNext
+     * reserves those units as well once the order is submitted, so the
+     * level adds them back (see `sellableQty`). A read that fails counts as
+     * nothing held: the level is then short, never oversold.
+     */
+    private async storeHolds(scope: any, client: FrappeClient, itemCodes: string[]): Promise<Map<string, number>> {
+        const out = new Map<string, number>()
+        const cfg = await this.getActiveConfig()
+        if (!itemCodes.length || !cfg.erpnext_warehouse || !cfg.medusa_stock_location_id) return out
+        try {
+            // Submitted and still to deliver: a Closed order no longer
+            // reserves in ERPNext, and a delivered one has had its Medusa
+            // reservation consumed by the Delivery Note's fulfilment.
+            const rows = await client.get("/api/resource/Sales%20Order", {
+                fields: JSON.stringify(["name"]),
+                filters: JSON.stringify([
+                    ["docstatus", "=", 1],
+                    ["status", "not in", ["Closed", "Completed"]],
+                    ["per_delivered", "<", 100],
+                    ["Sales Order Item", "item_code", "in", itemCodes],
+                    ["Sales Order Item", "warehouse", "=", cfg.erpnext_warehouse],
+                ]),
+                limit_page_length: "0",
+            })
+            if (rows.ok !== true || !Array.isArray(rows.data) || !rows.data.length) return out
+            const soNames = Array.from(new Set(rows.data.map((r: any) => String(r.name))))
+            const links: any[] = await this.listErpnextLinks(
+                { doctype: "Sales Order", medusa_entity: "order", erpnext_name: soNames } as any,
+                { take: soNames.length },
+            )
+            const orderIds = Array.from(new Set(links.map((l) => String(l.medusa_id))))
+            if (!orderIds.length) return out
+            const query: any = scope.resolve(ContainerRegistrationKeys.QUERY)
+            const { data: orders } = await query.graph({ entity: "order", fields: ["id", "items.id"], filters: { id: orderIds } })
+            const lineIds: string[] = []
+            for (const o of orders ?? []) for (const li of o?.items ?? []) if (li?.id) lineIds.push(String(li.id))
+            if (!lineIds.length) return out
+            const inventory: any = scope.resolve(Modules.INVENTORY)
+            const reservations: any[] = await inventory.listReservationItems(
+                { line_item_id: lineIds, location_id: cfg.medusa_stock_location_id },
+                { take: 5000, select: ["inventory_item_id", "quantity"] },
+            )
+            const byInventoryItem = new Map<string, number>()
+            for (const r of reservations) {
+                byInventoryItem.set(String(r.inventory_item_id), (byInventoryItem.get(String(r.inventory_item_id)) ?? 0) + Number(r.quantity || 0))
+            }
+            for (const code of itemCodes) {
+                const variant = await this.variantForItem(scope, code)
+                const inventoryItemId = variant?.inventory_items?.[0]?.inventory_item_id
+                const held = inventoryItemId ? byInventoryItem.get(String(inventoryItemId)) ?? 0 : 0
+                if (held) out.set(code, held)
+            }
+        } catch (err: any) {
+            console.warn("[erpnext] store reservations not read:", describeError(err))
+        }
+        return out
+    }
+
+    /**
+     * A Delivery Note's ledger entry: mark the store order's lines it
+     * delivers as fulfilled and shipped in Medusa (or cancel that
+     * fulfilment when the note is cancelled), so nothing is entered twice.
+     * The note's entries arrive together, one per line; one runs at a time
+     * and the link table keeps a note from being applied twice.
+     */
+    private async applyDeliveryNote(scope: any, dn: { name: string; cancelled: boolean }): Promise<any[]> {
+        const previous = _deliveryLocks.get(dn.name) ?? Promise.resolve()
+        const run = previous.catch(() => undefined).then(() => this.applyDeliveryNoteNow(scope, dn))
+        _deliveryLocks.set(dn.name, run)
+        try {
+            return await run
+        } finally {
+            if (_deliveryLocks.get(dn.name) === run) _deliveryLocks.delete(dn.name)
+        }
+    }
+
+    /** Mark a Delivery Note's fulfilment shipped, with its LR number as
+     *  tracking; nothing when it already is. */
+    private async shipFulfillment(scope: any, orderId: string, fulfillmentId: string, note: any): Promise<any | null> {
+        const query: any = scope.resolve(ContainerRegistrationKeys.QUERY)
+        const { data } = await query.graph({
+            entity: "fulfillment",
+            fields: ["id", "shipped_at", "items.line_item_id", "items.quantity"],
+            filters: { id: fulfillmentId },
+        })
+        const f = data?.[0]
+        if (!f || f.shipped_at) return null
+        const tracking = String(note?.lr_no ?? "").trim()
+        try {
+            await createOrderShipmentWorkflow(scope).run({
+                input: {
+                    order_id: orderId,
+                    fulfillment_id: fulfillmentId,
+                    items: (f.items ?? []).map((it: any) => ({ id: it.line_item_id, quantity: Number(it.quantity) })),
+                    labels: tracking ? [{ tracking_number: tracking, tracking_url: "", label_url: "" }] : [],
+                },
+            })
+            return { entity: "fulfillment", id: fulfillmentId, ok: true, action: "shipped", detail: `${note?.name ?? ""} → order ${orderId}` }
+        } catch (err: any) {
+            return { entity: "fulfillment", id: fulfillmentId, ok: false, error: `${note?.name ?? ""}: fulfilment ${fulfillmentId} not marked shipped: ${describeError(err)}` }
+        }
+    }
+
+    private async applyDeliveryNoteNow(scope: any, dn: { name: string; cancelled: boolean }): Promise<any[]> {
+        const cfg = await this.getActiveConfig()
+        const rest = await this.restClient()
+        if (!rest || !cfg.medusa_stock_location_id) return [{ ok: true, action: "skipped", reason: "delivery: ERPNext or stock location not configured" }]
+        const res = await rest.client.get(`/api/resource/Delivery%20Note/${encodeURIComponent(dn.name)}`)
+        if (res.ok !== true || !res.data) return [{ ok: false, error: `Delivery Note ${dn.name}: ${res.ok === false ? res.error : "not readable"}` }]
+        const note = res.data
+        const cancelled = dn.cancelled || Number(note.docstatus) === 2
+        const results: any[] = []
+        for (const so of salesOrdersOf(note.items)) {
+            const key = `${dn.name}|${so}`
+            const done = await this.findLink(DELIVERY_NOTE_DOCTYPE, key, "fulfillment")
+            if (cancelled) {
+                if (!done || done.state !== "active") continue
+                const [orderId, fulfillmentId] = String(done.medusa_id).split(":")
+                // Medusa cancels a fulfilment only before it ships, and a
+                // Delivery Note's fulfilment is shipped at once. Taking the
+                // goods back is a return in Medusa, which a person decides;
+                // the failed row says so. The link stays as it is, so every
+                // redelivery and retry of this entry fails the same way
+                // instead of passing once the state has moved.
+                results.push({
+                    entity: "fulfillment",
+                    id: fulfillmentId,
+                    ok: false,
+                    error: `${dn.name} was cancelled in ERPNext; order ${orderId}'s fulfilment ${fulfillmentId} is shipped in Medusa, so record a return there (or cancel the order)`,
+                })
+                continue
+            }
+            if (Number(note.docstatus) !== 1) continue
+            if (done?.state === "active") {
+                // Fulfilled on an earlier delivery; ship it if that step failed then.
+                const [orderId, fulfillmentId] = String(done.medusa_id).split(":")
+                const shipped = await this.shipFulfillment(scope, orderId, fulfillmentId, note)
+                if (shipped) results.push(shipped)
+                continue
+            }
+            const orderLink = await this.findLink("Sales Order", so, "order")
+            if (!orderLink?.medusa_id) continue
+            const orderId = String(orderLink.medusa_id)
+            const query: any = scope.resolve(ContainerRegistrationKeys.QUERY)
+            const { data } = await query.graph({
+                entity: "order",
+                fields: ["id", "items.id", "items.detail.quantity", "items.detail.fulfilled_quantity", "items.variant.sku", "items.variant.product.id", "items.product_id"],
+                filters: { id: orderId },
+            })
+            const order = data?.[0]
+            if (!order) continue
+            const codes = new Map<string, string | null>()
+            const lines = []
+            for (const li of order.items ?? []) {
+                lines.push({
+                    id: String(li.id),
+                    code: await this.itemCodeForLine(rest.client, li, codes),
+                    quantity: Number(li?.detail?.quantity ?? 0),
+                    fulfilled: Number(li?.detail?.fulfilled_quantity ?? 0),
+                })
+            }
+            const plan = planDeliveryFulfilment({ dnItems: note.items, salesOrder: so, lines })
+            if (!plan.items.length) {
+                results.push({ ok: true, action: "skipped", reason: `${dn.name}: nothing left to fulfil on order ${orderId}` })
+                continue
+            }
+            try {
+                const { result: fulfillment } = await createOrderFulfillmentWorkflow(scope).run({
+                    input: {
+                        order_id: orderId,
+                        items: plan.items,
+                        location_id: cfg.medusa_stock_location_id,
+                        metadata: { erpnext_delivery_note: dn.name },
+                    },
+                })
+                const fulfillmentId = String((fulfillment as any)?.id)
+                // Recorded before shipping, so a retry ships this fulfilment
+                // instead of making a second one.
+                await this.recordLink({ doctype: DELIVERY_NOTE_DOCTYPE, erpnext_name: key, medusa_entity: "fulfillment", medusa_id: `${orderId}:${fulfillmentId}`, state: "active" })
+                const shipped = await this.shipFulfillment(scope, orderId, fulfillmentId, note)
+                if (shipped?.ok === false) results.push(shipped)
+                else {
+                    results.push({
+                        entity: "fulfillment",
+                        id: fulfillmentId,
+                        ok: true,
+                        action: "shipped",
+                        detail: `${dn.name} → order ${orderId}${plan.unmatched.length ? `; not on the order: ${plan.unmatched.join(", ")}` : ""}`,
+                    })
+                }
+            } catch (err: any) {
+                results.push({ ok: false, error: `${dn.name} → order ${orderId}: ${describeError(err)}` })
+            }
+            // Medusa moved its own level on fulfilment; ERPNext's is the one to keep.
+            for (const code of new Set(lines.map((l) => l.code).filter(Boolean) as string[])) {
+                await this.applyStockLevel(scope, code)
+            }
+        }
+        return results
     }
 
     /** Set the stocked quantity of the variant with this SKU at the location. */
@@ -4446,8 +4758,9 @@ class ErpnextModuleService extends MedusaService({
                 for (const i of safeties.ok === true && Array.isArray(safeties.data) ? safeties.data : []) {
                     safetyByCode.set(String(i.name), i.safety_stock)
                 }
+                const held = await this.storeHolds(scope, rest.client, codes)
                 for (const code of codes) {
-                    const qty = sellableQty(binByCode.get(code) ?? null, safetyFor(safetyByCode.get(code), cfg.erpnext_safety_stock))
+                    const qty = sellableQty(binByCode.get(code) ?? null, safetyFor(safetyByCode.get(code), cfg.erpnext_safety_stock), held.get(code) ?? 0)
                     const r = await this.writeStockLevel(scope, code, cfg.medusa_stock_location_id, qty)
                     note(r, `stock ${code}`)
                     if (r?.ok && (r.action === "created" || r.action === "updated")) stock += 1
@@ -4808,6 +5121,14 @@ class ErpnextModuleService extends MedusaService({
                 await this.refreshStockAndPrices(args.container, linksToRecord.map((l) => l.erpnext_name))
             } catch (err: any) {
                 console.warn("[erpnext-pull] stock/price refresh failed:", describeError(err))
+            }
+            if (mapping.doctype === "Item") {
+                try {
+                    const gst = await this.refreshProductGst(args.container, linksToRecord.map((l) => l.erpnext_name))
+                    if (gst.notes.length) console.warn("[erpnext-pull] GST rate:", gst.notes.join("; "))
+                } catch (err: any) {
+                    console.warn("[erpnext-pull] GST rate refresh failed:", describeError(err))
+                }
             }
         }
 
@@ -5196,6 +5517,24 @@ class ErpnextModuleService extends MedusaService({
                     state: "active",
                     remote_direction,
                 })
+                if (mapping.medusa_entity === "product" && body.doctype === "Item") {
+                    try {
+                        const gst = await this.refreshProductGst(scope, [body.name])
+                        if (gst.notes.length) console.warn("[erpnext] GST rate:", gst.notes.join("; "))
+                    } catch (err: any) {
+                        console.warn("[erpnext] GST rate refresh failed:", describeError(err))
+                    }
+                    // An Item and its first Item Price are saved together, and
+                    // the price's webhook can land before the product exists;
+                    // a new product reads its price and stock itself.
+                    if (outcome.created) {
+                        try {
+                            await this.refreshStockAndPrices(scope, [body.name])
+                        } catch (err: any) {
+                            console.warn("[erpnext] stock/price for a new product failed:", describeError(err))
+                        }
+                    }
+                }
             }
             results.push({
                 mapping: mapping.name,
@@ -5781,6 +6120,258 @@ class ErpnextModuleService extends MedusaService({
         return { checked, equal, lagging, drift, notes: notes.slice(0, 20) }
     }
 
+    /**
+     * A saved address was deleted in the store: disable its ERPNext Address
+     * (ERPNext keeps it for the documents that used it) and push the
+     * customer, so ERPNext's list matches the store's.
+     */
+    async addressRemoved(scope: any, customerId: string, addressId: string): Promise<void> {
+        const [row] = await this.listErpnextLinks({ doctype: "Address", medusa_entity: "address", medusa_id: addressId } as any, { take: 1 })
+        if (row?.erpnext_name) {
+            const rest = await this.restClient()
+            if (rest) {
+                const out = await this.writeRemote(rest.client, "Address", String(row.erpnext_name), { disabled: 1 })
+                if (out.ok === false) console.warn(`[erpnext] Address ${row.erpnext_name} not disabled: ${out.error}`)
+                else await this.recordLink({ doctype: "Address", erpnext_name: String(row.erpnext_name), medusa_entity: "address", medusa_id: addressId, state: "drafted" })
+            }
+        }
+        const eventBus: any = scope.resolve(Modules.EVENT_BUS)
+        await eventBus.emit([{ name: "customer.updated", data: { id: customerId } }])
+    }
+
+    // ── GST: the product's rate and the store's rounding ─────────────
+
+    /**
+     * Charge each linked product at its ERPNext Item's GST rate: the rate
+     * of the Item Tax Template ERPNext would pick (the Item's own, else its
+     * group's), recorded as a product rule on a non-default rate of the
+     * company's country's tax region, with `metadata.gst_rate` as a copy
+     * for display. An Item without a template is charged the region's
+     * default rate, as ERPNext's taxes template charges it.
+     */
+    async refreshProductGst(scope: any, itemCodes: string[]): Promise<{ updated: number; notes: string[] }> {
+        const notes: string[] = []
+        let updated = 0
+        const codes = Array.from(new Set(itemCodes.filter(Boolean)))
+        const rest = await this.restClient()
+        if (!rest || !codes.length) return { updated, notes }
+        const client = rest.client
+        const defaults = await this.pushDefaults(client)
+        const site = await this.companySite(client, defaults.company)
+        if (!site.countryCode) return { updated, notes: ["GST rates: the company's country is unknown"] }
+        const tax: any = scope.resolve(Modules.TAX)
+        const [region] = await tax.listTaxRegions({ country_code: site.countryCode, parent_id: null }, { take: 1 })
+        if (!region) return { updated, notes: [`GST rates: no tax region for "${site.countryCode}"`] }
+        const templates = await this.itemTaxTemplates(client)
+        const today = formatInZone(new Date(), await this.siteTimezone(), false)
+        const product: any = scope.resolve(Modules.PRODUCT)
+        for (const code of codes) {
+            try {
+                const link = await this.findLink("Item", code, "product")
+                if (!link?.medusa_id) continue
+                const item = await client.get(`/api/resource/Item/${encodeURIComponent(code)}`)
+                if (item.ok !== true || !item.data) {
+                    notes.push(`GST ${code}: Item not readable`)
+                    continue
+                }
+                const tables: ItemTaxRow[][] = [Array.isArray(item.data.taxes) ? item.data.taxes : []]
+                let group: string | null = item.data.item_group ? String(item.data.item_group) : null
+                let groupsRead = true
+                for (let depth = 0; group && depth < 10; depth += 1) {
+                    const g = await this.itemGroup(client, group)
+                    if (!g.ok) {
+                        groupsRead = false
+                        break
+                    }
+                    tables.push(g.taxes)
+                    group = g.parent
+                }
+                const template = effectiveItemTaxTemplate({
+                    tables,
+                    today,
+                    company: defaults.company,
+                    companyOf: (name) => templates.map.get(name)?.company ?? null,
+                })
+                // A read that failed is not "no template": moving the product
+                // to the default rate would overcharge it until the next refresh.
+                if (!template && !groupsRead) {
+                    notes.push(`GST ${code}: Item Group not readable; rate left as it is`)
+                    continue
+                }
+                if (template && !templates.map.has(template)) {
+                    notes.push(`GST ${code}: ${templates.ok ? "template" : "templates"} ${template} not readable; rate left as it is`)
+                    continue
+                }
+                const rate = template ? templates.map.get(template)?.rate ?? null : null
+                const regionRates: any[] = await tax.listTaxRates({ tax_region_id: region.id }, { relations: ["rules"], take: 200 })
+                const plan = planProductTaxRule({ productId: String(link.medusa_id), rate, regionRates })
+                let targetId = plan.addTo
+                if (plan.create) {
+                    const [created] = await tax.createTaxRates([
+                        { tax_region_id: region.id, ...plan.create, is_default: false, is_combinable: false },
+                    ])
+                    targetId = created.id
+                }
+                if (plan.remove.length) await tax.deleteTaxRateRules(plan.remove)
+                if (targetId) {
+                    await tax.createTaxRateRules([{ tax_rate_id: targetId, reference: "product", reference_id: String(link.medusa_id) }])
+                }
+                const [row] = await product.listProducts({ id: link.medusa_id }, { select: ["id", "metadata"], take: 1 })
+                const meta = row?.metadata ?? {}
+                const changed = Number(meta.gst_rate) !== plan.rate || (meta.gst_template ?? null) !== template
+                if (row && changed) {
+                    await product.updateProducts(row.id, { metadata: { ...meta, gst_rate: plan.rate, gst_template: template } })
+                }
+                if (changed || plan.create || plan.remove.length || targetId) updated += 1
+            } catch (err: any) {
+                notes.push(`GST ${code}: ${describeError(err)}`)
+            }
+        }
+        return { updated, notes }
+    }
+
+    /** Item Tax Templates' GST rate and company, cached for an hour. */
+    private async itemTaxTemplates(client: FrappeClient): Promise<{ ok: boolean; map: Map<string, { rate: number | null; company: string | null }> }> {
+        const now = Date.now()
+        if (_itemTaxTemplateCache && _itemTaxTemplateCache.expiresAt > now) return { ok: true, map: _itemTaxTemplateCache.map }
+        const res = await client.get("/api/resource/Item%20Tax%20Template", {
+            fields: JSON.stringify(["name", "gst_rate", "company", "disabled"]),
+            limit_page_length: "0",
+        })
+        const map = new Map<string, { rate: number | null; company: string | null }>()
+        for (const r of res.ok === true && Array.isArray(res.data) ? res.data : []) {
+            const rate = r.gst_rate === null || r.gst_rate === undefined || r.gst_rate === "" ? null : Number(r.gst_rate)
+            map.set(String(r.name), { rate: Number.isFinite(rate as number) ? rate : null, company: r.company ? String(r.company) : null })
+        }
+        if (res.ok === true) _itemTaxTemplateCache = { map, expiresAt: now + 60 * 60 * 1000 }
+        return { ok: res.ok === true, map }
+    }
+
+    /** An Item Group's taxes and parent, cached for an hour. */
+    private async itemGroup(client: FrappeClient, name: string): Promise<{ ok: boolean; taxes: ItemTaxRow[]; parent: string | null }> {
+        const now = Date.now()
+        const hit = _itemGroupCache.get(name)
+        if (hit && hit.expiresAt > now) return { ok: true, ...hit }
+        const res = await client.get(`/api/resource/Item%20Group/${encodeURIComponent(name)}`)
+        if (res.ok !== true) return { ok: false, taxes: [], parent: null }
+        const out = {
+            taxes: Array.isArray(res.data?.taxes) ? res.data.taxes : [],
+            parent: res.data?.parent_item_group ? String(res.data.parent_item_group) : null,
+            expiresAt: now + 60 * 60 * 1000,
+        }
+        _itemGroupCache.set(name, out)
+        return { ok: true, ...out }
+    }
+
+    /**
+     * How ERPNext rounds a sales document's total: whether it does at all
+     * (Global Defaults), by which method (System Settings) and to what
+     * fraction of the currency. Cached for ten minutes; an unreadable site
+     * keeps the last answer, else Banker's rounding to the unit.
+     */
+    private async erpnextRoundingRule(
+        client: FrappeClient,
+        currency: string,
+    ): Promise<{ roundTotal: boolean; method: string | null; smallestFraction: number }> {
+        const now = Date.now()
+        const key = currency.toUpperCase()
+        const hit = _roundingCache.get(key)
+        if (hit && hit.expiresAt > now) return hit
+        const single = (doctype: string, field: string) =>
+            client.get("/api/method/frappe.client.get_single_value", { doctype, field })
+        const disabled = await single("Global Defaults", "disable_rounded_total")
+        const method = await single("System Settings", "rounding_method")
+        const fraction = await client.get("/api/method/frappe.client.get_value", {
+            doctype: "Currency",
+            filters: key,
+            fieldname: "smallest_currency_fraction_value",
+        })
+        if (disabled.ok !== true || method.ok !== true || fraction.ok !== true) {
+            return hit ?? { roundTotal: true, method: null, smallestFraction: 0 }
+        }
+        const rule = {
+            roundTotal: !Number(disabled.data),
+            method: method.data ? String(method.data) : null,
+            smallestFraction: Number(fraction.data?.smallest_currency_fraction_value) || 0,
+            expiresAt: now + 10 * 60 * 1000,
+        }
+        _roundingCache.set(key, rule)
+        return rule
+    }
+
+    /**
+     * Keep the cart's rounding line at what makes its total ERPNext's
+     * rounded total (see rounding.ts), and bring an existing payment
+     * collection to the new total. Called by the storefront before it
+     * shows the checkout summary and before it takes payment. Never
+     * throws for a sync reason: a cart that cannot be rounded is left as
+     * it is and the reason returned.
+     */
+    async roundCart(scope: any, cartId: string): Promise<{ ok: boolean; action: string; amount?: number; reason?: string; payable?: number }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync) return { ok: true, action: "skipped", reason: "sync is off" }
+        const rest = await this.restClient(STORE_TIMEOUT_MS)
+        if (!rest) return { ok: true, action: "skipped", reason: "ERPNext not configured" }
+        const query: any = scope.resolve(ContainerRegistrationKeys.QUERY)
+        const { data } = await query.graph({
+            entity: "cart",
+            fields: [
+                "id",
+                "currency_code",
+                "total",
+                "items.id",
+                "items.unit_price",
+                "items.quantity",
+                "items.is_tax_inclusive",
+                "items.adjustments.amount",
+                "items.tax_lines.rate",
+                "shipping_methods.amount",
+                "shipping_methods.adjustments.amount",
+                "credit_lines.id",
+                "credit_lines.reference",
+                "credit_lines.amount",
+                "billing_address.province",
+                "shipping_address.province",
+                "payment_collection.id",
+            ],
+            filters: { id: cartId },
+        })
+        const cart = data?.[0]
+        if (!cart) return { ok: false, action: "failed", reason: "cart not found" }
+        const defaults = await this.pushDefaults(rest.client)
+        const site = await this.companySite(rest.client, defaults.company)
+        const rule = await this.erpnextRoundingRule(rest.client, String(cart.currency_code ?? "inr"))
+        const plan = planCartRounding({
+            cart,
+            companyState: site.state,
+            roundTotal: rule.roundTotal,
+            rounding: { method: rule.method, smallestFraction: rule.smallestFraction },
+        })
+        const cartModule: any = scope.resolve(Modules.CART)
+        const ours = (cart.credit_lines ?? []).filter((c: any) => c?.reference === ROUNDING_REFERENCE)
+        const want = plan.action === "set" ? plan.amount : 0
+        const current = ours.reduce((s: number, c: any) => s + Number(c.amount || 0), 0)
+        if (ours.length === (want ? 1 : 0) && Math.abs(current - want) < 0.005) {
+            return { ok: true, action: "unchanged", amount: want, payable: plan.action === "set" ? plan.estimate.payable : undefined }
+        }
+        if (ours.length) await cartModule.softDeleteCreditLines(ours.map((c: any) => c.id))
+        if (want) {
+            await cartModule.createCreditLines([
+                { cart_id: cartId, reference: ROUNDING_REFERENCE, reference_id: cartId, amount: want, metadata: { label: "Rounding" } },
+            ])
+        }
+        if (cart.payment_collection?.id) {
+            await refreshPaymentCollectionForCartWorkflow(scope).run({ input: { cart_id: cartId } })
+        }
+        return {
+            ok: true,
+            action: want ? "set" : "cleared",
+            amount: want,
+            reason: plan.action === "clear" ? plan.reason : undefined,
+            payable: plan.action === "set" ? plan.estimate.payable : undefined,
+        }
+    }
+
     private async findLink(doctype: string, erpnext_name: string, medusa_entity: string): Promise<any | null> {
         const [row] = await this.listErpnextLinks(
             { doctype, erpnext_name, medusa_entity } as any,
@@ -6051,12 +6642,16 @@ let _tzCache: { value: string | null; expiresAt: number } | null = null
 let _apiUserCache: { value: string | null; expiresAt: number } | null = null
 /** ERPNext Country names by ISO code, per process. */
 let _countryCache: { map: Map<string, string>; expiresAt: number } | null = null
-const _taxTemplateCache = new Map<string, { rows: any[]; expiresAt: number }>()
-/** Per company: its GST state and the site's templates and tax categories. */
-const _gstSiteCache = new Map<
-    string,
-    { companyState: string | null; templates: TaxTemplateInfo[]; categories: TaxCategoryInfo[]; expiresAt: number }
->()
+/** Per company: its own address, GST state and country code. */
+const _companySiteCache = new Map<string, { address: string | null; state: string | null; countryCode: string | null; expiresAt: number }>()
+/** Item Tax Templates' GST rate and company, per process. */
+let _itemTaxTemplateCache: { map: Map<string, { rate: number | null; company: string | null }>; expiresAt: number } | null = null
+/** Item Groups' taxes and parent, per process. */
+const _itemGroupCache = new Map<string, { taxes: ItemTaxRow[]; parent: string | null; expiresAt: number }>()
+/** How ERPNext rounds a sales document's total, per currency, per process. */
+const _roundingCache = new Map<string, { roundTotal: boolean; method: string | null; smallestFraction: number; expiresAt: number }>()
+/** One Delivery Note applied at a time: its ledger entries arrive together. */
+const _deliveryLocks = new Map<string, Promise<unknown>>()
 /** ERPNext's own defaults for pushed documents, per process. */
 let _defaultsCache: { company: string | null; priceList: string | null; expiresAt: number } | null = null
 
@@ -6069,6 +6664,10 @@ const SETUP_TIMEOUT_MS = 180_000
 /** A push waits this long for one write; ERPNext validates and names the
  *  document before answering. */
 const PUSH_TIMEOUT_MS = 90_000
+
+/** A storefront request (checkout rounding, an order's GST) waits this long
+ *  for one ERPNext read; a slow ERPNext must not hold up a checkout. */
+const STORE_TIMEOUT_MS = 5_000
 
 /** A pending inbound row younger than this is a delivery still being
  *  applied; Frappe's retry of it is answered without a second apply. */
