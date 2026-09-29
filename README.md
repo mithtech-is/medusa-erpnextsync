@@ -121,7 +121,7 @@ DocType listed under **Selection** it creates, over REST and idempotently:
 
 | What | Name | Notes |
 |---|---|---|
-| Custom Field | `<DocType>-medusa_sync` | Select, "Sync to Medusa": blank / `ERPNext → Medusa` / `Medusa → ERPNext` / `Both`. Default blank in **allow** mode, `Both` in **deny** mode. |
+| Custom Field | `<DocType>-medusa_sync` | Select, "Sync to Medusa": `None` / `ERPNext → Medusa` / `Medusa → ERPNext` / `Both`. Default `None` in **allow** mode, `Both` in **deny** mode. A blank left from before `None` existed counts as `None`. |
 | Webhook | `Medusa Sync: <DocType> on_update` | Fires when the document moves ERPNext → Medusa (that value or Both), or did before this save, so a deselection arrives once. `on_update` also runs on insert. |
 | Webhook | `Medusa Sync: <DocType> on_trash` | Fires when a document moving ERPNext → Medusa is deleted. |
 
@@ -142,13 +142,13 @@ doc.get("medusa_sync") in ("ERPNext → Medusa", "Both")
 ```
 
 A change of the field is delivered even between `Medusa → ERPNext` and
-blank, so the link always holds the direction ERPNext last showed; such a
+`None`, so the link always holds the direction ERPNext last showed; such a
 delivery is logged and skipped, never applied.
 
 **A document only narrows its mapping.** A pull-only mapping never pushes
 a `Both` document; a two-way mapping never pushes an `ERPNext → Medusa`
 one. The link table remembers the value ERPNext last showed for each
-document, and a push reads it before leaving: `ERPNext → Medusa` or blank
+document, and a push reads it before leaving: `ERPNext → Medusa` or `None`
 means the push is skipped as `record-direction`. A `Medusa → ERPNext`
 document is Medusa's own: whatever ERPNext does to its copy, the product
 here is left alone.

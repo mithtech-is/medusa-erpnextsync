@@ -174,9 +174,9 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
 
     /**
      * How the `medusa_sync` field on this DocType treats a NEW document
-     * when this sync pulls: "allow" — it starts blank and somebody picks
-     * the few to sync; "deny" — it starts on Both and somebody blanks
-     * the exemptions. The selection list under Settings is derived from
+     * when this sync pulls: "allow" — it starts on None and somebody picks
+     * the few to sync; "deny" — it starts on Both and somebody sets the
+     * exemptions to None. The selection list under Settings is derived from
      * the syncs (see selection.ts, deriveSyncDoctypes).
      */
     selection_mode: model.text().nullable(),

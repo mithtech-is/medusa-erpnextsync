@@ -3,8 +3,9 @@ import type { FrappeClient, FrappeResult } from "./frappe-client"
 import {
     DIRECTION_BOTH,
     DIRECTION_ERPNEXT_TO_MEDUSA,
-    DIRECTION_MEDUSA_TO_ERPNEXT,
+    DIRECTION_NONE,
     SELECTION_FIELD,
+    SELECTION_OPTIONS,
     selectionDefault,
     type SyncDoctype,
     type SyncMode,
@@ -67,8 +68,10 @@ export const ON_UPDATE_CONDITION =
 
 export const ON_TRASH_CONDITION = `doc.get("medusa_sync") in ${PULL_TUPLE}`
 
-/** Frappe's Select options: one per line, a blank first line for "not set". */
-export const SELECT_OPTIONS = ["", DIRECTION_ERPNEXT_TO_MEDUSA, DIRECTION_MEDUSA_TO_ERPNEXT, DIRECTION_BOTH].join("\n")
+/** Frappe's Select options, one per line. No blank line: "not set" is the
+ *  explicit None, and Frappe skips validating an empty value, so documents
+ *  left blank before None existed still save. */
+export const SELECT_OPTIONS = SELECTION_OPTIONS.join("\n")
 
 /** Frappe renders this with Jinja, `doc` being `as_dict()` and `json`
  *  being `frappe.as_json`, then `json.loads` the result. */
@@ -103,8 +106,8 @@ export function buildCustomField(doctype: string, mode: SyncMode): Record<string
         in_standard_filter: 1,
         description:
             mode === "deny"
-                ? "Which way this document syncs with the Medusa store. Blank keeps it out."
-                : "Which way this document syncs with the Medusa store. Leave blank to keep it out.",
+                ? "Which way this document syncs with the Medusa store. None keeps it out."
+                : "Which way this document syncs with the Medusa store. Leave it on None to keep it out.",
     }
 }
 
@@ -266,7 +269,7 @@ export async function ensureCustomField(
             detail:
                 mode === "deny"
                     ? `default "${DIRECTION_BOTH}": every existing document now syncs both ways`
-                    : "default blank: choose a direction on the documents to sync",
+                    : `default "${DIRECTION_NONE}": choose a direction on the documents to sync`,
         })
     }
     if (got.ok === false) return item("error", { error: describeSetupFailure(got) })
@@ -281,7 +284,7 @@ export async function ensureCustomField(
     for (const k of CUSTOM_FIELD_MUTABLE) patch[k] = desired[k]
     const put = await client.put(`${CUSTOM_FIELD_PATH}/${encodeURIComponent(name)}`, patch)
     if (put.ok === false) return item("error", { error: describeSetupFailure(put) })
-    return item("updated", { detail: "existing documents keep their current value" })
+    return item("updated", { detail: `existing documents keep their current value; a blank one counts as ${DIRECTION_NONE}` })
 }
 
 export async function ensureWebhook(

@@ -25,15 +25,15 @@ describe("what Set up ERPNext creates", () => {
         expect(inboundUrl("https://shop.example.com/")).toBe("https://shop.example.com/webhooks/erpnext-inbound")
     })
 
-    it("a Select field with the three directions, whose default follows the mode", () => {
+    it("a Select field of None and the three directions, whose default follows the mode", () => {
         const allow = buildCustomField("Item", "allow")
         expect(allow).toMatchObject({
             dt: "Item",
             fieldname: "medusa_sync",
             label: "Sync to Medusa",
             fieldtype: "Select",
-            options: "\nERPNext → Medusa\nMedusa → ERPNext\nBoth",
-            default: "",
+            options: "None\nERPNext → Medusa\nMedusa → ERPNext\nBoth",
+            default: "None",
             insert_after: "disabled",
             in_standard_filter: 1,
         })
@@ -138,7 +138,7 @@ describe("making ERPNext match", () => {
         })
         const item = await ensureCustomField(drifted.client, "Item", "allow")
         expect(item.action).toBe("updated")
-        expect(drifted.writes[0]).toMatchObject({ method: "PUT", body: { default: "" } })
+        expect(drifted.writes[0]).toMatchObject({ method: "PUT", body: { default: "None" } })
         expect(drifted.writes[0].body).not.toHaveProperty("insert_after")
     })
 

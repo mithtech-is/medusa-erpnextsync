@@ -662,8 +662,8 @@ const SettingsTab: React.FC<{
           webhooks that deliver changes. Only DocTypes that some sync pulls from are
           listed: a sync that only writes <em>to</em> ERPNext (Customers, Orders) goes
           over REST and needs nothing installed. Whether a <em>new</em> ERPNext document
-          starts blank (nothing syncs until someone picks it) or on Both (everything
-          syncs unless someone blanks it) is set on the sync itself, under{" "}
+          starts on None (nothing syncs until someone picks a direction) or on Both (everything
+          syncs unless someone sets it to None) is set on the sync itself, under{" "}
           <strong>Mappings</strong>. Press Set up ERPNext after adding or changing a sync.
         </Text>
         {syncDoctypes.length ? (
@@ -684,8 +684,8 @@ const SettingsTab: React.FC<{
                     <td className="py-1 pr-2">{src?.syncs?.length ? src.syncs.join(", ") : "—"}</td>
                     <td className="py-1">
                       {row.mode === "deny"
-                        ? "starts on Both — syncs unless someone blanks it"
-                        : "starts blank — syncs only once someone sets it"}
+                        ? "starts on Both — syncs unless someone sets it to None"
+                        : "starts on None — syncs only once someone picks a direction"}
                     </td>
                   </tr>
                 )
@@ -3073,6 +3073,155 @@ const MappingList: React.FC<{
 
 // ─── Editor ───────────────────────────────────────────────────────────
 
+type PullRecord = {
+  name: string
+  action: "created" | "updated" | "skipped" | "failed"
+  reason?: string
+  medusa_id?: string
+}
+
+type PullReport = {
+  running: boolean
+  full: boolean
+  at?: Date
+  result?: {
+    ok?: boolean
+    message?: string
+    pulled?: number
+    created?: number
+    updated?: number
+    skipped?: number
+    errors?: number
+    since?: string | null
+    records?: PullRecord[]
+  }
+}
+
+const PULL_ACTION_COLOR: Record<PullRecord["action"], "green" | "blue" | "grey" | "red"> = {
+  created: "green",
+  updated: "blue",
+  skipped: "grey",
+  failed: "red",
+}
+
+/** What the last "Pull now" / "Pull all" did, shown under the buttons. */
+const PullStatus: React.FC<{
+  report: PullReport
+  doctype?: string
+  entity?: string
+  onDismiss: () => void
+}> = ({ report, doctype, entity, onDismiss }) => {
+  const noun = doctype || "record"
+  if (report.running) {
+    return (
+      <div className="rounded border border-ui-border-base p-3">
+        <Text size="small">
+          {report.full ? `Reading every selected ${noun} from ERPNext…` : `Pulling changed ${noun} records from ERPNext…`}
+        </Text>
+      </div>
+    )
+  }
+  const r = report.result ?? {}
+  const counts = {
+    pulled: r.pulled ?? 0,
+    created: r.created ?? 0,
+    updated: r.updated ?? 0,
+    skipped: r.skipped ?? 0,
+    errors: r.errors ?? 0,
+  }
+  const failedOutright = r.ok === false && typeof r.message === "string" && r.message.length > 0
+  const tone: "green" | "orange" | "red" = failedOutright || counts.errors ? "red" : counts.pulled === 0 ? "orange" : "green"
+  const records = r.records ?? []
+  const everything = report.full || !r.since
+  const scope = everything
+    ? `Every ${noun} selected for sync was read.`
+    : `Only ${noun} records changed in ERPNext since ${new Date(r.since as string).toLocaleString()} were read.`
+  const emptyHint =
+    !failedOutright && counts.pulled === 0
+      ? everything
+        ? `No ${noun} has Sync to Medusa set to "ERPNext → Medusa" or "Both".`
+        : `Nothing changed since then. Use Pull all to read every selected ${noun} again.`
+      : null
+  return (
+    <div className="rounded border border-ui-border-base p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <StatusBadge color={tone}>
+            {failedOutright ? "Pull failed" : counts.errors ? "Finished with errors" : "Pull finished"}
+          </StatusBadge>
+          {report.at && (
+            <Text size="small" className="text-ui-fg-subtle">
+              {report.at.toLocaleTimeString()}
+            </Text>
+          )}
+        </div>
+        <Button variant="transparent" size="small" onClick={onDismiss}>
+          Dismiss
+        </Button>
+      </div>
+      {failedOutright ? (
+        <Text size="small" className="mt-2 text-ui-fg-error">
+          {r.message}
+        </Text>
+      ) : (
+        <>
+          <Text size="small" className="mt-2">
+            Fetched <strong>{counts.pulled}</strong> {noun}
+            {counts.pulled === 1 ? "" : "s"} from ERPNext: {counts.created} created, {counts.updated} updated,{" "}
+            {counts.skipped} skipped, {counts.errors} failed.
+          </Text>
+          <Text size="small" className="text-ui-fg-subtle">
+            {scope}
+          </Text>
+          {emptyHint && (
+            <Text size="small" className="text-ui-fg-subtle">
+              {emptyHint}
+            </Text>
+          )}
+          {records.length > 0 && (
+            <table className="mt-2 w-full text-xs">
+              <thead>
+                <tr className="text-left text-ui-fg-subtle">
+                  <th className="py-1 pr-2">{doctype || "Record"}</th>
+                  <th className="py-1 pr-2">Result</th>
+                  <th className="py-1">Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {records.map((rec, i) => (
+                  <tr key={`${rec.name}-${i}`} className="border-t border-ui-border-base">
+                    <td className="py-1 pr-2 font-mono">{rec.name}</td>
+                    <td className="py-1 pr-2">
+                      <Badge size="2xsmall" color={PULL_ACTION_COLOR[rec.action]}>
+                        {rec.action}
+                      </Badge>
+                    </td>
+                    <td className="py-1">
+                      {rec.reason ??
+                        (rec.medusa_id && entity === "product" ? (
+                          <a className="text-ui-fg-interactive" href={`/app/products/${rec.medusa_id}`}>
+                            {rec.medusa_id}
+                          </a>
+                        ) : (
+                          rec.medusa_id ?? ""
+                        ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {records.length > 0 && counts.pulled > records.length && (
+            <Text size="small" className="mt-1 text-ui-fg-subtle">
+              Showing the first {records.length} of {counts.pulled}.
+            </Text>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 const MappingEditor: React.FC<{
   id: string | null
   onBack: () => void
@@ -3106,6 +3255,7 @@ const MappingEditor: React.FC<{
   const [error, setError] = useState<string | null>(null)
   const [testRecordId, setTestRecordId] = useState("")
   const [testResult, setTestResult] = useState<any>(null)
+  const [pullReport, setPullReport] = useState<PullReport | null>(null)
 
   // Load entities + (when editing) the mapping to be edited.
   useEffect(() => {
@@ -3541,13 +3691,14 @@ const MappingEditor: React.FC<{
     }
   }
 
-  const pullNow = async () => {
+  const pullNow = async (full = false) => {
     if (!id) {
       setError("save first, then pull")
       return
     }
     setBusy(true)
     setError(null)
+    setPullReport({ running: true, full })
     try {
       const res = await fetch(
         `/admin/erpnext/mappings/${id}/pull-now`,
@@ -3555,13 +3706,13 @@ const MappingEditor: React.FC<{
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify(full ? { full: true } : {}),
         },
       )
-      const body = await res.json()
-      setTestResult(body)
+      const body = await res.json().catch(() => ({ ok: false, message: `HTTP ${res.status}` }))
+      setPullReport({ running: false, full, at: new Date(), result: body })
     } catch (e: any) {
-      setError(e?.message ?? "pull_failed")
+      setPullReport({ running: false, full, at: new Date(), result: { ok: false, message: e?.message ?? "pull_failed" } })
     } finally {
       setBusy(false)
     }
@@ -3583,8 +3734,17 @@ const MappingEditor: React.FC<{
           <Button variant="secondary" size="small" onClick={planInbound} disabled={busy || !id}>
             Test pull
           </Button>
-          <Button variant="secondary" size="small" onClick={pullNow} disabled={busy || !id}>
-            Pull now
+          <Button variant="secondary" size="small" onClick={() => pullNow(false)} disabled={busy || !id}>
+            {pullReport?.running && !pullReport.full ? "Pulling…" : "Pull now"}
+          </Button>
+          <Button
+            variant="secondary"
+            size="small"
+            onClick={() => pullNow(true)}
+            disabled={busy || !id}
+            title="Read every selected record again, not only those changed since the last pull"
+          >
+            {pullReport?.running && pullReport.full ? "Pulling…" : "Pull all"}
           </Button>
           <Button variant="primary" size="small" onClick={save} disabled={busy}>
             {id ? "Save" : "Create"}
@@ -3593,6 +3753,14 @@ const MappingEditor: React.FC<{
       </div>
 
       {error && <Text className="text-ui-fg-error">{error}</Text>}
+      {pullReport && (
+        <PullStatus
+          report={pullReport}
+          doctype={draft.doctype}
+          entity={draft.medusa_entity}
+          onDismiss={() => setPullReport(null)}
+        />
+      )}
 
       <div className="grid grid-cols-2 gap-4">
         <div>
@@ -3639,8 +3807,8 @@ const MappingEditor: React.FC<{
                 value={(draft as any).selection_mode === "deny" ? "deny" : "allow"}
                 onChange={(e) => setDraft((d) => ({ ...d, selection_mode: e.target.value as any }))}
               >
-                <option value="allow">Start blank — somebody picks the few to sync (allow list)</option>
-                <option value="deny">Start on Both — somebody blanks the exemptions (deny list)</option>
+                <option value="allow">Start on None — somebody picks the few to sync (allow list)</option>
+                <option value="deny">Start on Both — somebody sets the exemptions to None (deny list)</option>
               </select>
               <Text className="mt-1 text-xs text-ui-fg-subtle">
                 Set up ERPNext puts a <strong>Sync to Medusa</strong> field and two webhooks on{" "}
@@ -4911,14 +5079,14 @@ const DocumentsTab: React.FC<{ erpnextUrl: string | null }> = ({ erpnextUrl }) =
   }, [doctype, entity, state, offset])
 
   const directionLabel = (d: string | null) =>
-    d === null || d === undefined ? "not shown yet" : d === "" ? "blank — not selected" : d
+    d === null || d === undefined ? "not shown yet" : d === "" || d === "None" ? "None — not selected" : d
 
   return (
     <div className="space-y-3">
       <Text size="small" className="text-ui-fg-subtle">
         One row per ERPNext document that is tied to a record in this store. <strong>Which documents
         are allowed to sync is decided in ERPNext</strong>: on each document, the <em>Sync to Medusa</em>{" "}
-        field says ERPNext → Medusa, Medusa → ERPNext, Both, or blank (not selected). In ERPNext, filter the
+        field says ERPNext → Medusa, Medusa → ERPNext, Both, or None (not selected). In ERPNext, filter the
         DocType's list by that field to see the allowed and the not-allowed ones. This tab is the record of
         what has synced, with the direction ERPNext last showed for each; a document that was deselected
         or deleted there shows its store record as <em>drafted</em>.

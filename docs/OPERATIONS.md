@@ -19,7 +19,7 @@ Nothing is installed on ERPNext. On the Settings tab:
 | API key / secret | a Frappe API user; needs **System Manager** for the setup |
 | Medusa public URL | where ERPNext reaches this store; the webhooks POST to `<url>/webhooks/erpnext-inbound` |
 | Frappe webhook secret | generated for you by Set up ERPNext; rotate with Generate |
-| Selection | the DocTypes that get the **Sync to Medusa** field (blank / ERPNext → Medusa / Medusa → ERPNext / Both), each allow or deny list |
+| Selection | the DocTypes that get the **Sync to Medusa** field (None / ERPNext → Medusa / Medusa → ERPNext / Both), each allow or deny list |
 | Default phone region | what a phone number without a country code is assumed to be (IN) |
 
 Save, **Test connection** (`POST /admin/erpnext/ping`), then **Set up
@@ -62,7 +62,7 @@ DocType; the pair is its identity and there is one per pair.
 - **Pull** and **both** mappings on a selection DocType receive webhooks
   and are polled every 5 minutes for rows on ERPNext → Medusa or Both.
 - A document narrows its mapping, never widens it: a push for a document
-  ERPNext last showed as ERPNext → Medusa, or blank, is skipped as
+  ERPNext last showed as ERPNext → Medusa, or None, is skipped as
   `record-direction`.
 - **Push** mappings write over REST. Settings → *Pushing to ERPNext* names
   the Company, price list, customer group, territory, shipping account and
@@ -226,7 +226,7 @@ ERPNext computes it (India Compliance) and the store charges the same:
 ERPNext owns it. The rules:
 
 - Only a document on **ERPNext → Medusa** or **Both** reaches the store.
-  Blank it or delete it and its product goes to **draft**; select it again
+  Set it to None or delete it and its product goes to **draft**; select it again
   and the same product is republished. A **Medusa → ERPNext** document is
   Medusa's own and is never drafted. Nothing is ever deleted here on
   ERPNext's say-so.

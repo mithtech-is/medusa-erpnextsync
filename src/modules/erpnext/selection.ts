@@ -6,7 +6,7 @@ import type { MappingDirection } from "./mapping-engine"
  * One Select field, `medusa_sync` ("Sync to Medusa"), on every DocType that
  * holds catalogue documents, with four values:
  *
- *   (blank)             not selected; nothing moves
+ *   None                not selected; nothing moves
  *   ERPNext → Medusa    ERPNext owns it; it is pulled and delivered here
  *   Medusa → ERPNext    Medusa owns it; it is pushed there (Phase 2)
  *   Both                moves both ways
@@ -17,7 +17,7 @@ import type { MappingDirection } from "./mapping-engine"
  * that intersection.
  *
  * Two ways to run it, chosen per DocType when the field is created:
- *   allow — the field defaults to blank; select the few that should sync.
+ *   allow — the field defaults to None; select the few that should sync.
  *   deny  — the field defaults to "Both"; every existing document is
  *           selected the moment the field exists.
  * Changing the mode later changes the default for NEW documents only.
@@ -36,9 +36,11 @@ export const SELECTION_FIELD = "medusa_sync"
 export const DIRECTION_ERPNEXT_TO_MEDUSA = "ERPNext → Medusa"
 export const DIRECTION_MEDUSA_TO_ERPNEXT = "Medusa → ERPNext"
 export const DIRECTION_BOTH = "Both"
+/** Stored, not left blank, so a document plainly says it is kept out. */
+export const DIRECTION_NONE = "None"
 
 export const SELECTION_OPTIONS = [
-    "",
+    DIRECTION_NONE,
     DIRECTION_ERPNEXT_TO_MEDUSA,
     DIRECTION_MEDUSA_TO_ERPNEXT,
     DIRECTION_BOTH,
@@ -59,7 +61,7 @@ export const DEFAULT_SYNC_DOCTYPES: SyncDoctype[] = [
 
 /** The field's default for new documents in each mode. */
 export function selectionDefault(mode: SyncMode): string {
-    return mode === "deny" ? DIRECTION_BOTH : ""
+    return mode === "deny" ? DIRECTION_BOTH : DIRECTION_NONE
 }
 
 /** Coerce whatever the settings row or the admin form holds into a clean
@@ -112,7 +114,8 @@ export type RecordDirection =
     | "erpnext_to_medusa"
     | "medusa_to_erpnext"
     | "both"
-    /** Selected by nobody: blank, null, or a value the field never offered. */
+    /** Selected by nobody: None, a blank left from before None existed,
+     *  null, or a value the field never offered. */
     | "none"
     /** The document carries no `medusa_sync` key at all — a DocType nobody
      *  has set up, or a body without it. */
@@ -223,7 +226,7 @@ export function resolveProductsDoctype(
 /**
  * The selection list, derived from the syncs: every mapping with a pull
  * leg puts its DocType under selection, and its own choice of mode
- * (allow: new documents start blank; deny: they start on Both) rides
+ * (allow: new documents start on None; deny: they start on Both) rides
  * along. Two syncs on one DocType that disagree resolve to allow — the
  * conservative side, since deny switches every existing document on at
  * the first setup. Push-only syncs need no field and no webhooks.
