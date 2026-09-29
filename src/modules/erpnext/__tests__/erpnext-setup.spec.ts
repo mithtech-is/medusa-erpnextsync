@@ -4,6 +4,7 @@ import {
     ON_TRASH_CONDITION,
     ON_UPDATE_CONDITION,
     buildCustomField,
+    buildInvoiceWebhooks,
     buildPriceWebhooks,
     buildStockWebhooks,
     buildWebhook,
@@ -279,5 +280,28 @@ describe("secondary DocType webhooks", () => {
         const contact = writes.find((w) => w.method === "POST" && w.body?.name === "Medusa Sync: Contact on_update")
         expect(contact?.body?.condition).toBe("")
         expect(contact?.body?.webhook_docevent).toBe("on_update")
+    })
+})
+
+describe("invoice webhooks", () => {
+    it("fire on a Sales Invoice's submit and cancel, unconditioned", () => {
+        const hooks = buildInvoiceWebhooks({ publicUrl: "http://x", secret: "s" })
+        expect(hooks.map((w) => [w.name, w.webhook_docevent, w.condition])).toEqual([
+            ["Medusa Sync: Sales Invoice on_submit", "on_submit", ""],
+            ["Medusa Sync: Sales Invoice on_cancel", "on_cancel", ""],
+        ])
+        for (const w of hooks) expect(w.request_url).toBe("http://x/webhooks/erpnext-inbound")
+    })
+
+    it("are installed only when customers are sent ERPNext's invoices", async () => {
+        const off = fakeClient({})
+        await runErpnextSetup({ client: off.client, doctypes: [], publicUrl: "http://x", secret: "s" })
+        expect(off.writes.some((w) => String(w.body?.webhook_doctype) === "Sales Invoice")).toBe(false)
+        const on = fakeClient({})
+        await runErpnextSetup({ client: on.client, doctypes: [], publicUrl: "http://x", secret: "s", invoices: true })
+        expect(on.writes.filter((w) => String(w.body?.webhook_doctype) === "Sales Invoice").map((w) => w.body.webhook_docevent)).toEqual([
+            "on_submit",
+            "on_cancel",
+        ])
     })
 })
