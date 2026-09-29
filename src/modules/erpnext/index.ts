@@ -107,6 +107,7 @@ import {
 } from "./product-policy"
 import { effectiveItemTaxTemplate, planProductTaxRule, type ItemTaxRow } from "./item-gst"
 import { deliveryNoteOf, planDeliveryFulfilment, salesOrdersOf, DELIVERY_NOTE_DOCTYPE } from "./delivery"
+import { SALES_INVOICE_DOCTYPE, invoiceStatusOf, invoiceTotalOf, isDownloadable, salesOrdersBilled } from "./invoice-events"
 import { ROUNDING_REFERENCE, planCartRounding } from "./rounding"
 import {
     createOrderFulfillmentWorkflow,
@@ -703,7 +704,7 @@ class ErpnextModuleService extends MedusaService({
             total: r.total,
             currency: r.currency,
             status: r.status,
-            downloadable: Boolean(r.object_key),
+            downloadable: isDownloadable(r),
         }))
     }
 
@@ -735,7 +736,7 @@ class ErpnextModuleService extends MedusaService({
             const status = docstatus === 1 ? "submitted" : docstatus === 2 ? "cancelled" : "draft"
             const changed = status !== inv.status
             if (changed) await this.updateErpnextInvoices([{ id: inv.id, status }])
-            if (status === "cancelled") continue
+            if (status !== "submitted") continue
             if (changed || !inv.fetched_at) {
                 const r = await this.fetchInvoicePdf(inv.id)
                 if (r.ok) refreshed += 1
@@ -747,10 +748,87 @@ class ErpnextModuleService extends MedusaService({
 
     async openInvoice(invoiceId: string) {
         const [invoice] = await this.listErpnextInvoices({ id: invoiceId }, { take: 1 })
-        if (!invoice?.object_key) return null
+        if (!invoice || !isDownloadable(invoice)) return null
         const settings = await this.findSettingsRow()
-        const object = await storageFor({ ...(settings ?? {}), invoice_storage: invoice.storage }).get(invoice.object_key)
+        const read = (row: any) => storageFor({ ...(settings ?? {}), invoice_storage: row.storage }).get(row.object_key)
+        let object = await read(invoice)
+        // A lost file (storage moved, a volume recreated) is fetched from
+        // ERPNext again rather than leaving the customer without an invoice.
+        if (!object && (await this.fetchInvoicePdf(invoice.id)).ok) {
+            const [again] = await this.listErpnextInvoices({ id: invoiceId }, { take: 1 })
+            object = again ? await read(again) : null
+        }
         return object ? { invoice, object } : null
+    }
+
+    /**
+     * A Sales Invoice was submitted or cancelled in ERPNext. When it bills
+     * a store order, record it against the order and, once submitted, keep
+     * ERPNext's PDF of it for the customer. A failed fetch fails the event,
+     * so the retry job fetches again.
+     */
+    private async applySalesInvoiceEvent(
+        body: FrappeWebhookBody,
+        scope: any,
+    ): Promise<{ via: "frappe"; event: string; results: any[] }> {
+        const done = (result: any) => ({ via: "frappe" as const, event: String(body.event), results: [result] })
+        if (!receivesErpInvoices((await this.findSettingsRow()) as any)) {
+            return done({ ok: true, action: "skipped", reason: "customers are not sent ERPNext's invoices" })
+        }
+        const doc: any = body.doc ?? {}
+        const number = String(body.name ?? doc.name ?? "").trim()
+        const orderId = number ? await this.orderForSalesInvoice(number, doc) : null
+        if (!orderId) return done({ ok: true, action: "skipped", reason: "not a store order's invoice" })
+        const status = invoiceStatusOf(String(body.event), doc.docstatus)
+        const orderSvc: any = scope.resolve("order")
+        const [order] = await orderSvc.listOrders({ id: orderId }, { take: 1, select: ["id", "customer_id"] })
+        const facts = {
+            order_id: orderId,
+            customer_id: order?.customer_id ?? null,
+            number,
+            source: "erpnext",
+            invoice_date: doc.posting_date ?? null,
+            total: invoiceTotalOf(doc),
+            currency: doc.currency ? String(doc.currency).toUpperCase() : null,
+            status,
+        }
+        const [known] = await this.listErpnextInvoices({ number }, { take: 1 })
+        const saved = known
+            ? (await this.updateErpnextInvoices([{ id: known.id, ...facts }]))[0]
+            : (await this.createErpnextInvoices([facts]))[0]
+        if (status !== "submitted") {
+            return done({ ok: true, entity: "order", id: orderId, action: `invoice ${number} ${status}` })
+        }
+        await this.recordLink({
+            doctype: SALES_INVOICE_DOCTYPE,
+            erpnext_name: number,
+            medusa_entity: "invoice",
+            medusa_id: orderId,
+            state: "active",
+        })
+        const pdf = await this.fetchInvoicePdf(saved.id)
+        return pdf.ok
+            ? done({ ok: true, entity: "order", id: orderId, action: `invoice ${number} fetched` })
+            : done({ ok: false, entity: "order", id: orderId, error: `invoice ${number}: ${pdf.error}` })
+    }
+
+    /** The store order a Sales Invoice bills: one the store raised, else one whose Sales Order it bills. */
+    private async orderForSalesInvoice(number: string, doc: any): Promise<string | null> {
+        const [known] = await this.listErpnextInvoices({ number }, { take: 1 })
+        if (known?.order_id) return String(known.order_id)
+        const [raised] = await this.listErpnextLinks(
+            { doctype: SALES_INVOICE_DOCTYPE, erpnext_name: number, medusa_entity: "invoice" } as any,
+            { take: 1 },
+        )
+        if (raised?.medusa_id) return String(raised.medusa_id)
+        for (const so of salesOrdersBilled(doc?.items)) {
+            const [link] = await this.listErpnextLinks(
+                { doctype: "Sales Order", erpnext_name: so, medusa_entity: "order" } as any,
+                { take: 1 },
+            )
+            if (link?.medusa_id) return String(link.medusa_id)
+        }
+        return null
     }
 
 
@@ -4293,12 +4371,11 @@ class ErpnextModuleService extends MedusaService({
                 currency: order?.currency_code ? String(order.currency_code).toUpperCase() : null,
                 status: "draft",
             }
-            const saved = known
-                ? (await this.updateErpnextInvoices([{ id: known.id, ...facts }]))[0]
-                : (await this.createErpnextInvoices([facts]))[0]
-            // The customer's copy: fetched now as a draft, and again by the
-            // hourly reconcile once ERPNext submits it.
-            if (saved?.id && receivesErpInvoices((await this.findSettingsRow()) as any)) await this.fetchInvoicePdf(saved.id)
+            // The customer's copy is fetched once ERPNext submits the invoice
+            // (its on_submit webhook, or the hourly reconcile); a draft can
+            // still change, so it is never offered.
+            if (known) await this.updateErpnextInvoices([{ id: known.id, ...facts }])
+            else await this.createErpnextInvoices([facts])
         } catch (err: any) {
             console.warn("[erpnext] invoice row not recorded:", describeError(err))
         }
@@ -5286,10 +5363,11 @@ class ErpnextModuleService extends MedusaService({
             return { ok: true, status: "skipped", event_id, message: "already being applied" }
         }
         const stockOrPrice = isStockOrPriceDoctype(body.doctype)
-        const mappings = stockOrPrice
+        const invoiceEvent = body.doctype === SALES_INVOICE_DOCTYPE
+        const mappings = stockOrPrice || invoiceEvent
             ? []
             : (await this.listEnabledPullMappings()).filter((m: any) => m.doctype === body.doctype)
-        if (!stockOrPrice && !mappings.length) {
+        if (!stockOrPrice && !invoiceEvent && !mappings.length) {
             // A change on a DocType that hangs off a synced one (a Contact of
             // a Customer): find the main document and apply it as its change.
             const viaSecondary = await this.mappingsWithSecondary(body.doctype)
@@ -5347,9 +5425,11 @@ class ErpnextModuleService extends MedusaService({
             { status: "pending", last_error: null },
         )
         try {
-            const outcome = stockOrPrice
-                ? await this.applyStockPriceEvent(body, args.scope)
-                : await this.applyFrappeEvent(body, args.scope, mappings)
+            const outcome = invoiceEvent
+                ? await this.applySalesInvoiceEvent(body, args.scope)
+                : stockOrPrice
+                  ? await this.applyStockPriceEvent(body, args.scope)
+                  : await this.applyFrappeEvent(body, args.scope, mappings)
             const failed = outcome.results.filter((r: any) => r.ok === false)
             const message = failed.length
                 ? String(failed[0].error ?? "failed").slice(0, ERROR_TRUNCATE)
@@ -6079,6 +6159,7 @@ class ErpnextModuleService extends MedusaService({
             previous: cfg.erpnext_setup_report,
             stock: cfg.sync_stock && cfg.erpnext_warehouse ? { warehouse: cfg.erpnext_warehouse } : null,
             prices: cfg.sync_prices && sellingList ? { priceList: sellingList } : null,
+            invoices: receivesErpInvoices(row as any),
             secondaries: (await this.listEnabledPullMappings()).flatMap((m: any) =>
                 normalizeSecondaryDoctypes(m.secondary_doctypes, m.doctype).map((s) => s.doctype),
             ),

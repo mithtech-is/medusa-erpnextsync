@@ -221,6 +221,22 @@ ERPNext computes it (India Compliance) and the store charges the same:
   "skipped: … differ by more than 1" means the store and ERPNext disagree
   on a rate or a price; fix the data, do not round over it.
 
+## Customers' invoices
+
+With **Customers can download ERPNext invoices** on (and ERPNext numbering the
+invoices), press Set up ERPNext once: it adds `Sales Invoice on_submit` and
+`on_cancel` webhooks.
+
+- The draft raised at payment capture is recorded against the order but not
+  offered. Submitting it in ERPNext fetches the PDF in Sales Invoice's default
+  print format into private storage; the customer downloads it from their
+  order. An invoice made in ERPNext from the order's Sales Order is picked up
+  the same way.
+- Cancelling it withdraws the download. A failed fetch is a failed event on
+  the Events tab and is retried; the hourly reconcile catches a missed submit.
+- The PDF is whatever ERPNext prints, so the print format and the Company
+  master (logo, address, GSTIN) are the place to change how it looks.
+
 ## The catalogue
 
 ERPNext owns it. The rules:

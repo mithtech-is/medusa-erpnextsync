@@ -1006,9 +1006,11 @@ const SettingsTab: React.FC<{
         <Text size="small" className="text-ui-fg-subtle mb-3">
           What an order becomes in ERPNext is set above under <strong>Pushing to ERPNext</strong>{" "}
           (currently: <strong>{orderDocument}</strong>). ERPNext numbers its invoices. This
-          switch gives customers the ERPNext invoice: the PDF is fetched when the invoice is
-          raised and again once ERPNext submits it, kept in the storage set below, and served
-          only to the signed-in customer whose order it is.
+          switch gives customers the ERPNext invoice: once ERPNext submits it, the PDF in
+          Sales Invoice's default print format is fetched, kept in the storage set below, and
+          served only to the signed-in customer whose order it is. A draft is never offered.
+          Press Set up ERPNext after switching it on, so the invoice's submit and cancel reach
+          the store at once.
         </Text>
         <div className="flex items-center gap-2">
           <Switch checked={sendInvoice} onCheckedChange={(v) => setSendInvoice(Boolean(v))} />
