@@ -69,9 +69,9 @@ describe("the list of selection DocTypes", () => {
         expect(isSyncDoctype("item", LIST)).toBe(false)
     })
 
-    it("defaults the field to Both in deny mode and blank in allow mode", () => {
+    it("defaults the field to Both in deny mode and None in allow mode", () => {
         expect(selectionDefault("deny")).toBe(DIRECTION_BOTH)
-        expect(selectionDefault("allow")).toBe("")
+        expect(selectionDefault("allow")).toBe("None")
     })
 })
 
@@ -80,6 +80,7 @@ describe("reading the direction off a document", () => {
         expect(selectionOf({ medusa_sync: DIRECTION_ERPNEXT_TO_MEDUSA })).toBe("erpnext_to_medusa")
         expect(selectionOf({ medusa_sync: DIRECTION_MEDUSA_TO_ERPNEXT })).toBe("medusa_to_erpnext")
         expect(selectionOf({ medusa_sync: DIRECTION_BOTH })).toBe("both")
+        expect(selectionOf({ medusa_sync: "None" })).toBe("none")
         expect(selectionOf({ medusa_sync: "" })).toBe("none")
         expect(selectionOf({ medusa_sync: null })).toBe("none")
         expect(selectionOf({ medusa_sync: 1 })).toBe("none")

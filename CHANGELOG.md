@@ -30,6 +30,17 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   until the test line was used up. It now asserts the wallet and the line end where they began,
   repays after a failed expectation, and prints a cleanup failure instead of swallowing it.
 
+## 0.6.2 — 2026-09-29
+
+- **"Sync to Medusa" says None instead of blank.** The field's options are `None`, `ERPNext → Medusa`,
+  `Medusa → ERPNext` and `Both`; a new document starts on `None` in allow mode (still `Both` in deny
+  mode). Set up ERPNext updates an existing field in place. Documents left blank before this keep
+  saving (Frappe does not validate an empty Select) and count as `None`, as before.
+- **Pull now shows what it did.** A status box under the buttons gives the counts (fetched, created,
+  updated, skipped, failed), whether only records changed since the last pull were read, and a row per
+  record with the reason for a skip or failure. **Pull all** reads every selected record again. The
+  pull's result carries `since` and `records` (the first 50) for it.
+
 ## 0.6.1 — 2026-09-29
 
 Found by the production test of 0.6.0.

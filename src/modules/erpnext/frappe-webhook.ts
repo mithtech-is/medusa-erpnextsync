@@ -124,8 +124,9 @@ export function supersededBy(
  *
  * The document's `medusa_sync` says which way it moves. ERPNext → Medusa
  * or Both: an update is upserted (republishing a product we drafted
- * earlier), a trash drafts. Blank — deselected — drafts, since the webhook
- * only fires for a blank document that moved ERPNext → Medusa before this
+ * earlier), a trash drafts. None (or a blank from before None existed) —
+ * deselected — drafts, since the webhook only fires for such a document
+ * when it moved ERPNext → Medusa before this
  * save, so the product is ours. Medusa → ERPNext is Medusa's own record:
  * nothing ERPNext does to its copy touches the product.
  *

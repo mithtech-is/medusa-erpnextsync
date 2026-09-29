@@ -321,6 +321,17 @@ type ActiveConfig = {
     source: { url: "row" | "env" | "missing"; secret: "row" | "env" | "missing" }
 }
 
+/** One fetched record in a pull's report. */
+export type PullRecordOutcome = {
+    name: string
+    action: "created" | "updated" | "skipped" | "failed"
+    reason?: string
+    medusa_id?: string
+}
+
+/** A pull reports this many records by name; the counts cover all of them. */
+const PULL_RECORDS_SHOWN = 50
+
 /**
  * ErpnextModuleService — owns:
  *   1. The `erpnext_sync_event` log table (every sync attempt, both ways).
@@ -4920,6 +4931,11 @@ class ErpnextModuleService extends MedusaService({
         skipped: number
         errors: number
         message?: string
+        /** The watermark this pull read from: only records ERPNext modified
+         *  after it were fetched. Null means every selected record. */
+        since?: string | null
+        /** What happened to each fetched record, the first PULL_RECORDS_SHOWN. */
+        records?: PullRecordOutcome[]
     }> {
         const mapping = args.mapping
         const entity = getMedusaEntity(mapping.medusa_entity)
@@ -4957,6 +4973,7 @@ class ErpnextModuleService extends MedusaService({
         // Build filters: time-based watermark + any operator-supplied
         // pull_filter clauses ANDed together.
         const filters: any[] = []
+        const since = mapping.last_pull_at ? new Date(mapping.last_pull_at).toISOString() : null
         if (mapping.last_pull_at) {
             const ts = new Date(mapping.last_pull_at).toISOString().slice(0, 19).replace("T", " ")
             filters.push(["modified", ">", ts])
@@ -5049,6 +5066,10 @@ class ErpnextModuleService extends MedusaService({
             }
         }
         const linksToRecord: Array<{ erpnext_name: string; medusa_id: string; remote_direction: string | null }> = []
+        const records: PullRecordOutcome[] = []
+        const note = (r: PullRecordOutcome) => {
+            if (records.length < PULL_RECORDS_SHOWN) records.push(r)
+        }
         const transformOptions = await this.transformOptions()
         const apiUser = await this.apiUserEmail()
         const pullClient = (await this.restClient())?.client ?? null
@@ -5058,8 +5079,10 @@ class ErpnextModuleService extends MedusaService({
             }
             // A row the API user last wrote is a push of ours; reading it
             // back would only bounce it.
+            const recordName = String(row?.name ?? row?.[mapping.key_erpnext_field] ?? "")
             if (isOwnWrite(row, apiUser)) {
                 skipped += 1
+                note({ name: recordName, action: "skipped", reason: "last saved by this store, so already in step" })
                 continue
             }
             const transform = applyMapping({
@@ -5071,6 +5094,7 @@ class ErpnextModuleService extends MedusaService({
             })
             if (transform.ok === false) {
                 skipped += 1
+                note({ name: recordName, action: "skipped", reason: transform.reason })
                 continue
             }
             const keyValue =
@@ -5079,6 +5103,7 @@ class ErpnextModuleService extends MedusaService({
                     : null
             if (!keyValue) {
                 skipped += 1
+                note({ name: recordName, action: "skipped", reason: `no ${mapping.key_erpnext_field}` })
                 continue
             }
             const rowName = row?.name != null ? String(row.name) : keyValue
@@ -5091,10 +5116,12 @@ class ErpnextModuleService extends MedusaService({
             )
             if (!outcome.ok) {
                 errors += 1
+                note({ name: rowName, action: "failed", reason: outcome.error ?? "not written" })
                 continue
             }
             if (outcome.created) created += 1
             else updated += 1
+            note({ name: rowName, action: outcome.created ? "created" : "updated", medusa_id: outcome.id })
             if (outcome.id) {
                 linksToRecord.push({
                     erpnext_name: rowName,
@@ -5155,6 +5182,8 @@ class ErpnextModuleService extends MedusaService({
             updated,
             skipped,
             errors,
+            since,
+            records,
         }
     }
 
