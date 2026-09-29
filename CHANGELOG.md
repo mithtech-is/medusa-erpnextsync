@@ -3,6 +3,18 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.6.3 — 2026-09-29
+
+- **Customers get ERPNext's submitted invoice at once.** With "Customers can download ERPNext
+  invoices" on, Set up ERPNext installs `Sales Invoice on_submit` / `on_cancel` webhooks. A submit
+  fetches the PDF (Sales Invoice's default print format) into private storage; a cancel withdraws
+  it. An invoice raised in ERPNext itself is matched to the store order through the Sales Order it
+  bills. A failed fetch fails the event, so the retry job fetches again.
+- **A draft invoice is never offered.** The draft raised at payment capture is recorded but its PDF
+  is not fetched; the store route and the order's invoice list offer only a submitted invoice with
+  its file. The hourly reconcile still catches a submit the webhook missed.
+- **A lost invoice file is fetched again** when the customer opens it, instead of failing.
+
 ## 0.6.2 — 2026-09-29
 
 - **"Sync to Medusa" says None instead of blank.** The field's options are `None`, `ERPNext → Medusa`,
