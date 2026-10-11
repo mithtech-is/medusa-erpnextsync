@@ -207,6 +207,17 @@ In deny mode the column is created with default `Both`, so every existing
 document is selected at once. Changing the mode later changes the default
 for new documents only; existing values stay.
 
+With **Book gateway settlements in ERPNext** on, it also creates what the
+fee invoice and the payout need, only when missing and never changing an
+existing master:
+
+| What | Name | Notes |
+|---|---|---|
+| Account | `Payment Gateway Charges - <abbr>` | Expense ledger under Indirect Expenses. |
+| Account | the settlement bank account | Only with *Set up ERPNext creates it* on: a Bank ledger under Bank Accounts. Otherwise a missing one is reported. |
+| Supplier | each gateway's supplier | In Buying Settings' default supplier group. Its GSTIN and address are left to you; the report says so, since the input tax credit needs them. |
+| Item | each gateway's service item | Non-stock, purchase only, the configured HSN/SAC (default 997158, to be confirmed), the expense ledger above as its default. |
+
 Re-running the button is safe: each item reports created, updated,
 unchanged or error. The API user needs **System Manager** (Custom Field
 and Webhook are core DocTypes); a 403 says so.

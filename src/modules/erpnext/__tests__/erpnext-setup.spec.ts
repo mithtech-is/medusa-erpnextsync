@@ -13,6 +13,7 @@ import {
     ensureWebhook,
     fingerprintOf,
     inboundUrl,
+    ensureSettlementMasters,
     runErpnextSetup,
     webhookJsonTemplate,
     webhookName,
@@ -303,5 +304,138 @@ describe("invoice webhooks", () => {
             "on_submit",
             "on_cancel",
         ])
+    })
+})
+
+describe("Set up ERPNext for gateway settlements", () => {
+    const masters = {
+        company: "Splendx Generators Pvt Ltd",
+        gateways: [{ supplier: "Cashfree Payments India Private Limited", item: "Payment Gateway Charges", gst_hsn_code: "997158" }],
+        bankAccount: { name: "IDFC Current - SGPL", create: true },
+    }
+    const ok = (data: any): FrappeResult => ({ ok: true, status: 200, data })
+
+    /** Answers a GET by path, and a list GET by path plus the first filter's field and value. */
+    function fakeSite(existing: { accounts?: Record<string, any>; supplier?: any; item?: any } = {}) {
+        const writes: Array<{ method: string; path: string; body: any }> = []
+        const accounts = existing.accounts ?? {}
+        const client: FrappeClient = {
+            async get(path, query) {
+                if (path === "/api/resource/Company/Splendx%20Generators%20Pvt%20Ltd") return ok({ name: masters.company, abbr: "SGPL" })
+                if (path === "/api/method/frappe.client.get_single_value") {
+                    return query?.field === "supplier_group" ? ok("Services") : ok(null)
+                }
+                if (path === "/api/resource/Item%20Group/Services") return ok({ name: "Services" })
+                if (path === "/api/resource/Account" && query?.filters) {
+                    const filters: any[] = JSON.parse(query.filters)
+                    const [field, , value] = filters[0]
+                    const isGroup = filters.some(([f, , v]: any[]) => f === "is_group" && v === 1)
+                    if (isGroup && field === "account_name" && value === "Indirect Expenses") return ok([{ name: "Indirect Expenses - SGPL" }])
+                    if (isGroup && field === "account_name" && value === "Bank Accounts") return ok([{ name: "Bank Accounts - SGPL" }])
+                    const hit = Object.values(accounts).find((a: any) => a[field] === value)
+                    return ok(hit && !isGroup ? [{ name: hit.name }] : [])
+                }
+                if (path.startsWith("/api/resource/Account/")) {
+                    const name = decodeURIComponent(path.slice("/api/resource/Account/".length))
+                    return accounts[name] ? ok(accounts[name]) : { ok: false, status: 404, error: "HTTP 404" }
+                }
+                if (path === "/api/resource/Supplier/Cashfree%20Payments%20India%20Private%20Limited" && existing.supplier) return ok(existing.supplier)
+                if (path === "/api/resource/Supplier") return ok([])
+                if (path === "/api/resource/Item/Payment%20Gateway%20Charges" && existing.item) return ok(existing.item)
+                return { ok: false, status: 404, error: "HTTP 404: not found" }
+            },
+            async post(path, body) {
+                writes.push({ method: "POST", path, body })
+                const name = path === "/api/resource/Account" ? `${body.account_name} - SGPL` : (body.item_code ?? body.supplier_name)
+                return ok({ ...body, name })
+            },
+            async put(path, body) {
+                writes.push({ method: "PUT", path, body })
+                return ok(body)
+            },
+            async delete(path) {
+                writes.push({ method: "DELETE", path, body: null })
+                return ok(null)
+            },
+        }
+        return { client, writes }
+    }
+
+    it("creates the expense account, the bank ledger, the supplier and the service item when missing", async () => {
+        const site = fakeSite()
+        const items = await ensureSettlementMasters(site.client, masters)
+        expect(items.map((i) => [i.kind, i.name, i.action])).toEqual([
+            ["account", "Payment Gateway Charges - SGPL", "created"],
+            ["account", "IDFC Current - SGPL", "created"],
+            ["supplier", "Cashfree Payments India Private Limited", "created"],
+            ["item", "Payment Gateway Charges", "created"],
+        ])
+        const [expense, bank, supplier, item] = site.writes.map((w) => w.body)
+        expect(expense).toEqual({
+            doctype: "Account",
+            account_name: "Payment Gateway Charges",
+            parent_account: "Indirect Expenses - SGPL",
+            company: "Splendx Generators Pvt Ltd",
+            is_group: 0,
+        })
+        expect(bank).toMatchObject({ account_name: "IDFC Current", parent_account: "Bank Accounts - SGPL", account_type: "Bank", is_group: 0 })
+        expect(supplier).toEqual({
+            doctype: "Supplier",
+            supplier_name: "Cashfree Payments India Private Limited",
+            supplier_group: "Services",
+            supplier_type: "Company",
+            country: "India",
+        })
+        expect(supplier.gstin).toBeUndefined()
+        expect(item).toMatchObject({
+            item_code: "Payment Gateway Charges",
+            item_group: "Services",
+            is_stock_item: 0,
+            is_purchase_item: 1,
+            is_sales_item: 0,
+            gst_hsn_code: "997158",
+            item_defaults: [{ company: "Splendx Generators Pvt Ltd", expense_account: "Payment Gateway Charges - SGPL" }],
+        })
+        expect(items[2].detail).toContain("GSTIN and billing address")
+        expect(items[2].detail).toContain("input tax credit")
+        expect(items[3].detail).toContain("confirm the code")
+    })
+
+    it("changes nothing that exists, and still says what the supplier lacks", async () => {
+        const site = fakeSite({
+            accounts: {
+                "Payment Gateway Charges - SGPL": { name: "Payment Gateway Charges - SGPL", account_name: "Payment Gateway Charges" },
+                "IDFC Current - SGPL": { name: "IDFC Current - SGPL", account_name: "IDFC Current", account_type: "Bank" },
+            },
+            supplier: { name: "Cashfree Payments India Private Limited", gstin: "" },
+            item: { name: "Payment Gateway Charges", gst_hsn_code: "998599" },
+        })
+        const items = await ensureSettlementMasters(site.client, masters)
+        expect(site.writes).toEqual([])
+        expect(items.map((i) => i.action)).toEqual(["unchanged", "unchanged", "unchanged", "unchanged"])
+        expect(items[2].detail).toContain("no GSTIN yet")
+        expect(items[3].detail).toBe("its HSN/SAC is 998599; left as it is")
+    })
+
+    it("does not create the bank account unless asked", async () => {
+        const site = fakeSite()
+        const items = await ensureSettlementMasters(site.client, { ...masters, bankAccount: { name: "IDFC Current - SGPL", create: false } })
+        expect(items[1]).toMatchObject({ name: "IDFC Current - SGPL", action: "error" })
+        expect(site.writes.map((w) => w.body.account_name ?? w.body.supplier_name ?? w.body.item_code)).toEqual([
+            "Payment Gateway Charges",
+            "Cashfree Payments India Private Limited",
+            "Payment Gateway Charges",
+        ])
+    })
+
+    it("runs only when settlements are booked", async () => {
+        const off = fakeSite()
+        const without = await runErpnextSetup({ client: off.client, doctypes: [], publicUrl: "http://x", secret: "s" })
+        expect(without.items).toEqual([])
+        expect(off.writes).toEqual([])
+        const on = fakeSite()
+        const withMasters = await runErpnextSetup({ client: on.client, doctypes: [], publicUrl: "http://x", secret: "s", settlements: masters })
+        expect(withMasters.items.map((i) => i.kind)).toEqual(["account", "account", "supplier", "item"])
+        expect(withMasters.ok).toBe(true)
     })
 })

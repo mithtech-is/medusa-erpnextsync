@@ -74,7 +74,7 @@ import {
     type HasField,
     type PushDefaults,
 } from "./push-rest"
-import { runErpnextSetup, type SetupReport } from "./erpnext-setup"
+import { runErpnextSetup, type SettlementMasters, type SetupReport } from "./erpnext-setup"
 import { mergeDoctypeMeta } from "./doctype-meta"
 import { SUPERSEDED_MESSAGE, supersededByLater } from "./retry-policy"
 import {
@@ -6525,6 +6525,7 @@ class ErpnextModuleService extends MedusaService({
             secondaries: (await this.listEnabledPullMappings()).flatMap((m: any) =>
                 normalizeSecondaryDoctypes(m.secondary_doctypes, m.doctype).map((s) => s.doctype),
             ),
+            settlements: await this.settlementMasters(client, row),
         })
         if (row) {
             await this.updateErpnextSettings([
@@ -6532,6 +6533,18 @@ class ErpnextModuleService extends MedusaService({
             ])
         }
         return { ok: report.ok, report }
+    }
+
+    /** What Set up ERPNext makes for gateway settlements; null unless they are booked. */
+    private async settlementMasters(client: FrappeClient, row: any): Promise<SettlementMasters | null> {
+        if (!row?.book_settlements) return null
+        const company = (await this.pushDefaults(client)).company ?? ""
+        const bank = String(row.settlement_bank_account ?? "").trim()
+        return {
+            company,
+            gateways: Object.values(normalizeGatewaySuppliers(row.gateway_suppliers)),
+            bankAccount: bank ? { name: bank, create: Boolean(row.create_settlement_bank_account) } : null,
+        }
     }
 
     /**

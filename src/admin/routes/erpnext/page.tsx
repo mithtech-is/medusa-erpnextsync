@@ -114,12 +114,20 @@ function modeRowsOf(modes: Record<string, string> | null | undefined): Array<{ p
 }
 
 type SetupItem = {
-  kind: "custom_field" | "webhook"
+  kind: "custom_field" | "webhook" | "supplier" | "item" | "account"
   doctype: string
   name: string
   action: "created" | "updated" | "unchanged" | "error"
   detail?: string
   error?: string
+}
+
+const SETUP_KIND_LABELS: Record<SetupItem["kind"], string> = {
+  custom_field: "Custom Field",
+  webhook: "Webhook",
+  supplier: "Supplier",
+  item: "Item",
+  account: "Account",
 }
 
 type SetupReport = {
@@ -796,7 +804,7 @@ const SettingsTab: React.FC<{
                   <tbody>
                     {shown.report.items.map((it, i) => (
                       <tr key={i}>
-                        <td className="py-1 pr-2">{it.kind === "custom_field" ? "Custom Field" : "Webhook"}</td>
+                        <td className="py-1 pr-2">{SETUP_KIND_LABELS[it.kind] ?? it.kind}</td>
                         <td className="py-1 pr-2 font-mono">{it.name}</td>
                         <td className="py-1 pr-2">
                           <StatusBadge
