@@ -126,6 +126,7 @@ import {
     unwindDocument,
     type CapturedPayment,
 } from "./order-accounting"
+import { normalizeGatewaySuppliers, type GatewaySupplier } from "./gateway-settlements"
 import {
     createOrderFulfillmentWorkflow,
     createOrderShipmentWorkflow,
@@ -231,6 +232,12 @@ type SaveSettingsInput = {
     record_payments?: boolean
     /** Medusa payment provider id → ERPNext Mode of Payment. */
     payment_modes?: Record<string, string> | null
+    /** Book gateway settlements; see ./gateway-settlements.ts. */
+    book_settlements?: boolean
+    settlement_bank_account?: string | null
+    create_settlement_bank_account?: boolean
+    /** Gateway → supplier, service item and Mode of Payment; null = the default. */
+    gateway_suppliers?: Record<string, Partial<GatewaySupplier>> | null
     /** This store's own choice of where invoice PDFs are kept. */
     invoice_storage?: "local" | "s3" | null
     invoice_local_dir?: string | null
@@ -6727,6 +6734,10 @@ function invoiceSettingsView(row: any) {
         send_invoice_to_store: Boolean(row?.send_invoice_to_store),
         record_payments: Boolean(row?.record_payments),
         payment_modes: normalizePaymentModes(row?.payment_modes),
+        book_settlements: Boolean(row?.book_settlements),
+        settlement_bank_account: row?.settlement_bank_account ?? null,
+        create_settlement_bank_account: Boolean(row?.create_settlement_bank_account),
+        gateway_suppliers: normalizeGatewaySuppliers(row?.gateway_suppliers),
         invoice_storage: row?.invoice_storage === "s3" ? "s3" : "local",
         invoice_local_dir: row?.invoice_local_dir ?? null,
         s3_bucket: row?.s3_bucket ?? null,
@@ -6750,6 +6761,14 @@ function applyInvoiceSettings(patch: Record<string, any>, input: SaveSettingsInp
     if (input.record_payments !== undefined) patch.record_payments = input.record_payments
     if ("payment_modes" in input) {
         patch.payment_modes = input.payment_modes == null ? null : normalizePaymentModes(input.payment_modes)
+    }
+    if (input.book_settlements !== undefined) patch.book_settlements = input.book_settlements
+    if ("settlement_bank_account" in input) patch.settlement_bank_account = text(input.settlement_bank_account)
+    if (input.create_settlement_bank_account !== undefined) {
+        patch.create_settlement_bank_account = input.create_settlement_bank_account
+    }
+    if ("gateway_suppliers" in input) {
+        patch.gateway_suppliers = input.gateway_suppliers == null ? null : normalizeGatewaySuppliers(input.gateway_suppliers)
     }
     if ("invoice_storage" in input) patch.invoice_storage = input.invoice_storage === "s3" ? "s3" : "local"
     if ("invoice_local_dir" in input) patch.invoice_local_dir = text(input.invoice_local_dir)

@@ -87,6 +87,23 @@ const SaveSchema = z.object({
     record_payments: z.boolean().optional(),
     /** Medusa payment provider id → ERPNext Mode of Payment; null = the default. */
     payment_modes: z.record(z.string().min(1), z.string()).nullable().optional(),
+    /** Book gateway settlements as a paid Purchase Invoice and a Journal Entry. */
+    book_settlements: z.boolean().optional(),
+    settlement_bank_account: z.string().nullable().optional(),
+    create_settlement_bank_account: z.boolean().optional(),
+    /** Gateway (e.g. "cashfree") → its supplier, service item, HSN/SAC and Mode of Payment; null = the default. */
+    gateway_suppliers: z
+        .record(
+            z.string().min(1),
+            z.object({
+                supplier: z.string(),
+                item: z.string().optional(),
+                gst_hsn_code: z.string().optional(),
+                mode_of_payment: z.string().nullable().optional(),
+            }),
+        )
+        .nullable()
+        .optional(),
     invoice_storage: z.enum(["local", "s3"]).nullable().optional(),
     invoice_local_dir: z.string().nullable().optional(),
     s3_bucket: z.string().nullable().optional(),

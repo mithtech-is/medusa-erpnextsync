@@ -200,6 +200,19 @@ export const ErpnextSetting = model.define("erpnext_setting", {
     /** Medusa payment provider id → ERPNext Mode of Payment, as
      *  `{"pp_cashfree-pg": "Cashfree"}`. Null means that default. */
     payment_modes: model.json().nullable(),
+    /**
+     * Book payment-gateway settlements: the gateway's fee as a paid
+     * Purchase Invoice and the payout as a Journal Entry, both out of the
+     * Mode of Payment's clearing account. See ../gateway-settlements.ts.
+     */
+    book_settlements: model.boolean().default(false),
+    /** The ledger the payouts land in, e.g. the current account. */
+    settlement_bank_account: model.text().nullable(),
+    /** Set up ERPNext creates `settlement_bank_account` as a Bank ledger when missing. */
+    create_settlement_bank_account: model.boolean().default(false),
+    /** Gateway → `{supplier, item, gst_hsn_code, mode_of_payment}`. Null means
+     *  Cashfree's default. */
+    gateway_suppliers: model.json().nullable(),
 
     // ── Where invoice PDFs are kept (this store's choice) ────────────
     /** "local": a private directory, never under the public static dir.
