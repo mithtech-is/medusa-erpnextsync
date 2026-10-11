@@ -109,6 +109,7 @@ import { effectiveItemTaxTemplate, planProductTaxRule, type ItemTaxRow } from ".
 import { deliveryNoteOf, planDeliveryFulfilment, salesOrdersOf, DELIVERY_NOTE_DOCTYPE } from "./delivery"
 import { SALES_INVOICE_DOCTYPE, invoiceStatusOf, invoiceTotalOf, isDownloadable, salesOrdersBilled } from "./invoice-events"
 import { ROUNDING_REFERENCE, planCartRounding } from "./rounding"
+import { latestModified, modifiedAfter, watermarkDate } from "./pull-watermark"
 import {
     createOrderFulfillmentWorkflow,
     createOrderShipmentWorkflow,
@@ -5017,10 +5018,8 @@ class ErpnextModuleService extends MedusaService({
         // pull_filter clauses ANDed together.
         const filters: any[] = []
         const since = mapping.last_pull_at ? new Date(mapping.last_pull_at).toISOString() : null
-        if (mapping.last_pull_at) {
-            const ts = new Date(mapping.last_pull_at).toISOString().slice(0, 19).replace("T", " ")
-            filters.push(["modified", ">", ts])
-        }
+        const after = modifiedAfter(mapping.last_pull_at, mapping.last_pull_modified)
+        if (after) filters.push(["modified", ">", after])
         if (Array.isArray(mapping.pull_filter)) {
             for (const f of mapping.pull_filter) filters.push(f)
         }
@@ -5117,9 +5116,7 @@ class ErpnextModuleService extends MedusaService({
         const apiUser = await this.apiUserEmail()
         const pullClient = (await this.restClient())?.client ?? null
         for (const row of rows) {
-            if (row?.modified && (!maxModified || row.modified > maxModified)) {
-                maxModified = row.modified
-            }
+            maxModified = latestModified(maxModified, row?.modified)
             // A row the API user last wrote is a push of ours; reading it
             // back would only bounce it.
             const recordName = String(row?.name ?? row?.[mapping.key_erpnext_field] ?? "")
@@ -5202,14 +5199,11 @@ class ErpnextModuleService extends MedusaService({
             }
         }
 
-        const newWatermark = maxModified
-            ? new Date(maxModified.replace(" ", "T") + "Z")
-            : mapping.last_pull_at
         try {
             await this.updateErpnextMappings([
                 {
                     id: mapping.id,
-                    last_pull_at: newWatermark,
+                    ...(maxModified ? { last_pull_at: watermarkDate(maxModified), last_pull_modified: maxModified } : {}),
                     last_pull_run_at: new Date(),
                     last_pull_error: errors ? `${errors} row(s) failed` : null,
                 },
