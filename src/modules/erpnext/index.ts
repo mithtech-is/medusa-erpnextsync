@@ -110,6 +110,7 @@ import { deliveryNoteOf, planDeliveryFulfilment, salesOrdersOf, DELIVERY_NOTE_DO
 import { SALES_INVOICE_DOCTYPE, invoiceStatusOf, invoiceTotalOf, isDownloadable, salesOrdersBilled } from "./invoice-events"
 import { ROUNDING_REFERENCE, planCartRounding } from "./rounding"
 import { latestModified, modifiedAfter, watermarkDate } from "./pull-watermark"
+import { normalizePaymentModes } from "./order-accounting"
 import {
     createOrderFulfillmentWorkflow,
     createOrderShipmentWorkflow,
@@ -213,6 +214,8 @@ type SaveSettingsInput = {
     store_invoice_prefix?: string | null
     send_invoice_to_store?: boolean
     record_payments?: boolean
+    /** Medusa payment provider id → ERPNext Mode of Payment. */
+    payment_modes?: Record<string, string> | null
     /** This store's own choice of where invoice PDFs are kept. */
     invoice_storage?: "local" | "s3" | null
     invoice_local_dir?: string | null
@@ -6451,6 +6454,7 @@ function invoiceSettingsView(row: any) {
         store_invoice_next: row?.store_invoice_next ?? 1,
         send_invoice_to_store: Boolean(row?.send_invoice_to_store),
         record_payments: Boolean(row?.record_payments),
+        payment_modes: normalizePaymentModes(row?.payment_modes),
         invoice_storage: row?.invoice_storage === "s3" ? "s3" : "local",
         invoice_local_dir: row?.invoice_local_dir ?? null,
         s3_bucket: row?.s3_bucket ?? null,
@@ -6472,6 +6476,9 @@ function applyInvoiceSettings(patch: Record<string, any>, input: SaveSettingsInp
     if ("store_invoice_prefix" in input) patch.store_invoice_prefix = text(input.store_invoice_prefix)
     if (input.send_invoice_to_store !== undefined) patch.send_invoice_to_store = input.send_invoice_to_store
     if (input.record_payments !== undefined) patch.record_payments = input.record_payments
+    if ("payment_modes" in input) {
+        patch.payment_modes = input.payment_modes == null ? null : normalizePaymentModes(input.payment_modes)
+    }
     if ("invoice_storage" in input) patch.invoice_storage = input.invoice_storage === "s3" ? "s3" : "local"
     if ("invoice_local_dir" in input) patch.invoice_local_dir = text(input.invoice_local_dir)
     for (const key of ["s3_bucket", "s3_region", "s3_endpoint", "s3_prefix"] as const) {

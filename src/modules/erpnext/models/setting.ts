@@ -191,7 +191,15 @@ export const ErpnextSetting = model.define("erpnext_setting", {
      *  placed together never share one. */
     store_invoice_next: model.number().default(1),
     send_invoice_to_store: model.boolean().default(false),
+    /**
+     * Book store payments in ERPNext: an order paid online gets its Sales
+     * Order and Invoice submitted and a Payment Entry; a cash-on-delivery
+     * order gets its Sales Order submitted. See ../order-accounting.ts.
+     */
     record_payments: model.boolean().default(false),
+    /** Medusa payment provider id → ERPNext Mode of Payment, as
+     *  `{"pp_cashfree-pg": "Cashfree"}`. Null means that default. */
+    payment_modes: model.json().nullable(),
 
     // ── Where invoice PDFs are kept (this store's choice) ────────────
     /** "local": a private directory, never under the public static dir.

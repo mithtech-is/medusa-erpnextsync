@@ -72,6 +72,7 @@ type SettingsView = {
   store_invoice_next: number
   send_invoice_to_store: boolean
   record_payments: boolean
+  payment_modes: Record<string, string>
   invoice_storage: "local" | "s3"
   invoice_local_dir: string | null
   s3_bucket: string | null
@@ -88,6 +89,10 @@ type SettingsView = {
     frappe_webhook_secret_present: boolean
     medusa_public_url: string | null
   }
+}
+
+function modeRowsOf(modes: Record<string, string> | null | undefined): Array<{ provider: string; mode: string }> {
+  return Object.entries(modes ?? {}).map(([provider, mode]) => ({ provider, mode }))
 }
 
 type SetupItem = {
@@ -255,6 +260,8 @@ const SettingsTab: React.FC<{
     view.log_retention_days ?? 180,
   )
   const [sendInvoice, setSendInvoice] = useState(Boolean(view.send_invoice_to_store))
+  const [recordPayments, setRecordPayments] = useState(Boolean(view.record_payments))
+  const [paymentModes, setPaymentModes] = useState(modeRowsOf(view.payment_modes))
   const [pushCfg, setPushCfg] = useState({
     erpnext_company: view.erpnext_company ?? "",
     erpnext_price_list: view.erpnext_price_list ?? "",
@@ -323,6 +330,8 @@ const SettingsTab: React.FC<{
     setPushAllowlist(view.push_allowlist ?? "")
     setLogRetentionDays(view.log_retention_days ?? 180)
     setSendInvoice(Boolean(view.send_invoice_to_store))
+    setRecordPayments(Boolean(view.record_payments))
+    setPaymentModes(modeRowsOf(view.payment_modes))
     setPushCfg({
       erpnext_company: view.erpnext_company ?? "",
       erpnext_price_list: view.erpnext_price_list ?? "",
@@ -369,6 +378,12 @@ const SettingsTab: React.FC<{
         ...Object.fromEntries(Object.entries(pushCfg).map(([k, v]) => [k, v.trim() || null])),
         order_document: orderDocument,
         send_invoice_to_store: sendInvoice,
+        record_payments: recordPayments,
+        payment_modes: Object.fromEntries(
+          paymentModes
+            .map((r) => [r.provider.trim(), r.mode.trim()])
+            .filter(([provider, mode]) => provider && mode),
+        ),
         sync_stock: stockCfg.sync_stock,
         sync_prices: stockCfg.sync_prices,
         erpnext_warehouse: stockCfg.erpnext_warehouse.trim() || null,
@@ -938,7 +953,8 @@ const SettingsTab: React.FC<{
               </Select.Content>
             </Select>
             <Text size="small" className="text-ui-fg-subtle">
-              Documents are created as drafts; an ERPNext user submits them.
+              Documents are created as drafts; an ERPNext user submits them, unless
+              payments are recorded (below).
             </Text>
           </div>
         </div>
@@ -1015,6 +1031,59 @@ const SettingsTab: React.FC<{
         <div className="flex items-center gap-2">
           <Switch checked={sendInvoice} onCheckedChange={(v) => setSendInvoice(Boolean(v))} />
           <Label>Customers can download ERPNext invoices</Label>
+        </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Payments into ERPNext</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          When on, an order paid online has its Sales Order and Sales Invoice submitted once the
+          payment is captured, and a submitted Payment Entry books the payment to the Mode of
+          Payment below; ERPNext takes the account from that mode's default for the company. A
+          cash-on-delivery order has its Sales Order submitted when placed; its invoice stays a
+          draft until the cash is recorded in ERPNext. A cancelled order, or a payment refunded in
+          full, cancels the Payment Entry, the invoice and the order. A partial refund is noted on
+          the sync event and left to ERPNext.
+        </Text>
+        <div className="flex items-center gap-2 mb-3">
+          <Switch checked={recordPayments} onCheckedChange={(v) => setRecordPayments(Boolean(v))} />
+          <Label>Record payments in ERPNext</Label>
+        </div>
+        <div className="flex flex-col gap-2">
+          {paymentModes.map((row, i) => (
+            <div key={i} className="grid grid-cols-1 gap-2 md:grid-cols-3">
+              <Input
+                value={row.provider}
+                placeholder="Payment provider id, e.g. pp_cashfree-pg"
+                onChange={(e) =>
+                  setPaymentModes((rows) => rows.map((r, j) => (j === i ? { ...r, provider: e.target.value } : r)))
+                }
+              />
+              <Input
+                value={row.mode}
+                placeholder="Mode of Payment, e.g. Cashfree"
+                onChange={(e) =>
+                  setPaymentModes((rows) => rows.map((r, j) => (j === i ? { ...r, mode: e.target.value } : r)))
+                }
+              />
+              <Button
+                size="small"
+                variant="transparent"
+                onClick={() => setPaymentModes((rows) => rows.filter((_, j) => j !== i))}
+              >
+                Remove
+              </Button>
+            </div>
+          ))}
+          <div>
+            <Button
+              size="small"
+              variant="secondary"
+              onClick={() => setPaymentModes((rows) => [...rows, { provider: "", mode: "" }])}
+            >
+              Add a provider
+            </Button>
+          </div>
         </div>
       </section>
 

@@ -85,6 +85,8 @@ const SaveSchema = z.object({
     store_invoice_prefix: z.string().nullable().optional(),
     send_invoice_to_store: z.boolean().optional(),
     record_payments: z.boolean().optional(),
+    /** Medusa payment provider id → ERPNext Mode of Payment; null = the default. */
+    payment_modes: z.record(z.string().min(1), z.string()).nullable().optional(),
     invoice_storage: z.enum(["local", "s3"]).nullable().optional(),
     invoice_local_dir: z.string().nullable().optional(),
     s3_bucket: z.string().nullable().optional(),
