@@ -111,6 +111,24 @@ DocType; the pair is its identity and there is one per pair.
 - The Sales Invoice is a draft that names the draft Sales Order's rows.
   Submit the order first, then the invoice; ERPNext refuses the other way
   round.
+- **Record payments in ERPNext** (Settings → Payments into ERPNext) does
+  that submitting itself. An online payment captured in full submits the
+  Sales Order, raises the invoice from it, submits the invoice and books a
+  submitted Payment Entry per captured payment to the provider's Mode of
+  Payment. Before switching it on, check every provider the store takes
+  online has a row in the map and that each Mode of Payment has a default
+  account for the company; a provider with no row fails its orders' sync
+  events and books nothing. A cash-on-delivery order gets a submitted Sales
+  Order at once and its invoice stays a draft.
+- A submission ERPNext refuses shows its reason on the failed sync event
+  and the documents stay drafts; fix the cause in ERPNext (the customer's
+  GSTIN, an open accounting period, stock) and the retry, or the Retry
+  button, finishes the job. Nothing is made twice: the Sales Order and
+  invoice through the link table, a Payment Entry through the link table
+  and, failing that, by its reference against the invoice.
+- A cancelled order, or every captured payment refunded in full, cancels
+  the Payment Entries, then the invoice, then the Sales Order. A partial
+  refund is only noted on the event: book it in ERPNext (a Credit Note).
 
 ### Several DocTypes in one sync
 

@@ -110,7 +110,21 @@ import { deliveryNoteOf, planDeliveryFulfilment, salesOrdersOf, DELIVERY_NOTE_DO
 import { SALES_INVOICE_DOCTYPE, invoiceStatusOf, invoiceTotalOf, isDownloadable, salesOrdersBilled } from "./invoice-events"
 import { ROUNDING_REFERENCE, planCartRounding } from "./rounding"
 import { latestModified, modifiedAfter, watermarkDate } from "./pull-watermark"
-import { normalizePaymentModes } from "./order-accounting"
+import {
+    CANCEL_ORDER,
+    ORDER_REFUNDED_EVENT,
+    PAYMENT_ENTITY,
+    PAYMENT_ENTRY_DOCTYPE,
+    createPaymentEntry,
+    findPaymentEntry,
+    mappingHandlesEvent,
+    normalizePaymentModes,
+    planOrderAccounting,
+    refundState,
+    submitDocument,
+    unwindDocument,
+    type CapturedPayment,
+} from "./order-accounting"
 import {
     createOrderFulfillmentWorkflow,
     createOrderShipmentWorkflow,
@@ -2012,10 +2026,7 @@ class ErpnextModuleService extends MedusaService({
             { enabled: true, medusa_entity, direction: ["push", "both"] as any },
             { take: 100 },
         )
-        return rows.filter((r: any) => {
-            if (!Array.isArray(r.events)) return false
-            return r.events.includes(eventName)
-        })
+        return rows.filter((r: any) => mappingHandlesEvent(r.events, eventName))
     }
 
     /** Look up every enabled mapping that the pull cron should sweep. */
@@ -3407,7 +3418,11 @@ class ErpnextModuleService extends MedusaService({
             )
             .digest("hex")
 
-        if (args.mapping.skip_unchanged && keyValueStr) {
+        // A store order's documents follow its payments and cancellation,
+        // which the mapped payload need not carry, so an unchanged payload
+        // is no reason to skip one.
+        const salesDocPush = SALES_DOCTYPES.has(args.mapping.doctype) && args.mapping.medusa_entity === "order"
+        if (args.mapping.skip_unchanged && keyValueStr && !salesDocPush) {
             const [previous] = await this.listErpnextSyncEvents(
                 {
                     mapping_id: args.mapping.id,
@@ -3540,16 +3555,23 @@ class ErpnextModuleService extends MedusaService({
                 container: args.container,
                 secondaries,
             }
-            let outcome: PushOutcome
-            if (isDeleteEvent) {
-                outcome = await this.pushRemoval(ctx)
-            } else if (SALES_DOCTYPES.has(args.mapping.doctype) && args.mapping.medusa_entity === "order") {
-                outcome = await this.pushSalesDocument(ctx)
-            } else if (args.mapping.doctype === "Customer" && args.mapping.medusa_entity === "customer") {
-                outcome = await this.pushCustomerDoc(ctx)
-            } else {
-                outcome = await this.pushGenericDoc(ctx)
+            const dispatch = async (): Promise<PushOutcome> => {
+                if (isDeleteEvent) return this.pushRemoval(ctx)
+                if (args.event === ORDER_REFUNDED_EVENT) {
+                    return salesDocPush
+                        ? this.pushOrderRefund(ctx)
+                        : { ok: true, status: "skipped", reason: `a refund changes nothing on ${args.mapping.doctype}` }
+                }
+                if (salesDocPush) return this.pushSalesDocument(ctx)
+                if (args.mapping.doctype === "Customer" && args.mapping.medusa_entity === "customer") return this.pushCustomerDoc(ctx)
+                return this.pushGenericDoc(ctx)
             }
+            // Placement and capture of one order arrive together; two pushes
+            // at once would each find no Sales Order and make one.
+            let outcome: PushOutcome =
+                args.mapping.medusa_entity === "order" && args.record?.id != null
+                    ? await oneAtATime(_orderLocks, String(args.record.id), dispatch)
+                    : await dispatch()
             // The documents that hang off the main one, once it has a name.
             if (outcome.ok && outcome.status === "success" && secondaries.length) {
                 if (!outcome.name) {
@@ -4180,14 +4202,24 @@ class ErpnextModuleService extends MedusaService({
 
     /**
      * An order as a Sales Order, and a Sales Invoice once it is paid in
-     * full, both as drafts. The customer and the addresses are made first;
-     * a line with no ERPNext Item stops the order rather than shipping it
-     * short.
+     * full, as drafts. The customer and the addresses are made first; a
+     * line with no ERPNext Item stops the order rather than shipping it
+     * short. With payments recorded, the documents are then submitted and
+     * the payments booked as order-accounting.ts plans; a submission
+     * ERPNext refuses fails the push and leaves the draft.
      */
     private async pushSalesDocument(ctx: PushContext): Promise<PushOutcome> {
         const { client, mapping, record: order } = ctx
         const settings: any = await this.findSettingsRow()
         const notes: string[] = []
+        const fullyPaid = orderFullyPaid(order)
+        const plan = planOrderAccounting({
+            recordPayments: Boolean(settings?.record_payments),
+            order,
+            fullyPaid,
+            modes: normalizePaymentModes(settings?.payment_modes),
+        })
+        if (plan.action === "fail") return { ok: false, error: plan.error }
         const customer = await this.ensureCustomerForOrder(ctx)
         if (customer.ok === false) return { ok: false, error: customer.error }
 
@@ -4249,7 +4281,7 @@ class ErpnextModuleService extends MedusaService({
                 const state = await client.get(`/api/resource/Sales%20Order/${encodeURIComponent(existing)}`)
                 if (state.ok === false && state.status === 404) existing = null
                 else if (state.ok && Number(state.data?.docstatus) !== 0) {
-                    notes.push(`${existing} is already submitted; not updated`)
+                    notes.push(`${existing} is already ${Number(state.data?.docstatus) === 2 ? "cancelled" : "submitted"}; not updated`)
                     soName = existing
                 }
             }
@@ -4271,7 +4303,23 @@ class ErpnextModuleService extends MedusaService({
             }
         }
 
-        if (wantSI && orderFullyPaid(order)) {
+        if (soName && plan.action !== "none") {
+            const submitted = await submitDocument(client, "Sales Order", soName)
+            if (submitted.ok === false) {
+                return { ok: false, error: `Sales Order ${soName} not submitted: ${submitted.error}`, httpStatus: submitted.httpStatus }
+            }
+            if (submitted.state === "cancelled") {
+                notes.push(`${soName} is cancelled; nothing booked`)
+                return { ok: true, status: "success", action, name: soName, notes }
+            }
+            if (submitted.state === "submitted") {
+                notes.push(`${soName} submitted`)
+                action = action === "unchanged" ? "submitted" : `${action},submitted`
+            }
+        }
+
+        let siName: string | null = null
+        if (wantSI && fullyPaid) {
             const invoiced = await this.remoteNameFor("invoice", String(order.id), "Sales Invoice")
             let draftInvoice: string | null = null
             let invoiceDone = false
@@ -4281,10 +4329,14 @@ class ErpnextModuleService extends MedusaService({
                 else if (!(state.ok === false && state.status === 404)) {
                     notes.push(`invoice ${invoiced.erpnext_name} already exists`)
                     invoiceDone = true
+                    siName = invoiced.erpnext_name
                 }
             }
             if (!invoiceDone) {
                 const made = await this.makeSalesInvoice(ctx, soName, customer.name, addresses, lineCodes, defaults, timezone, taxFields, draftInvoice)
+                if (made.ok === false && plan.action === "record-payments") {
+                    return { ok: false, error: `invoice not raised: ${made.error}` }
+                }
                 if (made.ok === false) notes.push(`invoice not raised: ${made.error}`)
                 else if (draftInvoice) {
                     notes.push(`draft invoice ${made.name} refreshed`)
@@ -4293,9 +4345,120 @@ class ErpnextModuleService extends MedusaService({
                     notes.push(`invoice ${made.name} raised as a draft`)
                     action = action === "unchanged" ? "invoiced" : `${action},invoiced`
                 }
+                if (made.ok) siName = made.name
             }
         }
-        return { ok: true, status: "success", action, name: soName ?? undefined, notes }
+
+        if (plan.action === "record-payments") {
+            if (!siName) {
+                notes.push("payments not booked: this store's orders do not become Sales Invoices")
+            } else {
+                const submitted = await submitDocument(client, "Sales Invoice", siName)
+                if (submitted.ok === false) {
+                    return { ok: false, error: `Sales Invoice ${siName} not submitted: ${submitted.error}`, httpStatus: submitted.httpStatus }
+                }
+                if (submitted.state === "cancelled") {
+                    notes.push(`invoice ${siName} is cancelled; nothing booked`)
+                    return { ok: true, status: "success", action, name: soName ?? undefined, notes }
+                }
+                if (submitted.state === "submitted") notes.push(`invoice ${siName} submitted`)
+                await this.markInvoiceSubmitted(siName)
+                for (const payment of plan.payments) {
+                    const booked = await this.bookPayment(ctx, siName, payment, timezone)
+                    if (booked.ok === false) return booked
+                    notes.push(...booked.notes)
+                    if (booked.created) action = `${action},paid`
+                }
+            }
+        }
+        return { ok: true, status: "success", action: action.replace(/^unchanged,/, ""), name: soName ?? undefined, notes }
+    }
+
+    /**
+     * One captured payment as a submitted Payment Entry against the
+     * invoice, made by ERPNext's own `get_payment_entry` so its rounding
+     * and outstanding amount decide the figures. The link table keeps the
+     * payment → Payment Entry pair, so a replay submits a draft it left
+     * behind or finds the entry already done; an entry made by an attempt
+     * that died before recording its link is found by its reference.
+     */
+    private async bookPayment(
+        ctx: PushContext,
+        siName: string,
+        payment: CapturedPayment & { mode: string },
+        timezone: string | null,
+    ): Promise<{ ok: true; created: boolean; notes: string[] } | { ok: false; error: string; httpStatus?: number }> {
+        const { client, mapping } = ctx
+        const label = `payment ${payment.id}`
+        const reference = String(payment.reference || payment.id)
+        const notes: string[] = []
+        let name: string | null = null
+        let created = false
+
+        const link = await this.remoteNameFor(PAYMENT_ENTITY, String(payment.id), PAYMENT_ENTRY_DOCTYPE)
+        if (link?.erpnext_name) {
+            const state = await client.get(`/api/resource/Payment%20Entry/${encodeURIComponent(link.erpnext_name)}`)
+            if (state.ok === false && state.status !== 404) {
+                return { ok: false, error: `Payment Entry ${link.erpnext_name}: ${state.error}`, httpStatus: state.status || undefined }
+            }
+            if (state.ok === false) await this.deleteErpnextLinks([link.id])
+            else if (Number(state.data?.docstatus) === 2) {
+                return { ok: true, created: false, notes: [`Payment Entry ${link.erpnext_name} for ${label} is cancelled; not made again`] }
+            } else name = link.erpnext_name
+        }
+
+        if (!name) {
+            name = await findPaymentEntry(client, siName, reference)
+            if (!name) {
+                const made = await createPaymentEntry(client, {
+                    invoice: siName,
+                    captured: Number(payment.amount),
+                    mode: payment.mode,
+                    reference,
+                    referenceDate: formatInZone(new Date(payment.captured_at ?? Date.now()), timezone, false),
+                })
+                if (made.ok === false) return { ok: false, error: `Payment Entry for ${label}: ${made.error}`, httpStatus: made.httpStatus }
+                if ("skip" in made) return { ok: true, created: false, notes: [`no Payment Entry for ${label}: ${made.skip}`] }
+                name = made.name
+                created = true
+                if (made.note) notes.push(`${name}: ${made.note}`)
+            }
+            await this.recordLink({
+                doctype: PAYMENT_ENTRY_DOCTYPE,
+                erpnext_name: name,
+                medusa_entity: PAYMENT_ENTITY,
+                medusa_id: String(payment.id),
+                mapping_id: mapping.id,
+                state: "active",
+            })
+        }
+
+        const submitted = await submitDocument(client, PAYMENT_ENTRY_DOCTYPE, name)
+        if (submitted.ok === false) {
+            return { ok: false, error: `Payment Entry ${name} not submitted: ${submitted.error}`, httpStatus: submitted.httpStatus }
+        }
+        notes.push(
+            submitted.state === "submitted"
+                ? `Payment Entry ${name} submitted for ${label}`
+                : `Payment Entry ${name} for ${label} already ${submitted.state === "cancelled" ? "cancelled" : "submitted"}`,
+        )
+        return { ok: true, created, notes }
+    }
+
+    /**
+     * The customer's copy of an invoice this store just submitted. With
+     * ERPNext invoices on, the PDF is fetched first; a failed fetch leaves
+     * the row a draft so the hourly refresh fetches it again.
+     */
+    private async markInvoiceSubmitted(number: string): Promise<void> {
+        try {
+            const [row] = await this.listErpnextInvoices({ number }, { take: 1 })
+            if (!row || row.status === "submitted") return
+            if (receivesErpInvoices((await this.findSettingsRow()) as any) && !(await this.fetchInvoicePdf(row.id)).ok) return
+            await this.updateErpnextInvoices([{ id: row.id, status: "submitted" }])
+        } catch (err: any) {
+            console.warn(`[erpnext] invoice row for ${number} not updated:`, describeError(err))
+        }
     }
 
     /** A draft Sales Invoice, new or refreshed: from the Sales Order when
@@ -4904,31 +5067,7 @@ class ErpnextModuleService extends MedusaService({
         const { client, mapping, record } = ctx
         const doctype = String(mapping.doctype)
         if (record?.id == null) return { ok: true, status: "skipped", reason: "no record id on the event" }
-        if (mapping.medusa_entity === "order") {
-            const notes: string[] = []
-            for (const [entity, dt] of [["invoice", "Sales Invoice"], ["order", "Sales Order"]] as const) {
-                const link = await this.remoteNameFor(entity, String(record.id), dt)
-                if (!link?.erpnext_name) continue
-                const state = await client.get(`/api/resource/${encodeURIComponent(dt)}/${encodeURIComponent(link.erpnext_name)}`)
-                if (state.ok === false) {
-                    if (state.status !== 404) notes.push(`${dt} ${link.erpnext_name}: ${state.error}`)
-                    continue
-                }
-                if (Number(state.data?.docstatus) === 0) {
-                    const res = await client.delete(`/api/resource/${encodeURIComponent(dt)}/${encodeURIComponent(link.erpnext_name)}`)
-                    if (res.ok === false) notes.push(`${dt} ${link.erpnext_name}: ${res.error}`)
-                    else {
-                        await this.deleteErpnextLinks([link.id])
-                        notes.push(`${dt} ${link.erpnext_name} deleted (was a draft)`)
-                    }
-                } else if (Number(state.data?.docstatus) === 1) {
-                    const res = await client.post("/api/method/frappe.client.cancel", { doctype: dt, name: link.erpnext_name })
-                    if (res.ok === false) notes.push(`${dt} ${link.erpnext_name}: ${res.error}`)
-                    else notes.push(`${dt} ${link.erpnext_name} cancelled`)
-                }
-            }
-            return { ok: true, status: "success", action: "cancelled", notes }
-        }
+        if (mapping.medusa_entity === "order") return this.cancelOrderDocuments(ctx)
         const has = await this.hasFieldFn(doctype)
         const link = await this.remoteNameFor(mapping.medusa_entity, String(record.id), doctype)
         const existing = link?.erpnext_name ?? (await this.lookupRemoteByKey(client, doctype, ctx.keyField, ctx.keyValue, has))
@@ -4937,6 +5076,103 @@ class ErpnextModuleService extends MedusaService({
         const written = await this.writeRemote(client, doctype, existing, { disabled: 1 })
         if (written.ok === false) return written
         return { ok: true, status: "success", action: "disabled", name: existing }
+    }
+
+    /**
+     * An order's documents unwound: its Payment Entries, then its invoice,
+     * then the order. A draft is deleted (it was ours and never
+     * submitted), a submitted document cancelled, a cancelled one left
+     * alone. A step ERPNext refuses fails the push, and nothing after it
+     * is tried, so the retry picks up where it stopped.
+     */
+    private async cancelOrderDocuments(ctx: PushContext): Promise<PushOutcome> {
+        const { client, record: order } = ctx
+        const orderId = String(order.id)
+        const notes: string[] = []
+        for (const { doctype, entity } of CANCEL_ORDER) {
+            const links =
+                doctype === PAYMENT_ENTRY_DOCTYPE
+                    ? await this.paymentEntryLinks(client, order)
+                    : [await this.remoteNameFor(entity, orderId, doctype)].filter((l) => l?.erpnext_name)
+            const errors: string[] = []
+            for (const link of links) {
+                const name = String(link.erpnext_name)
+                const out = await unwindDocument(client, doctype, name)
+                if (out.ok === false) {
+                    errors.push(out.error)
+                    continue
+                }
+                if (out.done === "missing") continue
+                notes.push(`${doctype} ${name} ${out.done === "deleted" ? "deleted (was a draft)" : out.done}`)
+                if (out.done === "deleted") await this.deleteErpnextLinks([link.id])
+                if (out.done === "cancelled" && doctype === "Sales Invoice") await this.markInvoiceCancelled(name)
+            }
+            if (errors.length) return { ok: false, error: [...errors, ...notes].join("; ") }
+        }
+        return { ok: true, status: "success", action: "cancelled", notes }
+    }
+
+    /**
+     * The Payment Entries this store made for an order: through the link
+     * table by the order's payments, and by asking ERPNext which entries
+     * pay its invoice. An entry an ERPNext user made is not ours to cancel.
+     */
+    private async paymentEntryLinks(client: FrappeClient, order: any): Promise<any[]> {
+        const found = new Map<string, any>()
+        const keep = (rows: any[]) => {
+            for (const l of rows ?? []) if (l?.erpnext_name) found.set(String(l.id), l)
+        }
+        const paymentIds = (Array.isArray(order?.payments) ? order.payments : []).map((p: any) => String(p?.id ?? "")).filter(Boolean)
+        if (paymentIds.length) {
+            keep(await this.listErpnextLinks({ doctype: PAYMENT_ENTRY_DOCTYPE, medusa_entity: PAYMENT_ENTITY, medusa_id: paymentIds } as any, { take: 50 }))
+        }
+        const invoice = await this.remoteNameFor("invoice", String(order.id), "Sales Invoice")
+        if (invoice?.erpnext_name) {
+            const res = await client.get("/api/resource/Payment%20Entry", {
+                fields: JSON.stringify(["name"]),
+                filters: JSON.stringify([["Payment Entry Reference", "reference_name", "=", invoice.erpnext_name]]),
+                limit_page_length: "50",
+            })
+            const names = res.ok === true && Array.isArray(res.data) ? res.data.map((r: any) => String(r?.name ?? "")).filter(Boolean) : []
+            if (names.length) {
+                keep(await this.listErpnextLinks({ doctype: PAYMENT_ENTRY_DOCTYPE, medusa_entity: PAYMENT_ENTITY, erpnext_name: names } as any, { take: 50 }))
+            }
+        }
+        return [...found.values()]
+    }
+
+    private async markInvoiceCancelled(number: string): Promise<void> {
+        try {
+            const [row] = await this.listErpnextInvoices({ number }, { take: 1 })
+            if (row && row.status !== "cancelled") await this.updateErpnextInvoices([{ id: row.id, status: "cancelled" }])
+        } catch (err: any) {
+            console.warn(`[erpnext] invoice row for ${number} not updated:`, describeError(err))
+        }
+    }
+
+    /**
+     * A captured payment was refunded. Refunded in full, every payment of
+     * the order: its documents are unwound as for a cancellation. Part of
+     * the money back is an accounting decision (a Credit Note, a partial
+     * return) the store does not guess at; the sync event says so and
+     * ERPNext is left as it is.
+     */
+    private async pushOrderRefund(ctx: PushContext): Promise<PushOutcome> {
+        const settings: any = await this.findSettingsRow()
+        if (!settings?.record_payments) return { ok: true, status: "skipped", reason: "payments are not recorded (Settings)" }
+        const payments: CapturedPayment[] = Array.isArray(ctx.record?.payments) ? ctx.record.payments : []
+        const state = refundState(payments)
+        if (state === "none") return { ok: true, status: "skipped", reason: "no refund on the order's captured payments" }
+        if (state === "partial") {
+            const refunded = payments.reduce((sum, p) => sum + (Number(p?.refunded) || 0), 0)
+            return {
+                ok: true,
+                status: "success",
+                action: "partial refund noted",
+                notes: [`partial refund of ${refunded.toFixed(2)}: ERPNext documents left as they are; book it in ERPNext`],
+            }
+        }
+        return this.cancelOrderDocuments(ctx)
     }
 
     private async markMappingPushOutcome(
@@ -6322,6 +6558,19 @@ const _itemGroupCache = new Map<string, { taxes: ItemTaxRow[]; parent: string | 
 const _roundingCache = new Map<string, { roundTotal: boolean; method: string | null; smallestFraction: number; expiresAt: number }>()
 /** One Delivery Note applied at a time: its ledger entries arrive together. */
 const _deliveryLocks = new Map<string, Promise<unknown>>()
+/** One push per store order at a time, per process. */
+const _orderLocks = new Map<string, Promise<unknown>>()
+
+async function oneAtATime<T>(locks: Map<string, Promise<unknown>>, key: string, run: () => Promise<T>): Promise<T> {
+    const previous = locks.get(key) ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(run)
+    locks.set(key, current)
+    try {
+        return await current
+    } finally {
+        if (locks.get(key) === current) locks.delete(key)
+    }
+}
 /** ERPNext's own defaults for pushed documents, per process. */
 let _defaultsCache: { company: string | null; priceList: string | null; expiresAt: number } | null = null
 

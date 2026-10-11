@@ -31,6 +31,7 @@
 
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import crypto from "crypto"
+import { transactionReference } from "./order-accounting"
 
 /**
  * A Medusa product handle built from a key the other system chose.
@@ -377,17 +378,19 @@ const customerGroupEntity = genericEntity({
 })
 
 /**
- * What the store actually captured for an order, for ERPNext to book.
+ * What the store actually captured for an order, for ERPNext to book, and
+ * every provider the order is paid through (a cash-on-delivery payment is
+ * authorised at checkout but captured much later, if at all).
  *
  * Asked of the payment collections on their own: loading payments nested
  * under the order has crashed the order query before, and an order that
  * cannot be enriched is an order that never reaches ERPNext. A failure
- * here leaves the list empty, so ERPNext books no payment rather than
+ * here leaves the lists empty, so ERPNext books no payment rather than
  * guessing one.
  */
-async function capturedPayments(query: any, collections: any[]): Promise<any[]> {
+async function orderPayments(query: any, collections: any[]): Promise<{ captured: any[]; providers: string[] }> {
     const ids = (collections ?? []).map((c: any) => c?.id).filter(Boolean)
-    if (!ids.length) return []
+    if (!ids.length) return { captured: [], providers: [] }
     try {
         const { data } = await query.graph({
             entity: "payment_collection",
@@ -398,31 +401,47 @@ async function capturedPayments(query: any, collections: any[]): Promise<any[]> 
                 "payments.currency_code",
                 "payments.provider_id",
                 "payments.captured_at",
+                "payments.data",
                 "payments.captures.id",
                 "payments.captures.amount",
+                "payments.refunds.amount",
+                "payment_sessions.provider_id",
+                "payment_sessions.status",
             ],
             filters: { id: ids },
         })
-        const out: any[] = []
+        const captured: any[] = []
+        const providers: string[] = []
+        const provider = (p: unknown) => {
+            const v = String(p ?? "")
+            if (v && !providers.includes(v)) providers.push(v)
+        }
         for (const collection of data ?? []) {
             for (const p of collection?.payments ?? []) {
-                const captured = (p?.captures ?? []).reduce((sum: number, c: any) => sum + (Number(c?.amount) || 0), 0)
-                if (!p?.captured_at && !captured) continue
-                out.push({
+                provider(p?.provider_id)
+                const capturedAmount = (p?.captures ?? []).reduce((sum: number, c: any) => sum + (Number(c?.amount) || 0), 0)
+                if (!p?.captured_at && !capturedAmount) continue
+                captured.push({
                     id: p.id,
                     // Medusa 2 keeps money in the currency's major unit.
-                    amount: captured || Number(p.amount) || 0,
+                    amount: capturedAmount || Number(p.amount) || 0,
                     currency: p.currency_code ?? null,
                     provider_id: p.provider_id ?? null,
                     captured_at: p.captured_at ?? new Date().toISOString(),
-                    reference: p.captures?.[0]?.id ?? p.id,
+                    reference: transactionReference(p.data) ?? p.id,
+                    refunded: (p?.refunds ?? []).reduce((sum: number, r: any) => sum + (Number(r?.amount) || 0), 0),
                 })
             }
+            if (!(collection?.payments ?? []).length) {
+                for (const session of collection?.payment_sessions ?? []) {
+                    if (session?.status === "authorized" || session?.status === "captured") provider(session.provider_id)
+                }
+            }
         }
-        return out
+        return { captured, providers }
     } catch (err) {
-        console.warn("[erpnext] could not read captured payments", err)
-        return []
+        console.warn("[erpnext] could not read the order's payments", err)
+        return { captured: [], providers: [] }
     }
 }
 
@@ -432,7 +451,7 @@ const orderEntity: EntityDescriptor = {
     moduleName: Modules.ORDER,
     modelName: "Order",
     isCustomModule: false,
-    events: ["order.placed", "order.payment_captured", "order.fulfillment_created", "order.canceled"],
+    events: ["order.placed", "order.payment_captured", "order.payment_refunded", "order.fulfillment_created", "order.canceled"],
     default_key_path: "display_id",
     paths: [
         { path: "id", label: "Medusa id", type: "id" },
@@ -531,7 +550,9 @@ const orderEntity: EntityDescriptor = {
         // the order's source. A store with no channels at all still came
         // from the web, which is truer than an empty string.
         order.source = order.sales_channel?.name || "web"
-        order.payments = await capturedPayments(query, order.payment_collections)
+        const payments = await orderPayments(query, order.payment_collections)
+        order.payments = payments.captured
+        order.payment_providers = payments.providers
         return order
     },
     async upsertByKey() {

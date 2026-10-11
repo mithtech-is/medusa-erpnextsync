@@ -61,7 +61,25 @@ get more than a flat document:
   account ahead of the GST rows, which apply to it, so it is taxed at the
   rates of the goods it carries. Once the order is paid in full, a draft
   **Sales Invoice** is made from it (a re-push refreshes a draft one).
-  Everything is created as a draft; an ERPNext user submits.
+  Everything is created as a draft; an ERPNext user submits, unless the
+  store records its payments (below).
+
+**Payments, booked in ERPNext.** With **Record payments in ERPNext** on in
+Settings, an order paid online has its Sales Order and Sales Invoice
+submitted once its payment is captured in full, and each captured payment
+becomes a submitted **Payment Entry** (Receive) against the invoice. ERPNext's
+own `get_payment_entry` builds it, so its outstanding amount and rounding
+settle the invoice to zero. The entry carries the gateway's payment id (else
+the Medusa payment id) as its reference, the capture date as its reference
+date, and the Mode of Payment Settings maps the payment's provider to
+(`{"pp_cashfree-pg": "Cashfree"}` by default); it pays into that mode's
+default account for the company. A cash-on-delivery order (`pp_cod`) has its
+Sales Order submitted when it is placed; its invoice stays a draft and no
+Payment Entry is made, since the cash is recorded in ERPNext. The link table
+records each Payment Entry against its Medusa payment, so a replayed event
+never books a payment twice. A submission ERPNext refuses (a missing GSTIN, a
+closed period, stock) keeps the draft and fails the sync event with
+ERPNext's reason, and the retry job tries again.
 
 **GST, charged as ERPNext will invoice it.** Each pulled product is
 charged at its Item's Item Tax Template rate, written as a product rule on
@@ -72,8 +90,12 @@ rounded total, worked out with ERPNext's own arithmetic.
 `GET /store/erpnext/orders/:id/gst` returns ERPNext's GST for a customer's
 order.
 
-A cancelled order deletes its draft documents (or cancels submitted
-ones); a deleted customer or product is disabled, never deleted.
+A cancelled order unwinds its documents in the order ERPNext allows:
+Payment Entries, then the invoice, then the Sales Order. A draft is
+deleted, a submitted document cancelled, a cancelled one left alone. A
+captured payment refunded in full (every payment of the order) does the
+same; a partial refund is noted on the sync event and left to ERPNext. A
+deleted customer or product is disabled, never deleted.
 `ERPNEXT_PAUSE_PUSH=true` pauses pushes without touching the mappings.
 
 **ERPNext → Medusa, stock and prices.** ERPNext owns both. Switched on in

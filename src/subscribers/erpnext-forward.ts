@@ -5,6 +5,7 @@ import type {
 import { ERPNEXT_MODULE } from "../modules/erpnext"
 import { OUTBOUND_PAUSED } from "../modules/erpnext/outbound"
 import { getMedusaEntity, listMedusaEntities } from "../modules/erpnext/registry"
+import { ORDER_REFUNDED_EVENT } from "../modules/erpnext/order-accounting"
 
 /**
  * Mapping-driven Medusa → ERPNext forwarder.
@@ -42,14 +43,16 @@ export default async function erpnextForwardHandler({
     if (!eventName) return
     if (OUTBOUND_PAUSED) return
 
-    // A captured payment is an order event in disguise: the order's push
-    // mappings run for `order.payment_captured`, which is when a Sales
-    // Invoice can be raised.
-    if (eventName === "payment.captured") {
+    // A captured or refunded payment is an order event in disguise: the
+    // order's push mappings run for `order.payment_captured`, which is
+    // when a Sales Invoice can be raised and paid, and for
+    // `order.payment_refunded`, which may cancel it.
+    const orderEvent = PAYMENT_EVENTS[eventName]
+    if (orderEvent) {
         const orderId = await orderIdForPayment(container, event?.data?.id)
         if (!orderId) return
         return erpnextForwardHandler({
-            event: { ...event, name: "order.payment_captured", data: { ...(event?.data ?? {}), id: orderId } },
+            event: { ...event, name: orderEvent, data: { ...(event?.data ?? {}), id: orderId } },
             container,
         } as SubscriberArgs<any>)
     }
@@ -131,9 +134,11 @@ export default async function erpnextForwardHandler({
                 record: enriched,
                 container,
             })
+            // ERPNext's message can name the customer; it is kept on the
+            // sync event, and the log carries identifiers only.
             if (!result.ok) {
                 console.error(
-                    `[erpnext-forward] ${eventName} via mapping ${m.name} (${m.id}) → ${result.error}`,
+                    `[erpnext-forward] ${eventName} for ${entityKey}:${entityId ?? "?"} via mapping ${m.id} failed; see sync event ${eventId}:${m.id}`,
                 )
             }
         }
@@ -147,6 +152,11 @@ export default async function erpnextForwardHandler({
     // domain-specific `receive` handler pack and produced noisy failures for
     // events like `customer.synced` that were never meant to sync.)
     return
+}
+
+const PAYMENT_EVENTS: Record<string, string> = {
+    "payment.captured": "order.payment_captured",
+    "payment.refunded": ORDER_REFUNDED_EVENT,
 }
 
 /** The order a payment belongs to, through its payment collection. */
@@ -204,7 +214,7 @@ function resolveEntityKey(eventName: string): string | null {
  * registry instantly extends this list — no extra wiring.
  */
 function buildSubscribedEvents(): string[] {
-    const set = new Set<string>(["payment.captured"])
+    const set = new Set<string>(Object.keys(PAYMENT_EVENTS))
     for (const e of listMedusaEntities()) {
         for (const ev of e.events) set.add(ev)
     }
