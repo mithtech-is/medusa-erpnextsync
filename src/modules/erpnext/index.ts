@@ -126,7 +126,19 @@ import {
     unwindDocument,
     type CapturedPayment,
 } from "./order-accounting"
-import { normalizeGatewaySuppliers, type GatewaySupplier } from "./gateway-settlements"
+import {
+    PURCHASE_INVOICE_DOCTYPE,
+    SETTLEMENT_ENTITY,
+    SETTLEMENT_EVENT,
+    bookSettlementDocuments,
+    normalizeGatewaySuppliers,
+    parseSettlement,
+    planSettlement,
+    settlementConfig,
+    settlementEventId,
+    settlementKey,
+    type GatewaySupplier,
+} from "./gateway-settlements"
 import {
     createOrderFulfillmentWorkflow,
     createOrderShipmentWorkflow,
@@ -945,6 +957,7 @@ class ErpnextModuleService extends MedusaService({
                 : { ok: false, status: "failed", error: replayed.error ?? "replay failed" }
         }
         if (OUTBOUND_PAUSED) return pausedResult()
+        if (row.event === SETTLEMENT_EVENT) return this.bookSettlement(row.payload)
         if (row.mapping_id) {
             // A newer push of the same record has its own row; this one
             // holds an older snapshot and is not resent (retry-policy.ts).
@@ -4454,6 +4467,92 @@ class ErpnextModuleService extends MedusaService({
     }
 
     /**
+     * Book a payment-gateway settlement (`payment_gateway.settlement_recorded`)
+     * in ERPNext: the gateway's fee as a Purchase Invoice paid from the
+     * clearing account, the payout as a Journal Entry into the bank. See
+     * ./gateway-settlements.ts. One sync row per settlement: a re-emitted
+     * event updates it and the retry job replays its latest payload.
+     */
+    async bookSettlement(payload: any): Promise<ForwardResult> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync) return { ok: true, status: "skipped", reason: "sync-disabled" }
+        const args = { event: SETTLEMENT_EVENT, event_id: settlementEventId(payload), data: payload }
+        const parsed = parseSettlement(payload)
+        const entityRef = parsed.ok ? `${SETTLEMENT_ENTITY}:${settlementKey(parsed.settlement.provider, parsed.settlement.settlement_id)}` : null
+        const record = async (status: string, last_error: string | null, extra: Record<string, any> = {}) =>
+            this.upsertEventRow(args, { status, last_error, target_url: null, entity_ref: entityRef, ...extra })
+        const fail = async (error: string, rowId?: string): Promise<ForwardResult> => {
+            const message = error.slice(0, ERROR_TRUNCATE)
+            if (rowId) await this.updateErpnextSyncEvents({ id: rowId, status: "failed", last_error: message })
+            else await record("failed", message)
+            return { ok: false, status: "failed", error: message }
+        }
+
+        const config = settlementConfig(await this.findSettingsRow(), String(payload?.provider ?? ""))
+        if (config.action === "skip") {
+            await record("skipped", config.reason, { action: "skipped" })
+            return { ok: true, status: "skipped", reason: config.reason }
+        }
+        if (OUTBOUND_PAUSED) {
+            await record("skipped", OUTBOUND_PAUSED_MESSAGE, { action: "paused" })
+            return pausedResult()
+        }
+        if (parsed.ok === false) return fail(parsed.error)
+        if (config.action === "fail") return fail(config.error)
+        const { gateway, bankAccount } = config
+        const settlement = parsed.settlement
+        const rest = await this.restClient()
+        if (!rest) {
+            const reason = "ERPNext URL or API credentials not configured"
+            await record("skipped", reason)
+            return { ok: true, status: "skipped", reason: "not-configured" }
+        }
+        const timezone = await this.siteTimezone()
+        const plan = planSettlement(settlement, formatInZone(new Date(settlement.settled_at), timezone, false))
+        if (plan.ok === false) return fail(plan.error)
+
+        const key = settlementKey(settlement.provider, settlement.settlement_id)
+        const pending: any = await record("pending", null, {
+            target_url: `${rest.cfg.erpnext_url}/api/resource/${encodeURIComponent(PURCHASE_INVOICE_DOCTYPE)}`,
+        })
+        try {
+            const outcome = await oneAtATime(_settlementLocks, key, async () => {
+                const defaults = await this.pushDefaults(rest.client)
+                if (!defaults.company) return { ok: false as const, error: "no company: set one in Settings or ERPNext's Global Defaults" }
+                return bookSettlementDocuments(rest.client, {
+                    settlement,
+                    plan,
+                    gateway,
+                    mode: config.mode,
+                    company: defaults.company,
+                    companyAddress: defaults.companyAddress ?? null,
+                    bankAccount,
+                    links: {
+                        get: async (doctype) => (await this.remoteNameFor(SETTLEMENT_ENTITY, key, doctype))?.erpnext_name ?? null,
+                        record: (doctype, name) =>
+                            this.recordLink({ doctype, erpnext_name: name, medusa_entity: SETTLEMENT_ENTITY, medusa_id: key, state: "active" }),
+                        drop: async (doctype) => {
+                            const link = await this.remoteNameFor(SETTLEMENT_ENTITY, key, doctype)
+                            if (link?.id) await this.deleteErpnextLinks([link.id])
+                        },
+                    },
+                })
+            })
+            if (outcome.ok === false) return fail(outcome.error, pending.id)
+            await this.updateErpnextSyncEvents({
+                id: pending.id,
+                status: "success",
+                succeeded_at: new Date(),
+                action: outcome.action,
+                last_error: outcome.notes.join("; ").slice(0, ERROR_TRUNCATE) || null,
+            })
+            return { ok: true, status: "success", action: outcome.action }
+        } catch (err: any) {
+            return fail(describeError(err), pending.id)
+        }
+    }
+
+    /**
      * The customer's copy of an invoice this store just submitted. With
      * ERPNext invoices on, the PDF is fetched first; a failed fetch leaves
      * the row a draft so the hourly refresh fetches it again.
@@ -6590,6 +6689,8 @@ const _roundingCache = new Map<string, { roundTotal: boolean; method: string | n
 const _deliveryLocks = new Map<string, Promise<unknown>>()
 /** One push per store order at a time, per process. */
 const _orderLocks = new Map<string, Promise<unknown>>()
+/** One booking per gateway settlement at a time, per process. */
+const _settlementLocks = new Map<string, Promise<unknown>>()
 
 async function oneAtATime<T>(locks: Map<string, Promise<unknown>>, key: string, run: () => Promise<T>): Promise<T> {
     const previous = locks.get(key) ?? Promise.resolve()

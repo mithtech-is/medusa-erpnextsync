@@ -130,6 +130,46 @@ DocType; the pair is its identity and there is one per pair.
   the Payment Entries, then the invoice, then the Sales Order. A partial
   refund is only noted on the event: book it in ERPNext (a Credit Note).
 
+### Gateway settlements
+
+**Book gateway settlements in ERPNext** (Settings → Gateway settlements into
+ERPNext) books each payout a gateway reports. Before switching it on:
+
+- Set **Bank account the payouts land in** to the ERPNext ledger, e.g. the
+  current account; with *Set up ERPNext creates it* on, Set up ERPNext makes
+  it under Bank Accounts when missing.
+- Check the gateway's row: supplier, service item, HSN/SAC and, when the
+  provider → Mode of Payment map has no `pp_<gateway>…` row, its Mode of
+  Payment. The Mode of Payment's default account for the company is the
+  clearing account the settlement empties.
+- Press Set up ERPNext, then fill the supplier's **GSTIN and address** in
+  ERPNext. India Compliance picks the purchase taxes from them; without them
+  the fee invoice gets no GST, stays a draft, and the event fails.
+- Confirm the SAC on the service item against the gateway's tax invoices
+  (997158 is only the default).
+
+What happens to one settlement (`payment_gateway.settlement_recorded`, one
+sync row per settlement, `settlement:<provider>:<id>`):
+
+1. Refused, nothing written: a currency other than INR, a chargeback or
+   adjustment line, a non-zero adjustment amount, a line of unknown type, or
+   gross − refunds − fee − GST + adjustments ≠ net. Book it by hand.
+2. Purchase Invoice for the fee, paid from the clearing account and
+   submitted. ERPNext's GST more than ₹1 from the gateway's keeps it a draft
+   and fails the event; fix the supplier and press Retry, which updates the
+   same draft.
+3. Journal Entry for the net payout, submitted.
+
+Refund lines need nothing of their own: a payment refunded in full had its
+Payment Entry cancelled (Payments into ERPNext), which took it out of the
+clearing account, and the settlement nets the refund from the payout. A
+partial refund stays in the clearing account until it is booked in ERPNext.
+
+A settlement emitted again with other figures updates documents that are
+still drafts. Against a submitted document it fails with both figures;
+cancel and amend in ERPNext, then Retry. A document cancelled in ERPNext is
+left alone and not made again.
+
 ### Several DocTypes in one sync
 
 Under **More DocTypes in this sync** name the DocType and how it is tied

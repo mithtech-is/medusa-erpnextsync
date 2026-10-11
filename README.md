@@ -81,6 +81,33 @@ never books a payment twice. A submission ERPNext refuses (a missing GSTIN, a
 closed period, stock) keeps the draft and fails the sync event with
 ERPNext's reason, and the retry job tries again.
 
+**Gateway settlements, booked in ERPNext.** With **Book gateway settlements
+in ERPNext** on (Settings → Gateway settlements into ERPNext), each
+`payment_gateway.settlement_recorded` event (emitted by
+`@mithtech-medusa/cashfree` 0.2.0) clears the account its payments were
+received into, the default account of the gateway's Mode of Payment:
+
+- a **Purchase Invoice** from the gateway's supplier (default *Cashfree
+  Payments India Private Limited*) for the fee, one line of the service item
+  (default *Payment Gateway Charges*), bill number the settlement id, bill and
+  posting date the settlement's day. Its taxes are the ones ERPNext's
+  `get_party_details` picks for the supplier (India Compliance: CGST + SGST
+  in-state, IGST out of state), so the input tax credit reaches GSTR-2B
+  reconciliation and GSTR-3B. It is paid at once from the clearing account
+  (`is_paid`, `cash_bank_account`, the gateway's Mode of Payment). When
+  ERPNext's GST differs from the gateway's by more than ₹1 the invoice stays a
+  draft and the sync event fails;
+- a **Journal Entry** (Bank Entry) for the net payout: the settlement bank
+  account debited, the clearing account credited, the UTR as cheque number
+  (else the settlement id), the settlement's day as cheque date.
+
+The two take gross − refunds + adjustments out of the clearing account. A
+settlement with chargebacks or adjustments, in another currency, or whose
+figures do not add up books nothing and fails its event. The link table keeps
+both documents against `gateway_settlement` / `<provider>:<settlement_id>`; a
+re-emitted settlement updates drafts and fails against a submitted document
+whose figures changed, cancelling nothing.
+
 **GST, charged as ERPNext will invoice it.** Each pulled product is
 charged at its Item's Item Tax Template rate, written as a product rule on
 the tax region of the company's country. The storefront calls
