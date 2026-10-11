@@ -206,6 +206,27 @@ export function refundState(payments: CapturedPayment[] | null | undefined): "no
     return captured.every((p, i) => refunded[i] >= Number(p.amount) - 0.01) ? "full" : "partial"
 }
 
+/**
+ * Whether a paid order being cancelled must first be booked in full, so
+ * ERPNext keeps the sale and its cancellation instead of no trace of
+ * either. Only with payments recorded, and only while a document or a
+ * captured payment's Payment Entry is still missing.
+ */
+export function bookBeforeCancel(args: {
+    recordPayments: boolean
+    payments: CapturedPayment[] | null | undefined
+    hasSalesOrder: boolean
+    hasInvoice: boolean
+    bookedPaymentIds: string[]
+}): boolean {
+    if (!args.recordPayments) return false
+    const captured = (args.payments ?? []).filter((p) => p?.id && Number(p?.amount) > 0)
+    if (!captured.length) return false
+    if (captured.some((p) => isCashOnDelivery(p.provider_id))) return !args.hasSalesOrder
+    if (!args.hasSalesOrder || !args.hasInvoice) return true
+    return captured.some((p) => !args.bookedPaymentIds.includes(String(p.id)))
+}
+
 /** True when a push mapping listening on `events` handles `eventName`. A refund is handled where cancellation is. */
 export function mappingHandlesEvent(events: unknown, eventName: string): boolean {
     if (!Array.isArray(events)) return false

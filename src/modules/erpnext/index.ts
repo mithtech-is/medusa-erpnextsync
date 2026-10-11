@@ -117,6 +117,7 @@ import {
     PAYMENT_ENTRY_DOCTYPE,
     createPaymentEntry,
     findPaymentEntry,
+    bookBeforeCancel,
     mappingHandlesEvent,
     normalizePaymentModes,
     planOrderAccounting,
@@ -947,7 +948,7 @@ class ErpnextModuleService extends MedusaService({
             if (row.entity_ref && row.created_at) {
                 const later = await this.listErpnextSyncEvents(
                     { entity_ref: row.entity_ref, mapping_id: row.mapping_id, created_at: { $gt: row.created_at } } as any,
-                    { take: 5 },
+                    { take: 20 },
                 )
                 if (supersededByLater(row, later)) {
                     await this.updateErpnextSyncEvents([
@@ -4208,11 +4209,11 @@ class ErpnextModuleService extends MedusaService({
      * the payments booked as order-accounting.ts plans; a submission
      * ERPNext refuses fails the push and leaves the draft.
      */
-    private async pushSalesDocument(ctx: PushContext): Promise<PushOutcome> {
+    private async pushSalesDocument(ctx: PushContext, opts: { paidInFull?: boolean } = {}): Promise<PushOutcome> {
         const { client, mapping, record: order } = ctx
         const settings: any = await this.findSettingsRow()
         const notes: string[] = []
-        const fullyPaid = orderFullyPaid(order)
+        const fullyPaid = opts.paidInFull === true || orderFullyPaid(order)
         const plan = planOrderAccounting({
             recordPayments: Boolean(settings?.record_payments),
             order,
@@ -5084,11 +5085,33 @@ class ErpnextModuleService extends MedusaService({
      * submitted), a submitted document cancelled, a cancelled one left
      * alone. A step ERPNext refuses fails the push, and nothing after it
      * is tried, so the retry picks up where it stopped.
+     *
+     * A paid order cancelled before ERPNext had all of it (its placement
+     * or capture failed, or was still queued) is booked first, so ERPNext
+     * ends with cancelled documents rather than no trace of the sale.
      */
     private async cancelOrderDocuments(ctx: PushContext): Promise<PushOutcome> {
         const { client, record: order } = ctx
         const orderId = String(order.id)
         const notes: string[] = []
+        const settings: any = await this.findSettingsRow()
+        const payments: CapturedPayment[] = Array.isArray(order?.payments) ? order.payments : []
+        const paymentIds = payments.map((p) => String(p?.id ?? "")).filter(Boolean)
+        const booked = paymentIds.length
+            ? await this.listErpnextLinks({ doctype: PAYMENT_ENTRY_DOCTYPE, medusa_entity: PAYMENT_ENTITY, medusa_id: paymentIds } as any, { take: 50 })
+            : []
+        const missing = bookBeforeCancel({
+            recordPayments: Boolean(settings?.record_payments),
+            payments,
+            hasSalesOrder: Boolean((await this.remoteNameFor("order", orderId, "Sales Order"))?.erpnext_name),
+            hasInvoice: Boolean((await this.remoteNameFor("invoice", orderId, "Sales Invoice"))?.erpnext_name),
+            bookedPaymentIds: booked.map((l: any) => String(l.medusa_id)),
+        })
+        if (missing) {
+            const made = await this.pushSalesDocument(ctx, { paidInFull: true })
+            if (made.ok === false) return { ok: false, error: `not cancelled: the paid order could not be booked first: ${made.error}`, httpStatus: made.httpStatus }
+            if (made.status === "success") notes.push(...(made.notes ?? []))
+        }
         for (const { doctype, entity } of CANCEL_ORDER) {
             const links =
                 doctype === PAYMENT_ENTRY_DOCTYPE

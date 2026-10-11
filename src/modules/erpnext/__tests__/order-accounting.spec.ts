@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { FrappeClient, FrappeResult } from "../frappe-client"
 import {
     CANCEL_ORDER,
+    bookBeforeCancel,
     DEFAULT_PAYMENT_MODES,
     cancelStep,
     createPaymentEntry,
@@ -351,5 +352,28 @@ describe("unwinding a document", () => {
             ok: false,
             error: "Sales Invoice SI-1 not cancelled: HTTP 417: Cannot cancel because submitted Payment Entry ACC-PAY-1 exists",
         })
+    })
+})
+
+describe("a paid order cancelled before ERPNext had all of it", () => {
+    const payments = [{ id: "pay_1", amount: 1180, provider_id: "pp_cashfree-pg" }]
+    const all = { recordPayments: true, payments, hasSalesOrder: true, hasInvoice: true, bookedPaymentIds: ["pay_1"] }
+
+    it("is booked first when a document or a Payment Entry is missing", () => {
+        expect(bookBeforeCancel({ ...all, hasSalesOrder: false, hasInvoice: false, bookedPaymentIds: [] })).toBe(true)
+        expect(bookBeforeCancel({ ...all, hasInvoice: false })).toBe(true)
+        expect(bookBeforeCancel({ ...all, bookedPaymentIds: [] })).toBe(true)
+    })
+
+    it("goes straight to cancelling once everything is there, or when nothing was paid or recorded", () => {
+        expect(bookBeforeCancel(all)).toBe(false)
+        expect(bookBeforeCancel({ ...all, payments: [], hasSalesOrder: false })).toBe(false)
+        expect(bookBeforeCancel({ ...all, recordPayments: false, hasSalesOrder: false })).toBe(false)
+    })
+
+    it("needs only the Sales Order for cash on delivery", () => {
+        const cod = [{ id: "pay_2", amount: 500, provider_id: "pp_cod" }]
+        expect(bookBeforeCancel({ ...all, payments: cod, hasSalesOrder: false, hasInvoice: false, bookedPaymentIds: [] })).toBe(true)
+        expect(bookBeforeCancel({ ...all, payments: cod, hasInvoice: false, bookedPaymentIds: [] })).toBe(false)
     })
 })

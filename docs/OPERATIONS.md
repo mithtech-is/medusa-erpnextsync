@@ -168,7 +168,12 @@ The retry job (every 5 minutes) replays `failed` and stale `pending` rows
 only — a `skipped` row records a decision. Each push writes its own row
 with a snapshot of the record, so an older failed row for the same record
 and mapping is marked `superseded` when a newer one exists rather than
-resending the older snapshot next to a live push.
+resending the older snapshot next to a live push. An order's rows are
+superseded only by a row that does their work: a later placement, capture
+or fulfilment push of the same order supersedes an earlier one, and a later
+cancellation supersedes them all, because with payments recorded it books a
+paid order first (Sales Order, invoice, Payment Entry) and then cancels it.
+A refund or a cancellation is superseded only by another of its kind.
 
 Inbound rows carry `event_id = frappe:<event>:<doctype>:<name>:<modified>`,
 so Frappe's own retries of one delivery land on one row. Replaying one:
