@@ -3,6 +3,41 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.6.5 — 2026-10-11
+
+Payment-gateway settlements clear the clearing account in ERPNext.
+
+- **A settlement books the gateway's fee and the payout.** With **Book gateway settlements in
+  ERPNext** on (Settings → Gateway settlements into ERPNext, off by default), each
+  `payment_gateway.settlement_recorded` event (from `@mithtech-medusa/cashfree` 0.2.0) makes a
+  Purchase Invoice from the gateway's supplier for the fee and a Journal Entry (Bank Entry) for the
+  net payout. The invoice's GST comes from ERPNext's own `get_party_details` for the supplier, so
+  India Compliance picks CGST + SGST or IGST from the GSTINs and the input tax credit reaches
+  GSTR-2B and GSTR-3B. It is paid at once (`is_paid`) from the default account of the gateway's
+  Mode of Payment, the clearing account payments were received into at capture; the Journal Entry
+  moves the payout from there to the settlement bank account, with the UTR as cheque number. The
+  two take gross − refunds + adjustments out of the clearing account.
+- **What it will not book.** A settlement with a chargeback or an adjustment, in another currency,
+  with a line of unknown type, or whose figures do not add up posts nothing and fails its sync event
+  with the reason. ERPNext's GST more than ₹1 from the gateway's keeps the invoice a draft and fails
+  the event; Retry updates the same draft once the supplier is fixed.
+- **Nothing is booked twice.** The link table keeps both documents against `gateway_settlement` /
+  `<provider>:<settlement_id>`, and a document made by an attempt that died first is found by its
+  bill number or cheque number. A settlement emitted again with other figures updates drafts and
+  fails against a submitted document, cancelling nothing. One sync row per settlement
+  (`settlement:<provider>:<id>`); the retry job replays its latest payload.
+- **New settings:** `book_settlements` (false), `settlement_bank_account`,
+  `create_settlement_bank_account` (false), `gateway_suppliers` (default `cashfree` → *Cashfree
+  Payments India Private Limited*, item *Payment Gateway Charges*, SAC 997158, which the owner must
+  confirm). The clearing account comes from the provider → Mode of Payment map (`pp_cashfree-pg` for
+  `cashfree`) unless the gateway's row names a Mode of Payment.
+- **Set up ERPNext** creates, only when missing and only with settlements booked, the
+  `Payment Gateway Charges - <abbr>` expense ledger under Indirect Expenses, each gateway's Supplier
+  and non-stock service Item, and the settlement bank account when asked to. Existing masters are
+  never changed; the report says a supplier still needs its GSTIN and address.
+- Migration: `erpnext_setting.book_settlements`, `settlement_bank_account`,
+  `create_settlement_bank_account`, `gateway_suppliers`.
+
 ## 0.6.4 — 2026-10-11
 
 Store orders and their payments land in ERPNext's books.
