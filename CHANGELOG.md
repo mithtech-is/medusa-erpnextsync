@@ -3,6 +3,46 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.6.4 — 2026-10-11
+
+Store orders and their payments land in ERPNext's books.
+
+- **Paid orders are submitted and paid.** With **Record payments in ERPNext** on (Settings →
+  Payments into ERPNext), an online payment captured in full submits the Sales Order, raises the
+  Sales Invoice from it and submits it, and books one submitted Payment Entry (Receive) per
+  captured payment against the invoice. ERPNext's own `get_payment_entry` builds the entry, so
+  its outstanding amount and rounding settle the invoice to zero; it pays into the default
+  account of the Mode of Payment mapped to the payment's provider, with the gateway's payment id
+  (else the Medusa payment id) as reference and the capture date as reference date. The new
+  provider → Mode of Payment map defaults to `{"pp_cashfree-pg": "Cashfree"}`; a provider with no
+  row fails the order's sync event rather than guessing.
+- **Cash on delivery** (`pp_cod`): the Sales Order is submitted when the order is placed. The
+  invoice stays a draft and no Payment Entry is made; the cash is recorded in ERPNext.
+- **Nothing is booked twice.** The link table records each Payment Entry against its Medusa
+  payment (`Payment Entry` / `payment`); an entry made by an attempt that died before recording
+  it is found by its reference. Submitting a submitted document is a no-op, and pushes of one
+  order run one at a time.
+- **A refused submission keeps the draft.** A missing GSTIN, a closed period or a stock check
+  fails the sync event with ERPNext's reason, and the retry job tries again. The forwarder's
+  log carries identifiers only.
+- **Cancellations and refunds unwind the books.** A cancelled order, or every captured payment
+  refunded in full (`payment.refunded`, handled by the mappings that handle `order.canceled`),
+  cancels the Payment Entries, then the invoice, then the Sales Order, deleting drafts and
+  leaving cancelled documents alone. A partial refund is noted on the sync event and left to
+  ERPNext. A cancellation ERPNext refuses now fails the event instead of passing with a note.
+- **A paid order cancelled minutes later still reaches ERPNext.** Its placement and capture were
+  skipped as superseded by the cancellation, which then found nothing to cancel. An order's
+  rows are now superseded only by a later push of the order or by a cancellation, and with
+  payments recorded a cancellation books the paid order first, so ERPNext ends with a cancelled
+  Sales Order, invoice and Payment Entry.
+- **An invoice the store submits is offered at once.** Its `erpnext_invoice` row turns
+  `submitted` (after its PDF is fetched, when customers get ERPNext invoices), and `cancelled`
+  when the store cancels it.
+- **The pull no longer re-reads the newest record every five minutes.** The watermark was
+  compared to the second while Frappe's `modified` carries microseconds; the exact value is now
+  kept beside it (`erpnext_mapping.last_pull_modified`).
+- Migrations: `erpnext_mapping.last_pull_modified`, `erpnext_setting.payment_modes`.
+
 ## 0.6.3 — 2026-09-29
 
 - **Customers get ERPNext's submitted invoice at once.** With "Customers can download ERPNext
