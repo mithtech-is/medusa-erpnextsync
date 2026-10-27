@@ -120,6 +120,9 @@ export const ErpnextMapping = model.define("erpnext_mapping", {
      *  scan; subsequent ticks advance it to the max(modified) of the
      *  rows just imported. */
     last_pull_at: model.dateTime().nullable(),
+    /** Frappe's `modified` behind `last_pull_at`, to the microsecond a
+     *  Date cannot hold. See ../pull-watermark.ts. */
+    last_pull_modified: model.text().nullable(),
     last_pull_run_at: model.dateTime().nullable(),
     last_pull_error: model.text().nullable(),
 

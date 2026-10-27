@@ -75,6 +75,11 @@ type SettingsView = {
   store_invoice_next: number
   send_invoice_to_store: boolean
   record_payments: boolean
+  payment_modes: Record<string, string>
+  book_settlements: boolean
+  settlement_bank_account: string | null
+  create_settlement_bank_account: boolean
+  gateway_suppliers: Record<string, GatewaySupplierRow>
   invoice_storage: "local" | "s3"
   invoice_local_dir: string | null
   s3_bucket: string | null
@@ -93,13 +98,39 @@ type SettingsView = {
   }
 }
 
+type GatewaySupplierRow = { supplier: string; item: string; gst_hsn_code: string; mode_of_payment: string | null }
+
+function gatewayRowsOf(
+  gateways: Record<string, GatewaySupplierRow> | null | undefined,
+): Array<{ provider: string; supplier: string; item: string; gst_hsn_code: string; mode_of_payment: string }> {
+  return Object.entries(gateways ?? {}).map(([provider, g]) => ({
+    provider,
+    supplier: g.supplier ?? "",
+    item: g.item ?? "",
+    gst_hsn_code: g.gst_hsn_code ?? "",
+    mode_of_payment: g.mode_of_payment ?? "",
+  }))
+}
+
+function modeRowsOf(modes: Record<string, string> | null | undefined): Array<{ provider: string; mode: string }> {
+  return Object.entries(modes ?? {}).map(([provider, mode]) => ({ provider, mode }))
+}
+
 type SetupItem = {
-  kind: "custom_field" | "webhook"
+  kind: "custom_field" | "webhook" | "supplier" | "item" | "account"
   doctype: string
   name: string
   action: "created" | "updated" | "unchanged" | "error"
   detail?: string
   error?: string
+}
+
+const SETUP_KIND_LABELS: Record<SetupItem["kind"], string> = {
+  custom_field: "Custom Field",
+  webhook: "Webhook",
+  supplier: "Supplier",
+  item: "Item",
+  account: "Account",
 }
 
 type SetupReport = {
@@ -258,6 +289,12 @@ const SettingsTab: React.FC<{
     view.log_retention_days ?? 180,
   )
   const [sendInvoice, setSendInvoice] = useState(Boolean(view.send_invoice_to_store))
+  const [recordPayments, setRecordPayments] = useState(Boolean(view.record_payments))
+  const [paymentModes, setPaymentModes] = useState(modeRowsOf(view.payment_modes))
+  const [bookSettlements, setBookSettlements] = useState(Boolean(view.book_settlements))
+  const [settlementBank, setSettlementBank] = useState(view.settlement_bank_account ?? "")
+  const [createSettlementBank, setCreateSettlementBank] = useState(Boolean(view.create_settlement_bank_account))
+  const [gatewayRows, setGatewayRows] = useState(gatewayRowsOf(view.gateway_suppliers))
   const [pushCfg, setPushCfg] = useState({
     erpnext_company: view.erpnext_company ?? "",
     erpnext_price_list: view.erpnext_price_list ?? "",
@@ -331,6 +368,12 @@ const SettingsTab: React.FC<{
     setPushAllowlist(view.push_allowlist ?? "")
     setLogRetentionDays(view.log_retention_days ?? 180)
     setSendInvoice(Boolean(view.send_invoice_to_store))
+    setRecordPayments(Boolean(view.record_payments))
+    setPaymentModes(modeRowsOf(view.payment_modes))
+    setBookSettlements(Boolean(view.book_settlements))
+    setSettlementBank(view.settlement_bank_account ?? "")
+    setCreateSettlementBank(Boolean(view.create_settlement_bank_account))
+    setGatewayRows(gatewayRowsOf(view.gateway_suppliers))
     setPushCfg({
       erpnext_company: view.erpnext_company ?? "",
       erpnext_price_list: view.erpnext_price_list ?? "",
@@ -382,6 +425,28 @@ const SettingsTab: React.FC<{
         ...Object.fromEntries(Object.entries(pushCfg).map(([k, v]) => [k, v.trim() || null])),
         order_document: orderDocument,
         send_invoice_to_store: sendInvoice,
+        record_payments: recordPayments,
+        payment_modes: Object.fromEntries(
+          paymentModes
+            .map((r) => [r.provider.trim(), r.mode.trim()])
+            .filter(([provider, mode]) => provider && mode),
+        ),
+        book_settlements: bookSettlements,
+        settlement_bank_account: settlementBank.trim() || null,
+        create_settlement_bank_account: createSettlementBank,
+        gateway_suppliers: Object.fromEntries(
+          gatewayRows
+            .filter((r) => r.provider.trim() && r.supplier.trim())
+            .map((r) => [
+              r.provider.trim().toLowerCase(),
+              {
+                supplier: r.supplier.trim(),
+                item: r.item.trim() || undefined,
+                gst_hsn_code: r.gst_hsn_code.trim() || undefined,
+                mode_of_payment: r.mode_of_payment.trim() || null,
+              },
+            ]),
+        ),
         sync_stock: stockCfg.sync_stock,
         sync_prices: stockCfg.sync_prices,
         erpnext_warehouse: stockCfg.erpnext_warehouse.trim() || null,
@@ -780,7 +845,7 @@ const SettingsTab: React.FC<{
                   <tbody>
                     {shown.report.items.map((it, i) => (
                       <tr key={i}>
-                        <td className="py-1 pr-2">{it.kind === "custom_field" ? "Custom Field" : "Webhook"}</td>
+                        <td className="py-1 pr-2">{SETUP_KIND_LABELS[it.kind] ?? it.kind}</td>
                         <td className="py-1 pr-2 font-mono">{it.name}</td>
                         <td className="py-1 pr-2">
                           <StatusBadge
@@ -979,7 +1044,8 @@ const SettingsTab: React.FC<{
               </Select.Content>
             </Select>
             <Text size="small" className="text-ui-fg-subtle">
-              Documents are created as drafts; an ERPNext user submits them.
+              Documents are created as drafts; an ERPNext user submits them, unless
+              payments are recorded (below).
             </Text>
           </div>
         </div>
@@ -1105,6 +1171,128 @@ const SettingsTab: React.FC<{
         <div className="flex items-center gap-2">
           <Switch checked={sendInvoice} onCheckedChange={(v) => setSendInvoice(Boolean(v))} />
           <Label>Customers can download ERPNext invoices</Label>
+        </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Payments into ERPNext</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          When on, an order paid online has its Sales Order and Sales Invoice submitted once the
+          payment is captured, and a submitted Payment Entry books the payment to the Mode of
+          Payment below; ERPNext takes the account from that mode's default for the company. A
+          cash-on-delivery order has its Sales Order submitted when placed; its invoice stays a
+          draft until the cash is recorded in ERPNext. A cancelled order, or a payment refunded in
+          full, cancels the Payment Entry, the invoice and the order. A partial refund is noted on
+          the sync event and left to ERPNext.
+        </Text>
+        <div className="flex items-center gap-2 mb-3">
+          <Switch checked={recordPayments} onCheckedChange={(v) => setRecordPayments(Boolean(v))} />
+          <Label>Record payments in ERPNext</Label>
+        </div>
+        <div className="flex flex-col gap-2">
+          {paymentModes.map((row, i) => (
+            <div key={i} className="grid grid-cols-1 gap-2 md:grid-cols-3">
+              <Input
+                value={row.provider}
+                placeholder="Payment provider id, e.g. pp_cashfree-pg"
+                onChange={(e) =>
+                  setPaymentModes((rows) => rows.map((r, j) => (j === i ? { ...r, provider: e.target.value } : r)))
+                }
+              />
+              <Input
+                value={row.mode}
+                placeholder="Mode of Payment, e.g. Cashfree"
+                onChange={(e) =>
+                  setPaymentModes((rows) => rows.map((r, j) => (j === i ? { ...r, mode: e.target.value } : r)))
+                }
+              />
+              <Button
+                size="small"
+                variant="transparent"
+                onClick={() => setPaymentModes((rows) => rows.filter((_, j) => j !== i))}
+              >
+                Remove
+              </Button>
+            </div>
+          ))}
+          <div>
+            <Button
+              size="small"
+              variant="secondary"
+              onClick={() => setPaymentModes((rows) => [...rows, { provider: "", mode: "" }])}
+            >
+              Add a provider
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Gateway settlements into ERPNext</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          When on, each payout a gateway reports (Cashfree's settlement) clears the account its payments
+          were received into, the default account of the gateway's Mode of Payment: a Purchase Invoice
+          from the gateway for its fee and the GST on it, paid from that account, and a Journal Entry
+          moving the net payout to the bank account below, with the UTR as reference. ERPNext picks the
+          GST from the supplier's GSTIN and address, so fill both on the supplier for the input tax
+          credit. A settlement with chargebacks or adjustments books nothing and fails its sync event;
+          book it by hand. Set up ERPNext creates the supplier, the service item and the expense account
+          when they are missing.
+        </Text>
+        <div className="flex items-center gap-2 mb-3">
+          <Switch checked={bookSettlements} onCheckedChange={(v) => setBookSettlements(Boolean(v))} />
+          <Label>Book gateway settlements in ERPNext</Label>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 mb-3">
+          <div>
+            <Label>Bank account the payouts land in</Label>
+            <Input
+              value={settlementBank}
+              placeholder="ERPNext Account, e.g. IDFC Current - SGPL"
+              onChange={(e) => setSettlementBank(e.target.value)}
+            />
+          </div>
+          <div className="flex items-center gap-2 pt-5">
+            <Switch checked={createSettlementBank} onCheckedChange={(v) => setCreateSettlementBank(Boolean(v))} />
+            <Label>Set up ERPNext creates it under Bank Accounts when missing</Label>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2">
+          {gatewayRows.map((row, i) => {
+            const set = (patch: Partial<typeof row>) =>
+              setGatewayRows((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
+            return (
+              <div key={i} className="grid grid-cols-1 gap-2 md:grid-cols-6">
+                <Input value={row.provider} placeholder="Gateway, e.g. cashfree" onChange={(e) => set({ provider: e.target.value })} />
+                <Input value={row.supplier} placeholder="Supplier" onChange={(e) => set({ supplier: e.target.value })} />
+                <Input value={row.item} placeholder="Service item" onChange={(e) => set({ item: e.target.value })} />
+                <Input value={row.gst_hsn_code} placeholder="HSN/SAC" onChange={(e) => set({ gst_hsn_code: e.target.value })} />
+                <Input
+                  value={row.mode_of_payment}
+                  placeholder="Mode of Payment (from the map above)"
+                  onChange={(e) => set({ mode_of_payment: e.target.value })}
+                />
+                <Button size="small" variant="transparent" onClick={() => setGatewayRows((rows) => rows.filter((_, j) => j !== i))}>
+                  Remove
+                </Button>
+              </div>
+            )
+          })}
+          <div>
+            <Button
+              size="small"
+              variant="secondary"
+              onClick={() =>
+                setGatewayRows((rows) => [...rows, { provider: "", supplier: "", item: "", gst_hsn_code: "", mode_of_payment: "" }])
+              }
+            >
+              Add a gateway
+            </Button>
+          </div>
+          <Text size="small" className="text-ui-fg-subtle">
+            The HSN/SAC is put on the service item only when Set up ERPNext creates it; 997158 is a
+            placeholder to confirm against the gateway's tax invoices.
+          </Text>
         </div>
       </section>
 

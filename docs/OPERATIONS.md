@@ -111,6 +111,64 @@ DocType; the pair is its identity and there is one per pair.
 - The Sales Invoice is a draft that names the draft Sales Order's rows.
   Submit the order first, then the invoice; ERPNext refuses the other way
   round.
+- **Record payments in ERPNext** (Settings → Payments into ERPNext) does
+  that submitting itself. An online payment captured in full submits the
+  Sales Order, raises the invoice from it, submits the invoice and books a
+  submitted Payment Entry per captured payment to the provider's Mode of
+  Payment. Before switching it on, check every provider the store takes
+  online has a row in the map and that each Mode of Payment has a default
+  account for the company; a provider with no row fails its orders' sync
+  events and books nothing. A cash-on-delivery order gets a submitted Sales
+  Order at once and its invoice stays a draft.
+- A submission ERPNext refuses shows its reason on the failed sync event
+  and the documents stay drafts; fix the cause in ERPNext (the customer's
+  GSTIN, an open accounting period, stock) and the retry, or the Retry
+  button, finishes the job. Nothing is made twice: the Sales Order and
+  invoice through the link table, a Payment Entry through the link table
+  and, failing that, by its reference against the invoice.
+- A cancelled order, or every captured payment refunded in full, cancels
+  the Payment Entries, then the invoice, then the Sales Order. A partial
+  refund is only noted on the event: book it in ERPNext (a Credit Note).
+
+### Gateway settlements
+
+**Book gateway settlements in ERPNext** (Settings → Gateway settlements into
+ERPNext) books each payout a gateway reports. Before switching it on:
+
+- Set **Bank account the payouts land in** to the ERPNext ledger, e.g. the
+  current account; with *Set up ERPNext creates it* on, Set up ERPNext makes
+  it under Bank Accounts when missing.
+- Check the gateway's row: supplier, service item, HSN/SAC and, when the
+  provider → Mode of Payment map has no `pp_<gateway>…` row, its Mode of
+  Payment. The Mode of Payment's default account for the company is the
+  clearing account the settlement empties.
+- Press Set up ERPNext, then fill the supplier's **GSTIN and address** in
+  ERPNext. India Compliance picks the purchase taxes from them; without them
+  the fee invoice gets no GST, stays a draft, and the event fails.
+- Confirm the SAC on the service item against the gateway's tax invoices
+  (997158 is only the default).
+
+What happens to one settlement (`payment_gateway.settlement_recorded`, one
+sync row per settlement, `settlement:<provider>:<id>`):
+
+1. Refused, nothing written: a currency other than INR, a chargeback or
+   adjustment line, a non-zero adjustment amount, a line of unknown type, or
+   gross − refunds − fee − GST + adjustments ≠ net. Book it by hand.
+2. Purchase Invoice for the fee, paid from the clearing account and
+   submitted. ERPNext's GST more than ₹1 from the gateway's keeps it a draft
+   and fails the event; fix the supplier and press Retry, which updates the
+   same draft.
+3. Journal Entry for the net payout, submitted.
+
+Refund lines need nothing of their own: a payment refunded in full had its
+Payment Entry cancelled (Payments into ERPNext), which took it out of the
+clearing account, and the settlement nets the refund from the payout. A
+partial refund stays in the clearing account until it is booked in ERPNext.
+
+A settlement emitted again with other figures updates documents that are
+still drafts. Against a submitted document it fails with both figures;
+cancel and amend in ERPNext, then Retry. A document cancelled in ERPNext is
+left alone and not made again.
 
 ### Several DocTypes in one sync
 
@@ -150,7 +208,12 @@ The retry job (every 5 minutes) replays `failed` and stale `pending` rows
 only — a `skipped` row records a decision. Each push writes its own row
 with a snapshot of the record, so an older failed row for the same record
 and mapping is marked `superseded` when a newer one exists rather than
-resending the older snapshot next to a live push.
+resending the older snapshot next to a live push. An order's rows are
+superseded only by a row that does their work: a later placement, capture
+or fulfilment push of the same order supersedes an earlier one, and a later
+cancellation supersedes them all, because with payments recorded it books a
+paid order first (Sales Order, invoice, Payment Entry) and then cancels it.
+A refund or a cancellation is superseded only by another of its kind.
 
 Inbound rows carry `event_id = frappe:<event>:<doctype>:<name>:<modified>`,
 so Frappe's own retries of one delivery land on one row. Replaying one:

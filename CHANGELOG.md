@@ -30,6 +30,81 @@ All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver
   until the test line was used up. It now asserts the wallet and the line end where they began,
   repays after a failed expectation, and prints a cleanup failure instead of swallowing it.
 
+## 0.6.5 — 2026-10-11
+
+Payment-gateway settlements clear the clearing account in ERPNext.
+
+- **A settlement books the gateway's fee and the payout.** With **Book gateway settlements in
+  ERPNext** on (Settings → Gateway settlements into ERPNext, off by default), each
+  `payment_gateway.settlement_recorded` event (from `@mithtech-medusa/cashfree` 0.2.0) makes a
+  Purchase Invoice from the gateway's supplier for the fee and a Journal Entry (Bank Entry) for the
+  net payout. The invoice's GST comes from ERPNext's own `get_party_details` for the supplier, so
+  India Compliance picks CGST + SGST or IGST from the GSTINs and the input tax credit reaches
+  GSTR-2B and GSTR-3B. It is paid at once (`is_paid`) from the default account of the gateway's
+  Mode of Payment, the clearing account payments were received into at capture; the Journal Entry
+  moves the payout from there to the settlement bank account, with the UTR as cheque number. The
+  two take gross − refunds + adjustments out of the clearing account.
+- **What it will not book.** A settlement with a chargeback or an adjustment, in another currency,
+  with a line of unknown type, or whose figures do not add up posts nothing and fails its sync event
+  with the reason. ERPNext's GST more than ₹1 from the gateway's keeps the invoice a draft and fails
+  the event; Retry updates the same draft once the supplier is fixed.
+- **Nothing is booked twice.** The link table keeps both documents against `gateway_settlement` /
+  `<provider>:<settlement_id>`, and a document made by an attempt that died first is found by its
+  bill number or cheque number. A settlement emitted again with other figures updates drafts and
+  fails against a submitted document, cancelling nothing. One sync row per settlement
+  (`settlement:<provider>:<id>`); the retry job replays its latest payload.
+- **New settings:** `book_settlements` (false), `settlement_bank_account`,
+  `create_settlement_bank_account` (false), `gateway_suppliers` (default `cashfree` → *Cashfree
+  Payments India Private Limited*, item *Payment Gateway Charges*, SAC 997158, which the owner must
+  confirm). The clearing account comes from the provider → Mode of Payment map (`pp_cashfree-pg` for
+  `cashfree`) unless the gateway's row names a Mode of Payment.
+- **Set up ERPNext** creates, only when missing and only with settlements booked, the
+  `Payment Gateway Charges - <abbr>` expense ledger under Indirect Expenses, each gateway's Supplier
+  and non-stock service Item, and the settlement bank account when asked to. Existing masters are
+  never changed; the report says a supplier still needs its GSTIN and address.
+- Migration: `erpnext_setting.book_settlements`, `settlement_bank_account`,
+  `create_settlement_bank_account`, `gateway_suppliers`.
+
+## 0.6.4 — 2026-10-11
+
+Store orders and their payments land in ERPNext's books.
+
+- **Paid orders are submitted and paid.** With **Record payments in ERPNext** on (Settings →
+  Payments into ERPNext), an online payment captured in full submits the Sales Order, raises the
+  Sales Invoice from it and submits it, and books one submitted Payment Entry (Receive) per
+  captured payment against the invoice. ERPNext's own `get_payment_entry` builds the entry, so
+  its outstanding amount and rounding settle the invoice to zero; it pays into the default
+  account of the Mode of Payment mapped to the payment's provider, with the gateway's payment id
+  (else the Medusa payment id) as reference and the capture date as reference date. The new
+  provider → Mode of Payment map defaults to `{"pp_cashfree-pg": "Cashfree"}`; a provider with no
+  row fails the order's sync event rather than guessing.
+- **Cash on delivery** (`pp_cod`): the Sales Order is submitted when the order is placed. The
+  invoice stays a draft and no Payment Entry is made; the cash is recorded in ERPNext.
+- **Nothing is booked twice.** The link table records each Payment Entry against its Medusa
+  payment (`Payment Entry` / `payment`); an entry made by an attempt that died before recording
+  it is found by its reference. Submitting a submitted document is a no-op, and pushes of one
+  order run one at a time.
+- **A refused submission keeps the draft.** A missing GSTIN, a closed period or a stock check
+  fails the sync event with ERPNext's reason, and the retry job tries again. The forwarder's
+  log carries identifiers only.
+- **Cancellations and refunds unwind the books.** A cancelled order, or every captured payment
+  refunded in full (`payment.refunded`, handled by the mappings that handle `order.canceled`),
+  cancels the Payment Entries, then the invoice, then the Sales Order, deleting drafts and
+  leaving cancelled documents alone. A partial refund is noted on the sync event and left to
+  ERPNext. A cancellation ERPNext refuses now fails the event instead of passing with a note.
+- **A paid order cancelled minutes later still reaches ERPNext.** Its placement and capture were
+  skipped as superseded by the cancellation, which then found nothing to cancel. An order's
+  rows are now superseded only by a later push of the order or by a cancellation, and with
+  payments recorded a cancellation books the paid order first, so ERPNext ends with a cancelled
+  Sales Order, invoice and Payment Entry.
+- **An invoice the store submits is offered at once.** Its `erpnext_invoice` row turns
+  `submitted` (after its PDF is fetched, when customers get ERPNext invoices), and `cancelled`
+  when the store cancels it.
+- **The pull no longer re-reads the newest record every five minutes.** The watermark was
+  compared to the second while Frappe's `modified` carries microseconds; the exact value is now
+  kept beside it (`erpnext_mapping.last_pull_modified`).
+- Migrations: `erpnext_mapping.last_pull_modified`, `erpnext_setting.payment_modes`.
+
 ## 0.6.3 — 2026-09-29
 
 - **Customers get ERPNext's submitted invoice at once.** With "Customers can download ERPNext

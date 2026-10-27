@@ -61,7 +61,52 @@ get more than a flat document:
   account ahead of the GST rows, which apply to it, so it is taxed at the
   rates of the goods it carries. Once the order is paid in full, a draft
   **Sales Invoice** is made from it (a re-push refreshes a draft one).
-  Everything is created as a draft; an ERPNext user submits.
+  Everything is created as a draft; an ERPNext user submits, unless the
+  store records its payments (below).
+
+**Payments, booked in ERPNext.** With **Record payments in ERPNext** on in
+Settings, an order paid online has its Sales Order and Sales Invoice
+submitted once its payment is captured in full, and each captured payment
+becomes a submitted **Payment Entry** (Receive) against the invoice. ERPNext's
+own `get_payment_entry` builds it, so its outstanding amount and rounding
+settle the invoice to zero. The entry carries the gateway's payment id (else
+the Medusa payment id) as its reference, the capture date as its reference
+date, and the Mode of Payment Settings maps the payment's provider to
+(`{"pp_cashfree-pg": "Cashfree"}` by default); it pays into that mode's
+default account for the company. A cash-on-delivery order (`pp_cod`) has its
+Sales Order submitted when it is placed; its invoice stays a draft and no
+Payment Entry is made, since the cash is recorded in ERPNext. The link table
+records each Payment Entry against its Medusa payment, so a replayed event
+never books a payment twice. A submission ERPNext refuses (a missing GSTIN, a
+closed period, stock) keeps the draft and fails the sync event with
+ERPNext's reason, and the retry job tries again.
+
+**Gateway settlements, booked in ERPNext.** With **Book gateway settlements
+in ERPNext** on (Settings → Gateway settlements into ERPNext), each
+`payment_gateway.settlement_recorded` event (emitted by
+`@mithtech-medusa/cashfree` 0.2.0) clears the account its payments were
+received into, the default account of the gateway's Mode of Payment:
+
+- a **Purchase Invoice** from the gateway's supplier (default *Cashfree
+  Payments India Private Limited*) for the fee, one line of the service item
+  (default *Payment Gateway Charges*), bill number the settlement id, bill and
+  posting date the settlement's day. Its taxes are the ones ERPNext's
+  `get_party_details` picks for the supplier (India Compliance: CGST + SGST
+  in-state, IGST out of state), so the input tax credit reaches GSTR-2B
+  reconciliation and GSTR-3B. It is paid at once from the clearing account
+  (`is_paid`, `cash_bank_account`, the gateway's Mode of Payment). When
+  ERPNext's GST differs from the gateway's by more than ₹1 the invoice stays a
+  draft and the sync event fails;
+- a **Journal Entry** (Bank Entry) for the net payout: the settlement bank
+  account debited, the clearing account credited, the UTR as cheque number
+  (else the settlement id), the settlement's day as cheque date.
+
+The two take gross − refunds + adjustments out of the clearing account. A
+settlement with chargebacks or adjustments, in another currency, or whose
+figures do not add up books nothing and fails its event. The link table keeps
+both documents against `gateway_settlement` / `<provider>:<settlement_id>`; a
+re-emitted settlement updates drafts and fails against a submitted document
+whose figures changed, cancelling nothing.
 
 **GST, charged as ERPNext will invoice it.** Each pulled product is
 charged at its Item's Item Tax Template rate, written as a product rule on
@@ -72,8 +117,12 @@ rounded total, worked out with ERPNext's own arithmetic.
 `GET /store/erpnext/orders/:id/gst` returns ERPNext's GST for a customer's
 order.
 
-A cancelled order deletes its draft documents (or cancels submitted
-ones); a deleted customer or product is disabled, never deleted.
+A cancelled order unwinds its documents in the order ERPNext allows:
+Payment Entries, then the invoice, then the Sales Order. A draft is
+deleted, a submitted document cancelled, a cancelled one left alone. A
+captured payment refunded in full (every payment of the order) does the
+same; a partial refund is noted on the sync event and left to ERPNext. A
+deleted customer or product is disabled, never deleted.
 `ERPNEXT_PAUSE_PUSH=true` pauses pushes without touching the mappings.
 
 **ERPNext → Medusa, stock and prices.** ERPNext owns both. Switched on in
@@ -173,6 +222,17 @@ Allow list or deny list is chosen per DocType when the field is created.
 In deny mode the column is created with default `Both`, so every existing
 document is selected at once. Changing the mode later changes the default
 for new documents only; existing values stay.
+
+With **Book gateway settlements in ERPNext** on, it also creates what the
+fee invoice and the payout need, only when missing and never changing an
+existing master:
+
+| What | Name | Notes |
+|---|---|---|
+| Account | `Payment Gateway Charges - <abbr>` | Expense ledger under Indirect Expenses. |
+| Account | the settlement bank account | Only with *Set up ERPNext creates it* on: a Bank ledger under Bank Accounts. Otherwise a missing one is reported. |
+| Supplier | each gateway's supplier | In Buying Settings' default supplier group. Its GSTIN and address are left to you; the report says so, since the input tax credit needs them. |
+| Item | each gateway's service item | Non-stock, purchase only, the configured HSN/SAC (default 997158, to be confirmed), the expense ledger above as its default. |
 
 Re-running the button is safe: each item reports created, updated,
 unchanged or error. The API user needs **System Manager** (Custom Field
