@@ -349,22 +349,48 @@ export function buildAddressDoc(args: {
 export type OrderTotals = { subtotal: number; tax: number; shipping: number; discount: number; grand: number }
 
 /**
- * What the order adds up to. The line rates are the unit prices and tax is
- * the lines' tax. Shipping is net of its tax: GST on it is ERPNext's to
- * compute. When Medusa gives no shipping figure, whatever the grand total
- * has beyond the lines is shipping (when positive) or a discount (when
- * negative).
+ * What the order adds up to. The line rates are the unit prices, tax is
+ * the lines' tax, shipping is what the store says it charged (net of its
+ * tax where Medusa says what that tax was: GST on it is ERPNext's to
+ * compute), and whatever the grand total still has beyond those has to go
+ * somewhere — so ERPNext's grand total reconciles to Medusa's exactly.
+ *
+ * Where the unexplained remainder goes matters. It used to become
+ * shipping whenever the order named no shipping figure, which on a real
+ * order hid the tax inside the delivery line: a 59.50 item with 100
+ * delivery and 10.71 GST arrived in ERPNext as "Medusa Shipping 110.71"
+ * and no tax at all — the total was right and the books were wrong, and
+ * no GST return can be filed off that.
+ *
+ * The lines do not always report the tax. A provider may charge it on
+ * the shipping method, or report it only at order level, and the
+ * order-level computed totals cannot be fetched (they throw on an order
+ * with shipping methods). So: take shipping from the store — the shipping
+ * methods it actually charged, or `shippingNet`'s other figures, or
+ * `shipping_total` as given — and when something is still unaccounted
+ * for, call it tax, because with shipping known, tax is what is left.
+ * Only when nobody has told us the shipping does an unexplained charge
+ * become shipping, which is the best guess available. A shortfall nobody
+ * named is a discount.
  */
 export function orderTotals(order: any): OrderTotals {
     const items = Array.isArray(order?.items) ? order.items : []
     const subtotal = money(items.reduce((s: number, li: any) => s + money(li?.unit_price) * (Number(li?.quantity) || 1), 0))
-    const tax = money(items.reduce((s: number, li: any) => s + money(li?.tax_total), 0))
+    const lineTax = money(items.reduce((s: number, li: any) => s + money(li?.tax_total), 0))
     const grand = money(order?.total)
-    const shippingKnown = shippingNet(order)
+    const shippingKnown = shippingNet(order) ?? (order?.shipping_total != null ? money(order.shipping_total) : null)
     const discountKnown = order?.discount_total != null ? money(order.discount_total) : null
-    const residual = money(grand - subtotal - tax)
-    const shipping = shippingKnown ?? Math.max(0, residual)
-    const discount = discountKnown ?? Math.max(0, -residual)
+
+    let tax = lineTax
+    let shipping = shippingKnown ?? 0
+    let discount = discountKnown ?? 0
+    const remainder = money(grand - subtotal - tax - shipping + discount)
+    if (remainder > 0) {
+        if (shippingKnown == null) shipping = remainder
+        else tax = money(tax + remainder)
+    } else if (remainder < 0 && discountKnown == null) {
+        discount = money(-remainder)
+    }
     return { subtotal, tax, shipping, discount, grand }
 }
 
