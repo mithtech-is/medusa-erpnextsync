@@ -116,6 +116,13 @@ export type MappingFieldPair = {
      *  product published, tagged with its source, put in a sales channel.
      *  `erpnext_field` may be empty on such a pair. */
     constant_pull?: unknown
+    /**
+     * On pull, an edit made in the store stays until ERPNext's own value
+     * changes. For fields the store enriches (a product's title and rich
+     * description): saving an Item for an unrelated reason must not wipe them.
+     * See `keepStoreEdits`.
+     */
+    protect_edits?: boolean
     /** The ERPNext DocType this pair targets when the sync spans several;
      *  absent means the mapping's main DocType (secondary-doctypes.ts). */
     erpnext_doctype?: string
@@ -158,6 +165,11 @@ export type ApplyMappingResult =
           failures: FieldFailure[]
       }
     | { ok: false; reason: string; field?: string }
+
+/** The Medusa paths a pull must not overwrite when the store has edited them. */
+export function protectedPaths(pairs: MappingFieldPair[] | null | undefined): string[] {
+    return (pairs ?? []).filter((p) => p?.protect_edits && p.medusa_path).map((p) => p.medusa_path)
+}
 
 /** The transform a pair uses in one direction, and whether it was inherited
  *  from the shared `transform` (which runs a `map:` in reverse on pull). */

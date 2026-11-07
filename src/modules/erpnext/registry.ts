@@ -32,6 +32,7 @@
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import crypto from "crypto"
 import { transactionReference } from "./order-accounting"
+import { getByPath } from "./mapping-engine"
 
 /**
  * A Medusa product handle built from a key the other system chose.
@@ -93,6 +94,52 @@ function digestOf(raw: string): string {
     return crypto.createHash("sha1").update(String(raw ?? "")).digest("hex").slice(0, 8)
 }
 
+/** Where a record keeps a digest of what each protected field last pulled. */
+export const PULLED_KEY = "erpnext_pulled"
+
+function removeByPath(target: Record<string, any>, path: string): void {
+    const tokens = path.split(".")
+    const last = tokens.pop() as string
+    let cur: any = target
+    for (const t of tokens) {
+        if (cur == null || typeof cur !== "object") return
+        cur = cur[t]
+    }
+    if (cur && typeof cur === "object") delete cur[last]
+}
+
+/**
+ * A pull's payload with the store's own edits left standing.
+ *
+ * A protected field is written when the record has nothing there, and when
+ * ERPNext's value actually changed since the last pull: then both sides moved
+ * and the newer one, ERPNext's, wins. Otherwise the store's text differs only
+ * because somebody improved it, and it stays. A field first seen differing has
+ * no digest to compare, so it counts as the store's edit.
+ */
+export function keepStoreEdits(
+    existing: Record<string, any> | null | undefined,
+    payload: Record<string, any>,
+    paths: string[] | null | undefined,
+): Record<string, any> {
+    if (!paths?.length) return payload
+    const out: Record<string, any> = { ...payload, metadata: { ...(payload.metadata ?? {}) } }
+    const pulled: Record<string, string> = { ...(existing?.metadata?.[PULLED_KEY] ?? {}) }
+    for (const path of paths) {
+        const incoming = getByPath(out, path)
+        if (incoming === undefined || incoming === null) continue
+        const digest = digestOf(String(incoming))
+        const current = getByPath(existing ?? {}, path)
+        const last = pulled[path]
+        pulled[path] = digest
+        if (current === undefined || current === null || String(current).trim() === "") continue
+        if (String(current) === String(incoming)) continue
+        if (last === undefined || last === digest) removeByPath(out, path)
+    }
+    out.metadata[PULLED_KEY] = pulled
+    return out
+}
+
 export type MedusaFieldType =
     | "string"
     | "number"
@@ -123,6 +170,8 @@ export type EntityUpserter = (
     key_field: string,
     key_value: string,
     payload: Record<string, any>,
+    /** Medusa paths whose store edits a pull must keep (`keepStoreEdits`). */
+    options?: { protect?: string[] },
 ) => Promise<{ ok: boolean; id?: string; created?: boolean; error?: string }>
 
 /** Safe soft-delete for inbound `.deleted` / `.canceled` events. Never
@@ -231,9 +280,9 @@ function genericEntity(args: GenericEntityArgs): EntityDescriptor {
             const rows = await m[listFn]({ id }, opts)
             return rows?.[0] ?? null
         },
-        async upsertByKey(container, key_field, key_value, payload) {
+        async upsertByKey(container, key_field, key_value, payload, options) {
             if (args.upsertByKey) {
-                return args.upsertByKey(container, key_field, key_value, payload)
+                return args.upsertByKey(container, key_field, key_value, payload, options)
             }
             const m: any = container.resolve(args.moduleName)
             const filter: any = {}
@@ -290,13 +339,18 @@ const customerEntity = genericEntity({
         { path: "created_at", label: "Created at", type: "datetime", suggested_transform: "date_iso" },
         { path: "updated_at", label: "Updated at", type: "datetime", suggested_transform: "date_iso" },
     ],
-    upsertByKey: async (container, _kf, _kv, payload) => {
+    upsertByKey: async (container, _kf, _kv, incoming, options) => {
         const m: any = container.resolve(Modules.CUSTOMER)
-        const email = payload.email
+        const email = incoming.email
         if (!email) return { ok: false, error: "customer upsert needs `email` on the payload" }
         const existingList = (await m.listCustomers({ email }, { take: 1 })) || []
         const existing = existingList[0]
+        const payload = keepStoreEdits(existing, incoming, options?.protect)
         if (existing) {
+            // A module update replaces the metadata blob whole, and a mapping
+            // only names a few keys of it: without the merge a pull would
+            // drop `company_id` and with it the customer's GSTIN.
+            if (payload.metadata) payload.metadata = { ...(existing.metadata ?? {}), ...payload.metadata }
             // Selector/data form on purpose: the array-with-id form
             // `updateCustomers([{id, ...}])` trips a mikro-orm exception-
             // converter bug on some Medusa builds (masks the real error as
@@ -627,7 +681,7 @@ const productEntity: EntityDescriptor = {
             return (rows ?? []).map((r: any) => ({ value: r.id, label: r.value ?? r.id }))
         },
     },
-    async upsertByKey(container, key_field, key_value, payload) {
+    async upsertByKey(container, key_field, key_value, payload, options) {
         const m: any = container.resolve(Modules.PRODUCT)
         // Sales channels and the shipping profile are relations the product
         // module does not write; they are linked after the upsert.
@@ -638,7 +692,7 @@ const productEntity: EntityDescriptor = {
             delete payload.sales_channels
             delete payload.shipping_profile_id
         }
-        const outcome = await upsertProductRecord(m, key_field, key_value, payload)
+        const outcome = await upsertProductRecord(m, key_field, key_value, payload, options?.protect)
         if (outcome.ok && outcome.id) {
             await linkProductRelations(container, outcome.id, { salesChannels, shippingProfile })
         }
@@ -741,6 +795,7 @@ async function upsertProductRecord(
     key_field: string,
     key_value: string,
     payload: Record<string, any>,
+    protect?: string[],
 ): Promise<{ ok: boolean; id?: string; created?: boolean; error?: string }> {
     {
         const isMetaKey = key_field.startsWith("metadata.")
@@ -774,7 +829,9 @@ async function upsertProductRecord(
         // mapping) would otherwise create a fresh row every run — the
         // dedup filter never matches what was written.
         const keyMeta = isMetaKey ? { [metaKeyName as string]: key_value } : {}
-        const existing = await m.listProducts(filter, { select: ["id", "metadata"], take: 1 })
+        const select = Array.from(new Set(["id", "metadata", ...(protect ?? []).map((p) => p.split(".")[0])]))
+        const existing = await m.listProducts(filter, { select, take: 1 })
+        payload = keepStoreEdits(existing?.[0], payload, protect)
         if (existing?.length) {
             const mergedMeta = { ...(existing[0].metadata || {}), ...(payload.metadata || {}), ...keyMeta }
             const patch: any = { id: existing[0].id, ...payload, metadata: mergedMeta }

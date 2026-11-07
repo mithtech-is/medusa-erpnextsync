@@ -231,6 +231,29 @@ POST /admin/erpnext/pull/items                                           # previ
 POST /admin/erpnext/push/products|customers|orders                       # through the push mappings
 ```
 
+## Categories
+
+ERPNext's Item Group tree is the category tree. Switch it on under Settings → *Categories*, press
+**Preview changes** to read the plan, then **Set up ERPNext** to install the Item Group webhooks.
+
+| Item Group | Product category | Rule |
+|---|---|---|
+| `name` | `metadata.erpnext_item_group` | The identity |
+| `creation` | `metadata.erpnext_item_group_created` | Finds the category again after a rename |
+| `item_group_name` | `name` | On create and on a rename; a name edited in Medusa stays |
+| `parent_item_group` | `parent_category_id` | The parent's category; ERPNext's root becomes the top level |
+| `is_group` | `metadata.erpnext_is_group` | |
+| `image` | `metadata.image_url` | Made absolute; an image set in Medusa stays; a private file is not used |
+| exists | `is_active` | Gone from ERPNext: hidden, never deleted |
+| published items below it | `is_internal` | None: off the storefront, back when there are some |
+
+`Item.item_group` files the product under its group's category and is stored at the path the catalogue
+mapping names (`metadata.category` by default). A category carrying `erpnext_local_only` or
+`match_keywords` is the store's own and never becomes a group.
+
+To move something on the storefront, move it in ERPNext's tree: the next pass follows, and a parent changed
+by hand in Medusa is moved back unless two-way category sync is on.
+
 ## Stock and prices
 
 ERPNext owns both. Switch them on under Settings → *Stock and prices from

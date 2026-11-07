@@ -64,6 +64,9 @@ const SaveSchema = z.object({
     /** Stock and prices, ERPNext → Medusa. */
     sync_stock: z.boolean().optional(),
     sync_prices: z.boolean().optional(),
+    /** The Item Group tree as product categories. */
+    sync_categories: z.boolean().optional(),
+    category_direction: z.enum(["pull", "both"]).optional(),
     erpnext_warehouse: z.string().nullable().optional(),
     medusa_stock_location_id: z.string().nullable().optional(),
     erpnext_safety_stock: z.number().int().min(0).nullable().optional(),

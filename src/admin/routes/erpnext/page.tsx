@@ -51,6 +51,9 @@ type SettingsView = {
   erpnext_territory: string | null
   erpnext_shipping_account: string | null
   erpnext_taxes_template: string | null
+  sync_categories: boolean
+  category_direction: "pull" | "both"
+  category_sync_report: CategorySyncReport | null
   sync_stock: boolean
   sync_prices: boolean
   erpnext_warehouse: string | null
@@ -319,6 +322,11 @@ const SettingsTab: React.FC<{
   /** A freshly generated secret, shown once. Cleared on save — a stored
    *  secret is never re-displayed. */
   const [freshSecret, setFreshSecret] = useState<string | null>(null)
+  const [syncCategories, setSyncCategories] = useState(Boolean(view.sync_categories))
+  const [categoryDirection, setCategoryDirection] = useState<"pull" | "both">(view.category_direction === "both" ? "both" : "pull")
+  const [categoryReport, setCategoryReport] = useState<CategorySyncReport | null>(view.category_sync_report ?? null)
+  const [categoryBusy, setCategoryBusy] = useState(false)
+  const [categoryError, setCategoryError] = useState<string | null>(null)
 
   /** 32 random bytes as hex, from the browser's CSPRNG. Set up ERPNext
    *  generates one on the server when none is saved; this button is for
@@ -395,6 +403,9 @@ const SettingsTab: React.FC<{
       sync_credit: Boolean(view.sync_credit),
       erpnext_wallet_bank_account: view.erpnext_wallet_bank_account ?? "",
     })
+    setSyncCategories(Boolean(view.sync_categories))
+    setCategoryDirection(view.category_direction === "both" ? "both" : "pull")
+    setCategoryReport(view.category_sync_report ?? null)
     setInvoiceStorage(view.invoice_storage ?? "local")
     setLocalDir(view.invoice_local_dir ?? "")
     setS3Bucket(view.s3_bucket ?? "")
@@ -447,6 +458,8 @@ const SettingsTab: React.FC<{
               },
             ]),
         ),
+        sync_categories: syncCategories,
+        category_direction: categoryDirection,
         sync_stock: stockCfg.sync_stock,
         sync_prices: stockCfg.sync_prices,
         erpnext_warehouse: stockCfg.erpnext_warehouse.trim() || null,
@@ -544,6 +557,28 @@ const SettingsTab: React.FC<{
       setWalletBusy(null)
     }
   }
+  const runCategorySync = async (dryRun: boolean) => {
+    setCategoryError(null)
+    if (!(await save())) return
+    setCategoryBusy(true)
+    try {
+      const res = await fetch("/admin/erpnext/categories/sync", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dry_run: dryRun }),
+      })
+      const body = await res.json()
+      if (!res.ok || body.ok === false) setCategoryError(body.message ?? "category_sync_failed")
+      else if (body.skipped) setCategoryError(body.skipped)
+      else setCategoryReport(body.report)
+    } catch (e) {
+      setCategoryError(e instanceof Error ? e.message : "category_sync_failed")
+    } finally {
+      setCategoryBusy(false)
+    }
+  }
+
   const refreshStockPrices = async () => {
     setRefreshResult(null)
     if (!(await save())) return
@@ -1155,6 +1190,44 @@ const SettingsTab: React.FC<{
           </Button>
           {walletResult ? <Text size="small">{walletResult}</Text> : null}
         </div>
+      </section>
+
+      <section className="rounded border border-ui-border-base p-4">
+        <Heading level="h2">Categories</Heading>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          Keeps product categories nested exactly like ERPNext's Item Group tree, and files every
+          Item under its group's category. ERPNext's root is the top level here. A group with no
+          published products stays off the storefront until it has some. Names, images and hidden
+          categories set here are kept; a group deleted in ERPNext hides its category and deletes
+          nothing. Press Set up ERPNext after switching it on, so saved groups arrive at once;
+          everything else, renames included, follows within ten minutes.
+        </Text>
+        <div className="flex items-center gap-2 mb-3">
+          <Switch checked={syncCategories} onCheckedChange={(v) => setSyncCategories(Boolean(v))} />
+          <Label>Sync Item Groups as categories</Label>
+        </div>
+        <div className="flex items-center gap-2 mb-3">
+          <Switch
+            checked={categoryDirection === "both"}
+            disabled={!syncCategories}
+            onCheckedChange={(v) => setCategoryDirection(v ? "both" : "pull")}
+          />
+          <Label>Also create an Item Group for each new category made here</Label>
+        </div>
+        <Text size="small" className="text-ui-fg-subtle mb-3">
+          Moving such a category moves its group. Categories that already exist stay the store's own,
+          a name here is only a display name, and nothing is deleted in ERPNext.
+        </Text>
+        <div className="flex items-center gap-3">
+          <Button size="small" variant="secondary" onClick={() => runCategorySync(true)} isLoading={categoryBusy}>
+            Preview changes
+          </Button>
+          <Button size="small" variant="secondary" onClick={() => runCategorySync(false)} isLoading={categoryBusy} disabled={!syncCategories}>
+            Sync now
+          </Button>
+          {categoryError ? <Text size="small" className="text-ui-fg-error">{categoryError}</Text> : null}
+        </div>
+        {categoryReport ? <CategoryReportView report={categoryReport} /> : null}
       </section>
 
       <section className="rounded border border-ui-border-base p-4">
@@ -2702,6 +2775,57 @@ const SYNC_PRESETS: SyncPreset[] = [
     ],
   },
 ]
+
+type CategorySyncReport = {
+  at: string
+  dry_run: boolean
+  groups: number
+  created: number
+  adopted: number
+  renamed: number
+  reparented: number
+  updated: number
+  hidden: number
+  products_filed: number
+  products_regrouped: number
+  plan: Array<{ group: string; parent: string | null; action: string; category?: string }>
+  notes: string[]
+}
+
+const CategoryReportView = ({ report }: { report: CategorySyncReport }) => (
+  <div className="mt-3">
+    <Text size="small" weight="plus">
+      {report.dry_run ? "Preview, nothing written" : `Last sync ${new Date(report.at).toLocaleString()}`}: {report.groups} group(s),{" "}
+      {report.created} to create, {report.adopted} adopted, {report.renamed} renamed, {report.reparented} moved,{" "}
+      {report.updated} updated, {report.hidden} hidden, {report.products_filed} product(s) filed
+    </Text>
+    {report.notes.map((n) => (
+      <Text key={n} size="small" className="text-ui-fg-subtle">{n}</Text>
+    ))}
+    <div className="mt-2 max-h-72 overflow-auto rounded border border-ui-border-base">
+      <table className="w-full text-left text-xs">
+        <thead>
+          <tr>
+            <th className="p-2">Item Group</th>
+            <th className="p-2">Parent</th>
+            <th className="p-2">Category</th>
+            <th className="p-2">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {report.plan.map((row) => (
+            <tr key={row.group} className="border-t border-ui-border-base">
+              <td className="p-2">{row.group}</td>
+              <td className="p-2">{row.parent ?? "Top level"}</td>
+              <td className="p-2">{row.category ?? ""}</td>
+              <td className="p-2">{row.action}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+)
 
 const DIRECTION_CHOICE: Record<Direction, { label: string; help: string }> = {
   push: { label: "Medusa → ERPNext", help: "Changes in your store are written to ERPNext." },

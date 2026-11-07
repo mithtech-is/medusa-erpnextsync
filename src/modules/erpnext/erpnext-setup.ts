@@ -11,6 +11,7 @@ import {
     type SyncMode,
 } from "./selection"
 import { SALES_INVOICE_DOCTYPE } from "./invoice-events"
+import { ITEM_GROUP_DOCTYPE } from "./item-groups"
 import {
     ITEM_PRICE_DOCTYPE,
     SALES_ORDER_DOCTYPE,
@@ -353,6 +354,19 @@ export function buildStockWebhooks(args: { warehouse: string; publicUrl: string;
     ]
 }
 
+/**
+ * Categories, ERPNext → Medusa: an Item Group saved or deleted. Unconditioned
+ * and with no selection field: the whole tree is mirrored. A rename fires no
+ * webhook at all, so the scheduled pass catches those.
+ */
+export function buildItemGroupWebhooks(args: { publicUrl: string; secret: string }): Record<string, any>[] {
+    const base = { publicUrl: args.publicUrl, secret: args.secret }
+    return [
+        buildWebhook({ ...base, doctype: ITEM_GROUP_DOCTYPE, event: "on_update", condition: "" }),
+        buildWebhook({ ...base, doctype: ITEM_GROUP_DOCTYPE, event: "on_trash", condition: "" }),
+    ]
+}
+
 /** Prices, ERPNext → Medusa: a selling price on the store's list. */
 export function buildPriceWebhooks(args: { priceList: string; publicUrl: string; secret: string }): Record<string, any>[] {
     const base = { publicUrl: args.publicUrl, secret: args.secret }
@@ -633,6 +647,8 @@ export async function runErpnextSetup(args: {
     prices?: { priceList: string } | null
     /** Wallet sync is on; the credit line as well when `credit` is true. */
     wallet?: { credit: boolean } | null
+    /** Item Groups are mirrored as categories. */
+    categories?: boolean
     /** Customers are sent ERPNext's invoices. */
     invoices?: boolean
     /** DocTypes that hang off a synced one (a Customer's Contact): one
@@ -668,6 +684,7 @@ export async function runErpnextSetup(args: {
         ...(args.stock ? buildStockWebhooks({ warehouse: args.stock.warehouse, publicUrl: args.publicUrl, secret: args.secret }) : []),
         ...(args.prices ? buildPriceWebhooks({ priceList: args.prices.priceList, publicUrl: args.publicUrl, secret: args.secret }) : []),
         ...(args.wallet ? buildWalletWebhooks({ wallet: true, credit: args.wallet.credit, publicUrl: args.publicUrl, secret: args.secret }) : []),
+        ...(args.categories ? buildItemGroupWebhooks({ publicUrl: args.publicUrl, secret: args.secret }) : []),
         ...(args.invoices ? buildInvoiceWebhooks({ publicUrl: args.publicUrl, secret: args.secret }) : []),
         ...(args.secondaries ?? [])
             .filter((dt, i, all) => dt && !underSelection.has(dt) && all.indexOf(dt) === i)

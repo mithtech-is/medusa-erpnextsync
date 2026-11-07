@@ -169,6 +169,12 @@ export const ErpnextSetting = model.define("erpnext_setting", {
     sync_stock: model.boolean().default(false),
     /** Move selling prices on `erpnext_price_list` onto the variants. */
     sync_prices: model.boolean().default(false),
+    /** Mirror ERPNext's Item Group tree as product categories. */
+    sync_categories: model.boolean().default(false),
+    /** "pull", or "both": a category created in Medusa also becomes an Item Group. */
+    category_direction: model.text().default("pull"),
+    /** What the last category pass did. */
+    category_sync_report: model.json().nullable(),
     /** The one ERPNext warehouse that feeds this store. */
     erpnext_warehouse: model.text().nullable(),
     /** The Medusa stock location the levels are written to. */

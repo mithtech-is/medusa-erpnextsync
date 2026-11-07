@@ -3,8 +3,38 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## Unreleased
+## 0.7.0 — 2026-11-07
 
+ERPNext's Item Group tree is the product category tree.
+
+- **Categories nest exactly as Item Groups do.** With **Sync Item Groups as categories** on (Settings →
+  Categories, off by default) every group is one category at the same place in the tree, and ERPNext's
+  root is Medusa's top level. Groups arrive by webhook once **Set up ERPNext** has installed the two new
+  Item Group ones, and a pass every ten minutes catches the rest. **Preview changes** shows the whole plan
+  and writes nothing.
+- **Every Item is filed under its group**, on the pull and the webhook, not only by the scheduled pass.
+  Categories assigned by hand or filled by a host's rule are kept.
+- **A renamed group keeps its category.** Frappe's rename fires no webhook and bumps no `modified`, so the
+  pass matches on the group's `creation` and reads each Item's live group, and a product's stored group
+  name follows.
+- **Empty groups stay off the storefront** (`is_internal`) until they have something published below them.
+  Names and images set in Medusa, and categories hidden by hand, are kept. A group gone from ERPNext hides
+  its category; nothing is deleted.
+- **Two-way, when asked.** Under **Also create an Item Group for each new category made here**, a new
+  category becomes a group and moving one moves its group. Existing categories stay the store's own, a
+  category's name stays a display name, and nothing is deleted in ERPNext.
+- **`protect_edits` on a field pair:** a store edit survives a pull until ERPNext's own value for that
+  field changes. Saving an Item for an unrelated reason no longer flattens an enriched title or description.
+- **A customer pull no longer wipes the rest of the customer's metadata**, which lost `company_id` and with
+  it the GSTIN on the next push.
+- **Pull-only customer fields now arrive for customers the store pushed.** Group, territory and ERPNext's
+  name were skipped as "our own write"; they are read back after the push.
+
+Also in this release, from `main` since 0.6.5:
+
+- **An order's GST no longer arrives inside the delivery line.** A 59.50 item with 100 delivery and
+  10.71 GST reached ERPNext as a shipping charge of 110.71 and no tax: the total reconciled and the
+  books did not. Tax now arrives as tax.
 - **Wallet and line of credit, both ways** (`src/modules/erpnext/wallet-sync.ts`). With
   `@mithtech-medusa/wallet-loc` on the store and the `customer_wallet` app on ERPNext, every
   main-bucket wallet row becomes a `Wallet Transaction` there through the app's idempotent

@@ -5,6 +5,7 @@ import {
     ON_UPDATE_CONDITION,
     buildCustomField,
     buildInvoiceWebhooks,
+    buildItemGroupWebhooks,
     buildPriceWebhooks,
     buildStockWebhooks,
     buildWebhook,
@@ -437,5 +438,13 @@ describe("Set up ERPNext for gateway settlements", () => {
         const withMasters = await runErpnextSetup({ client: on.client, doctypes: [], publicUrl: "http://x", secret: "s", settlements: masters })
         expect(withMasters.items.map((i) => i.kind)).toEqual(["account", "account", "supplier", "item"])
         expect(withMasters.ok).toBe(true)
+    })
+})
+
+describe("Item Group webhooks", () => {
+    it("fire on any saved or deleted group, with no selection field to read", () => {
+        const hooks = buildItemGroupWebhooks({ publicUrl: "https://shop.example.com", secret: "s" })
+        expect(hooks.map((h) => h.name)).toEqual(["Medusa Sync: Item Group on_update", "Medusa Sync: Item Group on_trash"])
+        expect(hooks.every((h) => h.condition === "" && h.webhook_doctype === "Item Group")).toBe(true)
     })
 })

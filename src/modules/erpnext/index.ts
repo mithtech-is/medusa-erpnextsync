@@ -8,6 +8,7 @@ import {
     applyMapping,
     getByPath,
     isTemplatePath,
+    protectedPaths,
     unmetRequired,
     type MappingDirection,
     type MappingFieldPair,
@@ -51,6 +52,23 @@ import {
 } from "./selection"
 import { FrappeWebhookBody, frappeEventId, planFrappeEvent, supersededBy, withRepublish } from "./frappe-webhook"
 import { makeFrappeClient, type FrappeClient } from "./frappe-client"
+import {
+    GROUP_CREATED_KEY,
+    GROUP_KEY,
+    ITEM_GROUP_DOCTYPE,
+    planCategoryPush,
+    type CategoryRow,
+    type ItemGroup,
+} from "./item-groups"
+import {
+    CATEGORIES_SYNCED_EVENT,
+    fetchItemGroups,
+    fileProductsUnderGroups,
+    reportChanged,
+    runCategorySync,
+    type CategorySyncDeps,
+    type CategorySyncReport,
+} from "./item-group-sync"
 import {
     addressesOfCustomer,
     addressesOfOrder,
@@ -306,6 +324,8 @@ type SaveSettingsInput = {
     /** Stock and prices, ERPNext → Medusa (Phase 3). */
     sync_stock?: boolean
     sync_prices?: boolean
+    sync_categories?: boolean
+    category_direction?: string | null
     erpnext_warehouse?: string | null
     medusa_stock_location_id?: string | null
     erpnext_safety_stock?: number | null
@@ -346,6 +366,8 @@ type ActiveConfig = {
     request_timeout_ms: number
     sync_stock: boolean
     sync_prices: boolean
+    sync_categories: boolean
+    category_direction: "pull" | "both"
     erpnext_warehouse: string | null
     medusa_stock_location_id: string | null
     erpnext_safety_stock: number
@@ -1223,6 +1245,8 @@ class ErpnextModuleService extends MedusaService({
         if ("erpnext_wallet_bank_account" in input) {
             patch.erpnext_wallet_bank_account = String(input.erpnext_wallet_bank_account ?? "").trim() || null
         }
+        if (input.sync_categories !== undefined) patch.sync_categories = Boolean(input.sync_categories)
+        if ("category_direction" in input) patch.category_direction = categoryDirectionOf(input)
         if (input.erpnext_safety_stock !== undefined) {
             patch.erpnext_safety_stock = Math.max(0, Math.floor(Number(input.erpnext_safety_stock) || 0))
         }
@@ -1321,6 +1345,8 @@ class ErpnextModuleService extends MedusaService({
             request_timeout_ms: row?.request_timeout_ms ?? DEFAULT_TIMEOUT_MS,
             sync_stock: Boolean(row?.sync_stock),
             sync_prices: Boolean(row?.sync_prices),
+            sync_categories: Boolean(row?.sync_categories),
+            category_direction: categoryDirectionOf(row),
             erpnext_warehouse: row?.erpnext_warehouse || null,
             medusa_stock_location_id: row?.medusa_stock_location_id || null,
             erpnext_safety_stock: Number(row?.erpnext_safety_stock) || 0,
@@ -4126,7 +4152,47 @@ class ErpnextModuleService extends MedusaService({
             const out = await this.syncAddress(client, written.name, input)
             if (out.ok === false) notes.push(`address ${input.id}: ${out.reason}`)
         }
+        const readBack = await this.readBackCustomer(ctx, written.name)
+        if (readBack) notes.push(readBack)
         return { ok: true, status: "success", action: written.created ? "created" : "updated", name: written.name, notes }
+    }
+
+    /**
+     * What ERPNext decided for a customer this store pushed: its group, its
+     * territory, the name it files it under. The Customer's next save is by
+     * the API user, so the pull and the webhook both skip it as our own write
+     * and pull-only fields would never arrive. They are read here instead.
+     * Writing them fires customer.updated once more; that push changes nothing
+     * and this finds nothing new, so it stops. Returns a note, never throws:
+     * the push itself succeeded.
+     */
+    private async readBackCustomer(ctx: PushContext, name: string): Promise<string | null> {
+        const { client, mapping, record } = ctx
+        if (record?.id == null || String(mapping.direction).toLowerCase() !== "both") return null
+        const pullOnly = ((mapping.field_mappings ?? []) as MappingFieldPair[]).filter((p) => p.direction === "pull")
+        if (!pullOnly.length) return null
+        try {
+            const res = await client.get(`/api/resource/Customer/${encodeURIComponent(name)}`)
+            if (res.ok === false || !res.data) return `read back of ${name}: ${res.ok === false ? res.error : "no document"}`
+            const out = applyMapping({
+                direction: "pull",
+                fields: pullOnly,
+                mappingDirection: "pull",
+                source: res.data,
+                options: await this.transformOptions(),
+            })
+            if (out.ok === false) return null
+            const wanted = out.payload.metadata ?? {}
+            const current = record.metadata ?? {}
+            if (!Object.keys(wanted).some((k) => wanted[k] !== current[k])) return null
+            const customers: any = ctx.container?.resolve?.(Modules.CUSTOMER)
+            if (!customers) return null
+            const [fresh] = await customers.listCustomers({ id: String(record.id) }, { take: 1, select: ["id", "metadata"] })
+            await customers.updateCustomers({ id: String(record.id) }, { metadata: { ...(fresh?.metadata ?? {}), ...wanted } })
+            return null
+        } catch (err: any) {
+            return `read back of ${name}: ${describeError(err)}`
+        }
     }
 
     /** Put the store's email and phone on a customer's primary Contact. */
@@ -4696,6 +4762,161 @@ class ErpnextModuleService extends MedusaService({
      * A Stock Ledger Entry, a Sales Order submit/cancel or an Item Price
      * arriving from ERPNext (see stock-prices.ts for the rules).
      */
+    /** A webhook on a DocType with one handler rather than a mapping. */
+    private async applyHandlerEvent(body: FrappeWebhookBody, scope: any): Promise<{ via: "frappe"; event: string; results: any[] }> {
+        if (isWalletOrCreditDoctype(body.doctype)) return this.applyWalletEvent(body, scope)
+        return body.doctype === ITEM_GROUP_DOCTYPE
+            ? this.applyItemGroupEvent(body, scope)
+            : this.applyStockPriceEvent(body, scope)
+    }
+
+    private async categorySyncDeps(scope: any): Promise<CategorySyncDeps | null> {
+        const rest = await this.restClient(CATEGORY_SYNC_TIMEOUT_MS)
+        if (!rest) return null
+        const mappings: any[] = await this.listEnabledPullMappings()
+        const catalogue = mappings.find((m: any) => m.doctype === "Item" && m.medusa_entity === "product")
+        const pairs = ((catalogue?.field_mappings ?? []) as MappingFieldPair[])
+        const groupPath = pairs.find((p) => p.erpnext_field === "item_group")?.medusa_path ?? ""
+        const keyPath = String(catalogue?.key_medusa_field ?? "")
+        return {
+            client: rest.client,
+            productModule: scope.resolve(Modules.PRODUCT),
+            query: scope.resolve(ContainerRegistrationKeys.QUERY),
+            baseUrl: rest.cfg.erpnext_url,
+            groupKey: groupPath.startsWith("metadata.") ? groupPath.slice("metadata.".length) : "category",
+            itemCodeKey: keyPath.startsWith("metadata.") ? keyPath.slice("metadata.".length) : LINK_KEY,
+        }
+    }
+
+    /**
+     * Bring the category tree and the products' filing in step with ERPNext.
+     * A dry run reports what would change and works with the switch off, so
+     * the plan can be read before turning it on.
+     */
+    async syncCategories(
+        scope: any,
+        options: { dryRun?: boolean; mode?: "full" | "quick"; groups?: ItemGroup[] } = {},
+    ): Promise<CategorySyncReport | { skipped: string }> {
+        const cfg = await this.getActiveConfig()
+        const dryRun = Boolean(options.dryRun)
+        if (!dryRun && !cfg.sync_categories) return { skipped: "category sync is off in Settings" }
+        if (!dryRun && !cfg.enable_sync) return { skipped: "sync is off in Settings" }
+        const deps = await this.categorySyncDeps(scope)
+        if (!deps) return { skipped: "ERPNext URL or API credentials are not configured" }
+        if (_categorySyncRunning) return { skipped: "a category sync is already running" }
+        _categorySyncRunning = true
+        try {
+            const report = await runCategorySync(deps, options)
+            if (!dryRun) {
+                const row: any = await this.findSettingsRow()
+                if (row && (options.mode ?? "full") === "full") {
+                    await this.updateErpnextSettings([{ id: row.id, category_sync_report: report as any }])
+                }
+                if (reportChanged(report)) {
+                    try {
+                        await scope.resolve(Modules.EVENT_BUS).emit({ name: CATEGORIES_SYNCED_EVENT, data: { mode: report.mode } })
+                    } catch (err: any) {
+                        console.warn("[erpnext] categories-synced event not sent:", describeError(err))
+                    }
+                }
+            }
+            return report
+        } finally {
+            _categorySyncRunning = false
+        }
+    }
+
+    private async applyItemGroupEvent(body: FrappeWebhookBody, scope: any): Promise<{ via: "frappe"; event: string; results: any[] }> {
+        const event = body.event
+        const done = (r: any) => ({ via: "frappe" as const, event, results: [r] })
+        const cfg = await this.getActiveConfig()
+        if (!cfg.sync_categories) return done({ ok: true, action: "skipped", reason: "category sync is off in Settings" })
+        if (isOwnWrite(body.doc, await this.apiUserEmail())) return done({ ok: true, action: "skipped", reason: "our own write coming home" })
+        const deps = await this.categorySyncDeps(scope)
+        if (!deps) return done({ ok: true, action: "skipped", reason: "ERPNext URL or API credentials are not configured" })
+        // Delivered before the delete has committed, the list may still hold it.
+        const groups = (await fetchItemGroups(deps.client)).filter((g) => event !== "on_trash" || g.name !== body.name)
+        const out = await this.syncCategories(scope, { mode: "quick", groups })
+        if ("skipped" in out) return done({ ok: true, action: "skipped", reason: out.skipped })
+        return done({ ok: true, action: reportChanged(out) ? "updated" : "skipped", reason: `${out.created} created, ${out.reparented} moved, ${out.hidden} hidden` })
+    }
+
+    /** File products under their groups' categories. Never throws: the product is written. */
+    private async fileProducts(scope: any, rows: Array<{ productId: string; group: string }>): Promise<void> {
+        if (!rows.length) return
+        try {
+            const cfg = await this.getActiveConfig()
+            if (!cfg.sync_categories) return
+            const deps = await this.categorySyncDeps(scope)
+            if (!deps) return
+            const out = await fileProductsUnderGroups(deps, rows)
+            if (out.missing.length) console.warn(`[erpnext] no category for Item Group(s): ${out.missing.join(", ")}`)
+        } catch (err: any) {
+            console.warn("[erpnext] filing products under their groups failed:", describeError(err))
+        }
+    }
+
+    /**
+     * A category changed in Medusa, under two-way category sync: a new one
+     * becomes an Item Group, a moved one moves its group. See `planCategoryPush`.
+     */
+    async pushCategoryChange(scope: any, eventName: string, categoryId: string): Promise<{ ok: boolean; action: string; reason?: string; name?: string }> {
+        const cfg = await this.getActiveConfig()
+        if (!cfg.enable_sync || !cfg.sync_categories || cfg.category_direction !== "both") {
+            return { ok: true, action: "skipped", reason: "two-way category sync is off" }
+        }
+        if (OUTBOUND_PAUSED) return { ok: true, action: "skipped", reason: OUTBOUND_PAUSED_MESSAGE }
+        const rest = await this.restClient()
+        if (!rest) return { ok: true, action: "skipped", reason: "ERPNext is not configured" }
+        const client = rest.client
+        const products: any = scope.resolve(Modules.PRODUCT)
+        const select = ["id", "name", "handle", "parent_category_id", "metadata"]
+        const [category]: CategoryRow[] = await products.listProductCategories({ id: categoryId }, { select, take: 1 })
+        if (!category) return { ok: true, action: "skipped", reason: "the category is gone" }
+        const [parentCategory]: CategoryRow[] = category.parent_category_id
+            ? await products.listProductCategories({ id: category.parent_category_id }, { select, take: 1 })
+            : []
+        const groups = await fetchItemGroups(client)
+        const rootGroup = groups.find((g) => !g.parent_item_group)?.name
+        if (!rootGroup) return { ok: false, action: "failed", reason: "ERPNext has no root Item Group" }
+        const own = category.metadata?.[GROUP_KEY]
+        const remote = typeof own === "string" ? groups.find((g) => g.name === own) : undefined
+        const plan = planCategoryPush({
+            event: eventName,
+            category,
+            parentCategory: parentCategory ?? null,
+            rootGroup,
+            remoteParent: remote?.parent_item_group ?? null,
+        })
+        if (plan.action === "skip") return { ok: true, action: "skipped", reason: plan.reason }
+
+        // ERPNext's tree only nests under a group flagged as one.
+        const parent = groups.find((g) => g.name === plan.parentGroup)
+        if (parent && plan.parentGroup !== rootGroup && !Number(parent.is_group ?? 0)) {
+            const flagged = await client.put(`/api/resource/${encodeURIComponent(ITEM_GROUP_DOCTYPE)}/${encodeURIComponent(plan.parentGroup)}`, { is_group: 1 })
+            if (flagged.ok === false) return { ok: false, action: "failed", reason: flagged.error }
+        }
+        if (plan.action === "reparent") {
+            const moved = await client.put(`/api/resource/${encodeURIComponent(ITEM_GROUP_DOCTYPE)}/${encodeURIComponent(plan.group)}`, {
+                parent_item_group: plan.parentGroup,
+            })
+            return moved.ok === false ? { ok: false, action: "failed", reason: moved.error } : { ok: true, action: "moved", name: plan.group }
+        }
+        const existing = groups.find((g) => g.name === plan.doc.item_group_name)
+        let name = existing?.name ?? null
+        let creation = existing?.creation ?? null
+        if (!existing) {
+            const created = await client.post(`/api/resource/${encodeURIComponent(ITEM_GROUP_DOCTYPE)}`, plan.doc)
+            if (created.ok === false) return { ok: false, action: "failed", reason: created.error }
+            name = String(created.data?.name ?? plan.doc.item_group_name)
+            creation = created.data?.creation ?? null
+        }
+        await products.updateProductCategories(category.id, {
+            metadata: { ...(category.metadata ?? {}), [GROUP_KEY]: name, ...(creation ? { [GROUP_CREATED_KEY]: String(creation) } : {}) },
+        })
+        return { ok: true, action: existing ? "linked" : "created", name: name ?? undefined }
+    }
+
     private async applyStockPriceEvent(
         body: FrappeWebhookBody,
         scope: any,
@@ -5432,7 +5653,11 @@ class ErpnextModuleService extends MedusaService({
         const fields = uniqueFrappeFields(
             mapping.field_mappings as MappingFieldPair[],
             mapping.key_erpnext_field,
-            ["modified_by", ...(underSelection ? [SELECTION_FIELD] : [])],
+            [
+                "modified_by",
+                ...(underSelection ? [SELECTION_FIELD] : []),
+                ...(mapping.doctype === "Item" && mapping.medusa_entity === "product" && cfg.sync_categories ? ["item_group"] : []),
+            ],
         )
         const qs = new URLSearchParams()
         qs.set("limit_page_length", String(mapping.pull_page_size ?? 200))
@@ -5510,6 +5735,8 @@ class ErpnextModuleService extends MedusaService({
             }
         }
         const linksToRecord: Array<{ erpnext_name: string; medusa_id: string; remote_direction: string | null }> = []
+        const toFile: Array<{ productId: string; group: string }> = []
+        const protect = protectedPaths(mapping.field_mappings as MappingFieldPair[])
         const records: PullRecordOutcome[] = []
         const note = (r: PullRecordOutcome) => {
             if (records.length < PULL_RECORDS_SHOWN) records.push(r)
@@ -5555,6 +5782,7 @@ class ErpnextModuleService extends MedusaService({
                 mapping.key_medusa_field,
                 keyValue,
                 payload,
+                { protect },
             )
             if (!outcome.ok) {
                 errors += 1
@@ -5565,6 +5793,7 @@ class ErpnextModuleService extends MedusaService({
             else updated += 1
             note({ name: rowName, action: outcome.created ? "created" : "updated", medusa_id: outcome.id })
             if (outcome.id) {
+                if (row?.item_group) toFile.push({ productId: outcome.id, group: String(row.item_group) })
                 linksToRecord.push({
                     erpnext_name: rowName,
                     medusa_id: outcome.id,
@@ -5583,6 +5812,7 @@ class ErpnextModuleService extends MedusaService({
                 ...(link.remote_direction !== null ? { remote_direction: link.remote_direction } : {}),
             })
         }
+        await this.fileProducts(args.container, toFile)
         // The pulled Items' stock and prices come along, so a product is
         // sellable at the right level and price from its first pull.
         if (linksToRecord.length && mapping.medusa_entity === "product") {
@@ -5758,9 +5988,9 @@ class ErpnextModuleService extends MedusaService({
         ) {
             return { ok: true, status: "skipped", event_id, message: "already being applied" }
         }
-        // Stock, prices, the wallet and the credit line have no mapping:
-        // each has one handler and a Settings switch.
-        const stockOrPrice = isStockOrPriceDoctype(body.doctype) || isWalletOrCreditDoctype(body.doctype)
+        // Stock, prices, the wallet, the credit line and the Item Group tree
+        // have no mapping: each has one handler and a Settings switch.
+        const stockOrPrice = hasOwnHandler(body.doctype)
         const invoiceEvent = body.doctype === SALES_INVOICE_DOCTYPE
         const mappings = stockOrPrice || invoiceEvent
             ? []
@@ -5826,9 +6056,7 @@ class ErpnextModuleService extends MedusaService({
             const outcome = invoiceEvent
                 ? await this.applySalesInvoiceEvent(body, args.scope)
                 : stockOrPrice
-                  ? isWalletOrCreditDoctype(body.doctype)
-                      ? await this.applyWalletEvent(body, args.scope)
-                      : await this.applyStockPriceEvent(body, args.scope)
+                  ? await this.applyHandlerEvent(body, args.scope)
                   : await this.applyFrappeEvent(body, args.scope, mappings)
             const failed = outcome.results.filter((r: any) => r.ok === false)
             const message = failed.length
@@ -5977,7 +6205,9 @@ class ErpnextModuleService extends MedusaService({
                 continue
             }
             const payload = withRepublish(transform.payload, plan.republish)
-            const outcome = await entity.upsertByKey(scope, mapping.key_medusa_field, plan.key, payload)
+            const outcome = await entity.upsertByKey(scope, mapping.key_medusa_field, plan.key, payload, {
+                protect: protectedPaths(mapping.field_mappings as MappingFieldPair[]),
+            })
             if (outcome.ok && outcome.id) {
                 await this.recordLink({
                     doctype: body.doctype,
@@ -5989,6 +6219,9 @@ class ErpnextModuleService extends MedusaService({
                     remote_direction,
                 })
                 if (mapping.medusa_entity === "product" && body.doctype === "Item") {
+                    if (body.doc?.item_group) {
+                        await this.fileProducts(scope, [{ productId: outcome.id, group: String(body.doc.item_group) }])
+                    }
                     try {
                         const gst = await this.refreshProductGst(scope, [body.name])
                         if (gst.notes.length) console.warn("[erpnext] GST rate:", gst.notes.join("; "))
@@ -6071,11 +6304,9 @@ class ErpnextModuleService extends MedusaService({
             return { ok: false, status: "failed", error, poison: true }
         }
         try {
-            const outcome = isWalletOrCreditDoctype(parsed.data.doctype)
-                ? await this.applyWalletEvent(parsed.data, scope)
-                : isStockOrPriceDoctype(parsed.data.doctype)
-                  ? await this.applyStockPriceEvent(parsed.data, scope)
-                  : await this.applyFrappeEvent(parsed.data, scope)
+            const outcome = hasOwnHandler(parsed.data.doctype)
+                ? await this.applyHandlerEvent(parsed.data, scope)
+                : await this.applyFrappeEvent(parsed.data, scope)
             const failed = outcome.results.filter((r: any) => r.ok === false)
             const error = failed.length ? String(failed[0].error ?? "failed").slice(0, ERROR_TRUNCATE) : null
             await this.updateErpnextSyncEvents({
@@ -6108,6 +6339,12 @@ class ErpnextModuleService extends MedusaService({
      */
     async planInbound(body: FrappeWebhookBody): Promise<any> {
         if (isWalletOrCreditDoctype(body.doctype)) return this.planWalletInbound(body)
+        if (body.doctype === ITEM_GROUP_DOCTYPE) {
+            const cfg = await this.getActiveConfig()
+            return cfg.sync_categories
+                ? { action: "category tree", reads: "the Item Group tree, then category by category" }
+                : { action: "skipped", reason: "category sync is off in Settings" }
+        }
         // Stock and prices have no mapping; say what would move and why.
         if (isStockOrPriceDoctype(body.doctype)) {
             const cfg = await this.getActiveConfig()
@@ -6958,6 +7195,7 @@ class ErpnextModuleService extends MedusaService({
             stock: cfg.sync_stock && cfg.erpnext_warehouse ? { warehouse: cfg.erpnext_warehouse } : null,
             prices: cfg.sync_prices && sellingList ? { priceList: sellingList } : null,
             wallet: cfg.sync_wallet ? { credit: cfg.sync_credit } : null,
+            categories: cfg.sync_categories,
             invoices: receivesErpInvoices(row as any),
             secondaries: (await this.listEnabledPullMappings()).flatMap((m: any) =>
                 normalizeSecondaryDoctypes(m.secondary_doctypes, m.doctype).map((s) => s.doctype),
@@ -7131,6 +7369,10 @@ let _countryCache: { map: Map<string, string>; expiresAt: number } | null = null
 const _companySiteCache = new Map<string, { address: string | null; state: string | null; countryCode: string | null; expiresAt: number }>()
 /** Item Tax Templates' GST rate and company, per process. */
 let _itemTaxTemplateCache: { map: Map<string, { rate: number | null; company: string | null }>; expiresAt: number } | null = null
+/** A worker runs one category pass at a time; each reads thousands of rows. */
+let _categorySyncRunning = false
+const CATEGORY_SYNC_TIMEOUT_MS = 120_000
+
 /** Item Groups' taxes and parent, per process. */
 const _itemGroupCache = new Map<string, { taxes: ItemTaxRow[]; parent: string | null; expiresAt: number }>()
 /** How ERPNext rounds a sales document's total, per currency, per process. */
@@ -7274,10 +7516,22 @@ function walletSettingsView(row: any) {
 }
 
 /** Stock and prices, as the settings page shows them. */
+/** DocTypes a webhook hands to one fixed handler rather than to a mapping. */
+function hasOwnHandler(doctype: string): boolean {
+    return isStockOrPriceDoctype(doctype) || isWalletOrCreditDoctype(doctype) || doctype === ITEM_GROUP_DOCTYPE
+}
+
+function categoryDirectionOf(row: any): "pull" | "both" {
+    return row?.category_direction === "both" ? "both" : "pull"
+}
+
 function stockSettingsView(row: any) {
     return {
         sync_stock: Boolean(row?.sync_stock),
         sync_prices: Boolean(row?.sync_prices),
+        sync_categories: Boolean(row?.sync_categories),
+        category_direction: categoryDirectionOf(row),
+        category_sync_report: row?.category_sync_report ?? null,
         erpnext_warehouse: row?.erpnext_warehouse ?? null,
         medusa_stock_location_id: row?.medusa_stock_location_id ?? null,
         erpnext_safety_stock: Number(row?.erpnext_safety_stock) || 0,
@@ -7406,6 +7660,7 @@ function validateFieldMappings(raw: any[]): MappingFieldPair[] {
         if (r.default_push !== undefined) pair.default_push = r.default_push
         if (r.default_pull !== undefined) pair.default_pull = r.default_pull
         if (typeof r.required === "boolean") pair.required = r.required
+        if (r.protect_edits === true) pair.protect_edits = true
         out.push(pair)
     }
     return out
