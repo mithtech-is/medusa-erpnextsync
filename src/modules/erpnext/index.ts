@@ -66,6 +66,7 @@ import {
     fileProductsUnderGroups,
     reportChanged,
     runCategorySync,
+    CategorySyncBusy,
     type CategorySyncDeps,
     type CategorySyncReport,
 } from "./item-group-sync"
@@ -4783,6 +4784,7 @@ class ErpnextModuleService extends MedusaService({
             productModule: scope.resolve(Modules.PRODUCT),
             query: scope.resolve(ContainerRegistrationKeys.QUERY),
             baseUrl: rest.cfg.erpnext_url,
+            pg: scope.resolve(ContainerRegistrationKeys.PG_CONNECTION, { allowUnregistered: true }),
             groupKey: groupPath.startsWith("metadata.") ? groupPath.slice("metadata.".length) : "category",
             itemCodeKey: keyPath.startsWith("metadata.") ? keyPath.slice("metadata.".length) : LINK_KEY,
         }
@@ -4803,8 +4805,6 @@ class ErpnextModuleService extends MedusaService({
         if (!dryRun && !cfg.enable_sync) return { skipped: "sync is off in Settings" }
         const deps = await this.categorySyncDeps(scope)
         if (!deps) return { skipped: "ERPNext URL or API credentials are not configured" }
-        if (_categorySyncRunning) return { skipped: "a category sync is already running" }
-        _categorySyncRunning = true
         try {
             const report = await runCategorySync(deps, options)
             if (!dryRun) {
@@ -4821,8 +4821,9 @@ class ErpnextModuleService extends MedusaService({
                 }
             }
             return report
-        } finally {
-            _categorySyncRunning = false
+        } catch (err) {
+            if (err instanceof CategorySyncBusy) return { skipped: err.message }
+            throw err
         }
     }
 
@@ -7369,8 +7370,6 @@ let _countryCache: { map: Map<string, string>; expiresAt: number } | null = null
 const _companySiteCache = new Map<string, { address: string | null; state: string | null; countryCode: string | null; expiresAt: number }>()
 /** Item Tax Templates' GST rate and company, per process. */
 let _itemTaxTemplateCache: { map: Map<string, { rate: number | null; company: string | null }>; expiresAt: number } | null = null
-/** A worker runs one category pass at a time; each reads thousands of rows. */
-let _categorySyncRunning = false
 const CATEGORY_SYNC_TIMEOUT_MS = 120_000
 
 /** Item Groups' taxes and parent, per process. */

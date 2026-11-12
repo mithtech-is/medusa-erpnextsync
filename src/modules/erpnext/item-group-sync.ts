@@ -1,5 +1,6 @@
 import type { FrappeClient } from "./frappe-client"
 import {
+    DUPLICATE_OF_KEY,
     ITEM_GROUP_DOCTYPE,
     KEEP_VISIBLE_KEY,
     categoryForGroup,
@@ -57,6 +58,41 @@ export type CategorySyncDeps = {
     groupKey: string
     /** The metadata key that names a product's Item. */
     itemCodeKey: string
+    /** Medusa's Postgres connection (knex). With it, only one process at a time writes the tree. */
+    pg?: any
+}
+
+/** Another pass holds the tree: this process's, or (through Postgres) another process's. */
+export class CategorySyncBusy extends Error {
+    constructor() {
+        super("a category sync is already running")
+    }
+}
+
+const LOCK_KEY = "erpnext:category-sync"
+let _running = false
+
+/**
+ * One writer for the category tree. The webhook handler (server process), the
+ * scheduled pass (worker process) and the product pull's quick pass all create
+ * categories, and each reads the tree before it writes: two at once make two
+ * categories, and so two pages, for one group. A flag only covers one process,
+ * so Postgres' advisory lock covers the rest.
+ */
+export async function withCategoryLock<T>(deps: Pick<CategorySyncDeps, "pg">, fn: () => Promise<T>): Promise<T> {
+    if (_running) throw new CategorySyncBusy()
+    _running = true
+    try {
+        if (!deps.pg?.transaction) return await fn()
+        return await deps.pg.transaction(async (trx: any) => {
+            const res = await trx.raw("select pg_try_advisory_xact_lock(hashtext(?)) as ok", [LOCK_KEY])
+            const row = Array.isArray(res?.rows) ? res.rows[0] : Array.isArray(res) ? res[0] : res
+            if (!row?.ok) throw new CategorySyncBusy()
+            return await fn()
+        })
+    } finally {
+        _running = false
+    }
 }
 
 function resourcePath(doctype: string): string {
@@ -158,6 +194,14 @@ export async function runCategorySync(
     deps: CategorySyncDeps,
     options: { dryRun?: boolean; mode?: "full" | "quick"; groups?: ItemGroup[] } = {},
 ): Promise<CategorySyncReport> {
+    if (options.dryRun) return runCategorySyncLocked(deps, options)
+    return withCategoryLock(deps, () => runCategorySyncLocked(deps, options))
+}
+
+async function runCategorySyncLocked(
+    deps: CategorySyncDeps,
+    options: { dryRun?: boolean; mode?: "full" | "quick"; groups?: ItemGroup[] },
+): Promise<CategorySyncReport> {
     const dryRun = Boolean(options.dryRun)
     const mode = options.mode ?? "full"
     const report = emptyReport(mode, dryRun)
@@ -231,7 +275,7 @@ export async function runCategorySync(
     for (const gone of plan.hide) {
         if (!dryRun) await productModule.updateProductCategories(gone.id, { is_active: false, metadata: gone.metadata })
         report.hidden++
-        report.notes.push(`${gone.group}: no longer in ERPNext; category "${gone.name}" hidden`)
+        if (!gone.metadata[DUPLICATE_OF_KEY]) report.notes.push(`${gone.group}: no longer in ERPNext; category "${gone.name}" hidden`)
     }
 
     if (mode === "full") {
@@ -247,6 +291,7 @@ export async function runCategorySync(
         for (const [group, count] of filing.unmapped) {
             report.notes.push(`${count} product(s) name group "${group}", which is not in ERPNext's tree`)
         }
+        if (filing.gone) report.notes.push(`${filing.gone} product(s) whose Item is no longer in ERPNext; left as they are`)
         for (const { categoryIds, productIds } of filing.batches) {
             for (let i = 0; i < productIds.length; i += UPDATE_BATCH) {
                 const ids = productIds.slice(i, i + UPDATE_BATCH)
@@ -281,7 +326,12 @@ export async function fileProductsUnderGroups(
     let categories = await listCategories(productModule)
     const unknown = wanted.some((r) => !categoryForGroup(categories, r.group))
     if (unknown) {
-        await runCategorySync(deps, { mode: "quick" })
+        try {
+            await runCategorySync(deps, { mode: "quick" })
+        } catch (err) {
+            // Another pass is writing the tree; it files this product on its own run.
+            if (!(err instanceof CategorySyncBusy)) throw err
+        }
         categories = await listCategories(productModule)
     }
     const mirroredIds = new Set(categories.filter((c) => groupNamesOf(c.metadata).length).map((c) => c.id))

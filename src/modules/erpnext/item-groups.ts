@@ -50,6 +50,8 @@ export const IMAGE_KEY = "image_url"
 /** Set on categories the sync hid, so only those are revived automatically. */
 export const SYNC_HIDDEN_KEY = "erpnext_sync_hidden"
 export const SYNC_INTERNAL_KEY = "erpnext_sync_internal"
+/** On a second category the sync hid because another one already mirrors the same group. */
+export const DUPLICATE_OF_KEY = "erpnext_duplicate_of"
 /** On a category that stays on the store with nothing to sell: its page is linked from code. */
 export const KEEP_VISIBLE_KEY = "erpnext_keep_visible"
 /**
@@ -114,13 +116,23 @@ export function groupNamesOf(metadata: Record<string, any> | null | undefined): 
     ]
 }
 
-/** The category a group's products go to, and whether it is the group's own. */
-export function categoryForGroup<T extends { metadata?: Record<string, any> | null }>(
+/**
+ * The category a group's products go to, and whether it is the group's own.
+ * When several categories claim one group (a race between two passes made
+ * them), the pick is the same on every run: a shown one before a hidden one,
+ * then the oldest id. Reading whichever the database lists first would flip
+ * between runs.
+ */
+export function categoryForGroup<T extends { id?: string; is_active?: boolean; is_internal?: boolean; metadata?: Record<string, any> | null }>(
     categories: T[],
     group: string,
 ): { category: T; primary: boolean } | null {
-    const own = categories.find((c) => c.metadata?.[GROUP_KEY] === group)
-    if (own) return { category: own, primary: true }
+    const owners = categories.filter((c) => c.metadata?.[GROUP_KEY] === group)
+    if (owners.length) {
+        const rank = (c: T) => (c.is_active === false ? 2 : 0) + (c.is_internal ? 1 : 0)
+        const own = [...owners].sort((a, b) => rank(a) - rank(b) || String(a.id ?? "").localeCompare(String(b.id ?? "")))[0]
+        return { category: own, primary: true }
+    }
     const merged = categories.find((c) => groupNamesOf(c.metadata).includes(group))
     return merged ? { category: merged, primary: false } : null
 }
@@ -141,16 +153,25 @@ export function sameGroupName(a: string, b: string): boolean {
     return norm(a) !== "" && norm(a) === norm(b)
 }
 
-/** URL handle for a group name, unique against `taken`. */
-export function uniqueHandle(name: string, taken: Set<string>, parentHandle?: string | null): string {
-    const base =
+function slug(name: string): string {
+    return (
         String(name ?? "")
             .toLowerCase()
             .replace(/&/g, " and ")
             .replace(/[^a-z0-9]+/g, "-")
             .replace(/^-+|-+$/g, "") || "category"
+    )
+}
+
+/**
+ * URL handle for a group name, unique against `taken`. `parentHandle` may be
+ * a parent's handle or, for a parent not yet created, its group name: both
+ * are slugged, so a handle never carries a space or a capital.
+ */
+export function uniqueHandle(name: string, taken: Set<string>, parentHandle?: string | null): string {
+    const base = slug(name)
     if (!taken.has(base)) return base
-    const scoped = parentHandle ? `${parentHandle}-${base}` : base
+    const scoped = parentHandle ? `${slug(parentHandle)}-${base}` : base
     if (!taken.has(scoped)) return scoped
     let n = 2
     while (taken.has(`${scoped}-${n}`)) n++
@@ -348,6 +369,8 @@ export function planCategoryTree(args: {
             if (show && category.is_internal && meta[SYNC_INTERNAL_KEY]) {
                 patch.is_internal = false
                 delete meta[SYNC_INTERNAL_KEY]
+            } else if (show && (category.is_internal || category.is_active === false) && !category.metadata?.[SYNC_INTERNAL_KEY] && !category.metadata?.[SYNC_HIDDEN_KEY]) {
+                notes.push(`${g.name}: has products to sell but its category "${category.name}" is hidden, not by this sync; left hidden`)
             } else if (!show && !category.is_internal) {
                 patch.is_internal = true
                 meta[SYNC_INTERNAL_KEY] = true
@@ -375,9 +398,34 @@ export function planCategoryTree(args: {
     const hide: CategoryHide[] = []
     for (const c of categories) {
         const own = c.metadata?.[GROUP_KEY]
-        if (typeof own !== "string" || !own || claimed.has(c.id) || roots.has(own) || groupNames.has(own)) continue
+        if (typeof own !== "string" || !own || claimed.has(c.id) || roots.has(own)) continue
         if (c.is_active === false) continue
+        if (groupNames.has(own)) {
+            // A second category for a group that is mirrored: two pages for one group.
+            const canonical = categoryForGroup(categories, own)?.category
+            if (!canonical || canonical.id === c.id) continue
+            hide.push({
+                id: c.id,
+                name: c.name,
+                group: own,
+                metadata: { ...(c.metadata ?? {}), [SYNC_HIDDEN_KEY]: true, [DUPLICATE_OF_KEY]: canonical.id },
+            })
+            notes.push(`${own}: category "${c.name}" (${c.handle}) duplicates "${canonical.name}" (${canonical.handle}); hidden`)
+            continue
+        }
         hide.push({ id: c.id, name: c.name, group: own, metadata: { ...(c.metadata ?? {}), [SYNC_HIDDEN_KEY]: true } })
+    }
+
+    const outside = categories.filter(
+        (c) => c.is_active !== false && !c.is_internal && typeof c.metadata?.[GROUP_KEY] !== "string" && !groupNamesOf(c.metadata).length && !isLocalOnly(c.metadata),
+    )
+    if (outside.length) {
+        notes.push(
+            `${outside.length} shown categor${outside.length === 1 ? "y is" : "ies are"} not an Item Group: ${outside
+                .slice(0, 5)
+                .map((c) => c.handle)
+                .join(", ")}${outside.length > 5 ? ", ..." : ""}`,
+        )
     }
 
     return { planned, hide, notes }
@@ -410,6 +458,8 @@ export type FilingPlan = {
     /** Products whose stored group name went stale: a rename touches no Item's `modified`. */
     staleGroups: Array<{ id: string; group: string }>
     unmapped: Map<string, number>
+    /** Products whose Item ERPNext no longer lists: kept where they are, and counted apart from a group missing from the tree. */
+    gone: number
 }
 
 /**
@@ -428,6 +478,7 @@ export function planProductFiling(args: {
     const batches = new Map<string, { categoryIds: string[]; productIds: string[] }>()
     const staleGroups: Array<{ id: string; group: string }> = []
     const unmapped = new Map<string, number>()
+    let gone = 0
     for (const p of args.products) {
         if (!p.item_code) continue
         const stored = typeof p.metadata?.[args.groupKey] === "string" ? String(p.metadata[args.groupKey]) : ""
@@ -437,7 +488,8 @@ export function planProductFiling(args: {
         if (live && live !== stored) staleGroups.push({ id: p.id, group: live })
         const target = args.categoryOfGroup.get(group)
         if (!target) {
-            unmapped.set(group, (unmapped.get(group) ?? 0) + 1)
+            if (live) unmapped.set(group, (unmapped.get(group) ?? 0) + 1)
+            else gone++
             continue
         }
         const next = nextCategoryIds((p.categories ?? []).map((c) => c.id), target, args.mirroredIds)
@@ -447,7 +499,7 @@ export function planProductFiling(args: {
         batch.productIds.push(p.id)
         batches.set(key, batch)
     }
-    return { batches: [...batches.values()], staleGroups, unmapped }
+    return { batches: [...batches.values()], staleGroups, unmapped, gone }
 }
 
 export type CategoryPushPlan =
