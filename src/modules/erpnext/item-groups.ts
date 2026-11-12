@@ -120,7 +120,7 @@ export function groupNamesOf(metadata: Record<string, any> | null | undefined): 
  * The category a group's products go to, and whether it is the group's own.
  * When several categories claim one group (a race between two passes made
  * them), the pick is the same on every run: a shown one before a hidden one,
- * then the oldest id. Reading whichever the database lists first would flip
+ * then the lowest id. Reading whichever the database lists first would flip
  * between runs.
  */
 export function categoryForGroup<T extends { id?: string; is_active?: boolean; is_internal?: boolean; metadata?: Record<string, any> | null }>(
