@@ -152,6 +152,7 @@ import {
     createPaymentEntry,
     findPaymentEntry,
     bookBeforeCancel,
+    cannotEverBeBooked,
     mappingHandlesEvent,
     normalizePaymentModes,
     planOrderAccounting,
@@ -5471,6 +5472,9 @@ class ErpnextModuleService extends MedusaService({
         })
         if (missing) {
             const made = await this.pushSalesDocument(ctx, { paidInFull: true })
+            if (made.ok === false && cannotEverBeBooked(made.error)) {
+                return { ok: true, status: "skipped", reason: `nothing in ERPNext to cancel: ${made.error}` }
+            }
             if (made.ok === false) return { ok: false, error: `not cancelled: the paid order could not be booked first: ${made.error}`, httpStatus: made.httpStatus }
             if (made.status === "success") notes.push(...(made.notes ?? []))
         }
