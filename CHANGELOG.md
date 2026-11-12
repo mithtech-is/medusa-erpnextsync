@@ -3,6 +3,24 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.7.1 — unreleased
+
+One writer and one category per Item Group.
+
+- **Two passes no longer write the tree at once.** The webhook handler (server), the ten-minute pass (worker)
+  and the product pull's quick pass each read the tree, then create what is missing, so two at once could make
+  two categories, and two pages, for one group. They now share a Postgres advisory lock; the loser is
+  skipped and the next pass picks up.
+- **A group with two categories keeps one.** The pick is the same on every run (shown before hidden, then
+  the lowest id). The other is hidden with `erpnext_duplicate_of` and its products move to the one that stays.
+  Before, the first row the database listed won, and the second was never touched.
+- **A handle scoped by a parent made in the same pass** is slugged (`generator-spares-batteries`), not the raw
+  group name.
+- **The category report says more**: shown categories that are no Item Group, mirrored categories hidden by
+  hand while their group has products to sell (left hidden), and products whose Item is gone from ERPNext,
+  no longer counted as a group missing from the tree.
+- `npm run test:integration` runs the sync against the real Product module and a local Postgres.
+
 ## 0.7.0 — 2026-11-07
 
 ERPNext's Item Group tree is the product category tree.
