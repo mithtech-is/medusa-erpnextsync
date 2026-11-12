@@ -89,8 +89,19 @@ export type PricePlan =
     | { action: "remove"; item_code: string; currency: string }
     | { action: "skip"; reason: string }
 
-/** What one Item Price event means for the store. `today` is the site's date, YYYY-MM-DD. */
-export function planItemPrice(args: { event: string; doc: any; priceList: string | null | undefined; today: string }): PricePlan {
+/**
+ * What one Item Price event means for the store. `today` is the site's date,
+ * YYYY-MM-DD. `stockUom` is the Item's stock unit when known: a price quoted
+ * per another unit (a Box, a Carton) is not the variant's price, and without
+ * the Item's unit conversion the store cannot turn it into one.
+ */
+export function planItemPrice(args: {
+    event: string
+    doc: any
+    priceList: string | null | undefined
+    today: string
+    stockUom?: string | null
+}): PricePlan {
     const doc = args.doc ?? {}
     const list = String(args.priceList ?? "").trim()
     if (!list) return { action: "skip", reason: "no selling price list configured" }
@@ -101,6 +112,9 @@ export function planItemPrice(args: { event: string; doc: any; priceList: string
     if (!currency) return { action: "skip", reason: "no currency on the price" }
     if (doc.customer) return { action: "skip", reason: "a customer-specific price" }
     if (num(doc.packing_unit) > 1) return { action: "skip", reason: `a quantity tier (packing unit ${doc.packing_unit})` }
+    const uom = String(doc.uom ?? "").trim()
+    const stockUom = String(args.stockUom ?? "").trim()
+    if (uom && stockUom && uom !== stockUom) return { action: "skip", reason: `priced per ${uom}, not per stock unit ${stockUom}` }
     if (doc.selling !== undefined && doc.selling !== null && !num(doc.selling)) return { action: "skip", reason: "not a selling price" }
     if (args.event === "on_trash") return { action: "remove", item_code, currency }
     const from = String(doc.valid_from ?? "").slice(0, 10)

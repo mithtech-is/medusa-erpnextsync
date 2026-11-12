@@ -4960,6 +4960,7 @@ class ErpnextModuleService extends MedusaService({
                     doc: body.doc,
                     priceList,
                     today: formatInZone(new Date(), await this.siteTimezone(), false),
+                    stockUom: rest && body.doc?.uom ? await this.stockUomOf(rest.client, String(body.doc.item_code ?? "")) : null,
                 })
                 if (plan.action === "skip") results.push({ ok: true, action: "skipped", reason: plan.reason })
                 else if (!stockAllowedByLink(await this.findLink("Item", plan.item_code, "product"))) {
@@ -4989,6 +4990,17 @@ class ErpnextModuleService extends MedusaService({
         }
         const { data } = await query.graph({ entity: "variant", fields, filters: { sku: itemCode } })
         return data?.[0] ?? null
+    }
+
+    /** An Item's stock unit, or null when ERPNext does not answer. */
+    private async stockUomOf(client: FrappeClient, itemCode: string): Promise<string | null> {
+        if (!itemCode) return null
+        const res = await client.get("/api/method/frappe.client.get_value", {
+            doctype: "Item",
+            filters: itemCode,
+            fieldname: JSON.stringify(["stock_uom"]),
+        })
+        return res.ok === true && res.data?.stock_uom ? String(res.data.stock_uom) : null
     }
 
     /** Read the Bin at the store's warehouse and write the sellable level. */
@@ -5369,16 +5381,26 @@ class ErpnextModuleService extends MedusaService({
                         "selling",
                         "customer",
                         "packing_unit",
+                        "uom",
                         "valid_from",
                         "valid_upto",
                     ]),
+                    // Oldest start first, so when an Item has several current prices the latest one is written last and stands.
+                    order_by: "valid_from asc, modified asc",
                     limit_page_length: String(codes.length * 4),
                 })
+                const units = await rest.client.get("/api/resource/Item", {
+                    filters: JSON.stringify([["name", "in", codes]]),
+                    fields: JSON.stringify(["name", "stock_uom"]),
+                    limit_page_length: String(codes.length),
+                })
+                const stockUomOf = new Map<string, string>()
+                for (const i of units.ok === true && Array.isArray(units.data) ? units.data : []) stockUomOf.set(String(i.name), String(i.stock_uom ?? ""))
                 if (rows.ok === false) failed += 1
                 else {
                     const today = formatInZone(new Date(), await this.siteTimezone(), false)
                     for (const doc of Array.isArray(rows.data) ? rows.data : []) {
-                        const plan = planItemPrice({ event: "on_update", doc, priceList, today })
+                        const plan = planItemPrice({ event: "on_update", doc, priceList, today, stockUom: stockUomOf.get(String(doc.item_code)) ?? null })
                         if (plan.action === "skip") continue
                         const r = await this.applyVariantPrice(scope, plan)
                         note(r, `price ${plan.item_code}`)
