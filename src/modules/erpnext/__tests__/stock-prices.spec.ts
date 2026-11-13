@@ -113,3 +113,27 @@ describe("stockAllowedByLink", () => {
         expect(stockAllowedByLink({ remote_direction: "" })).toBe(false)
     })
 })
+
+describe("planItemPrice and the unit a price is quoted in", () => {
+    const today = "2026-11-01"
+    const doc = { item_code: "A1", price_list: "Standard Selling", currency: "INR", price_list_rate: 100, selling: 1 }
+
+    it("skips a price quoted per another unit than the Item's stock unit", () => {
+        const plan = planItemPrice({ event: "on_update", doc: { ...doc, uom: "Box" }, priceList: "Standard Selling", today, stockUom: "Nos" })
+        expect(plan).toEqual({ action: "skip", reason: "priced per Box, not per stock unit Nos" })
+    })
+
+    it("does not let a per-Box price delete the per-Nos price on trash", () => {
+        const plan = planItemPrice({ event: "on_trash", doc: { ...doc, uom: "Box" }, priceList: "Standard Selling", today, stockUom: "Nos" })
+        expect(plan.action).toBe("skip")
+    })
+
+    it("takes a price in the stock unit, and one with no unit stated", () => {
+        expect(planItemPrice({ event: "on_update", doc: { ...doc, uom: "Nos" }, priceList: "Standard Selling", today, stockUom: "Nos" }).action).toBe("set")
+        expect(planItemPrice({ event: "on_update", doc, priceList: "Standard Selling", today, stockUom: "Nos" }).action).toBe("set")
+    })
+
+    it("takes the price as before when the stock unit is not known", () => {
+        expect(planItemPrice({ event: "on_update", doc: { ...doc, uom: "Box" }, priceList: "Standard Selling", today }).action).toBe("set")
+    })
+})

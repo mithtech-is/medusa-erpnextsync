@@ -3,6 +3,7 @@ import { Modules } from "@medusajs/framework/utils"
 import { ERPNEXT_MODULE } from "../modules/erpnext"
 import { OUTBOUND_PAUSED } from "../modules/erpnext/outbound"
 import { getMedusaEntity } from "../modules/erpnext/registry"
+import { customersMissingOnFrappe } from "../modules/erpnext/customer-recovery"
 
 /**
  * F3 — Tier-2.D reconciliation cron.
@@ -23,8 +24,8 @@ import { getMedusaEntity } from "../modules/erpnext/registry"
  *      operators see the drift on the admin Events tab.
  *
  *   2) MISSING-ON-FRAPPE RECOVERY (Customer mapping only) — finds
- *      Medusa customers that have KYC fully approved (= they SHOULD
- *      exist on Frappe) but DON'T, and re-pushes them via
+ *      Medusa customers with an email that Frappe has neither by email
+ *      nor under their link's name, and re-pushes them via
  *      `pushViaMapping`. This is the recovery path for cases like
  *      "Frappe customer was accidentally deleted" or "Frappe came
  *      back from a restore that missed some rows" — the hourly
@@ -38,8 +39,8 @@ import { getMedusaEntity } from "../modules/erpnext/registry"
  *      generalize the helper.
  *
  * NB drift detection is a CHEAP cron — two count queries per mapping.
- * The missing-on-Frappe recovery makes one bulk list call per side
- * (capped at 1000 rows) plus one push per gap. The comparison is
+ * The missing-on-Frappe recovery makes one paged list per side
+ * plus one push per gap. The comparison is
  * approximate; a drift > 5% is almost always a real bug.
  */
 export default async function reconciliation(container: MedusaContainer) {
@@ -156,7 +157,8 @@ export default async function reconciliation(container: MedusaContainer) {
         } else {
             console.log(
                 `[erpnext-recon] customer recovery: checked=${result.checked} ` +
-                    `missing=${result.missing} re-pushed=${result.repushed} failed=${result.failed}`,
+                    `missing=${result.missing} re-pushed=${result.repushed} failed=${result.failed}` +
+                    (result.notPushed ? ` not-pushed=${result.notPushed}` : ""),
             )
         }
     } catch (err: any) {
@@ -188,17 +190,15 @@ export default async function reconciliation(container: MedusaContainer) {
 }
 
 /**
- * Find Medusa customers that are KYC-approved (= should be on Frappe)
- * but aren't, and re-push them via the canonical Customer mapping.
+ * Find Medusa customers that Frappe has lost, and re-push them via the
+ * canonical Customer mapping.
  *
  * Discovery is by lowercase email comparison against the FULL Frappe
  * Customer list (no pull_filter applied) — so we don't keep re-pushing
  * mithtech-only customers that exist on Frappe but are filtered out
  * of the Medusa-side pull view. We only act on "truly missing" rows.
  *
- * Bounded by `limit=1000` on each side. For tenants with >1000
- * customers we'd page; the page-1 win covers the operator-deleted-
- * by-accident case which is the primary recovery scenario.
+ * Each side is read a page of 1000 at a time.
  */
 async function recoverMissingCustomersOnFrappe(
     container: MedusaContainer,
@@ -208,6 +208,7 @@ async function recoverMissingCustomersOnFrappe(
     missing: number
     repushed: number
     failed: number
+    notPushed?: number
     skipped?: string
 }> {
     const limit = 1000
@@ -259,58 +260,61 @@ async function recoverMissingCustomersOnFrappe(
         }
     }
 
-    // 2. List Medusa customers whose metadata.kyc_fully_approved_at is
-    //    set — same gate as the live push subscriber (erpnext-
-    //    forward.ts). Pre-KYC customers are intentionally Medusa-only
-    //    and would be skipped by the live push anyway.
+    // 2. List every Medusa customer with an email. No KYC gate: the live
+    //    push dropped it, and the mapping's own trigger and the selection
+    //    field decide again when each push runs.
     const customerModule: any = container.resolve(Modules.CUSTOMER)
-    const allMedusa: any[] = await customerModule.listCustomers(
-        {},
-        { take: limit, relations: ["addresses"] },
-    )
-    const eligible = allMedusa.filter(
-        (c: any) =>
-            c?.email &&
-            (c.metadata as Record<string, unknown> | undefined)
-                ?.kyc_fully_approved_at,
-    )
-    if (eligible.length === 0) {
-        return { checked: 0, missing: 0, repushed: 0, failed: 0 }
+    const allMedusa: any[] = []
+    for (let skip = 0; ; skip += limit) {
+        const page: any[] = await customerModule.listCustomers({}, { take: limit, skip, relations: ["addresses"] })
+        allMedusa.push(...page)
+        if (page.length < limit) break
     }
 
-    // 3. List Frappe Customer rows. NO pull_filter — we want "does
-    //    Frappe have this row at all" not "does the pull-visible
-    //    subset include it" (otherwise we'd re-push mithtech-only
-    //    rows forever).
-    const fieldsJson = encodeURIComponent(JSON.stringify(["email_id"]))
-    const frappeUrl = `${cfg.erpnext_url}/api/resource/Customer?fields=${fieldsJson}&limit_page_length=${limit}`
-    const frappeRes = await fetch(frappeUrl, {
-        method: "GET",
-        headers: {
-            Authorization: `token ${creds.api_key}:${creds.api_secret}`,
-        },
-        signal: AbortSignal.timeout(cfg.request_timeout_ms ?? 30000),
-    })
-    if (!frappeRes.ok) {
-        return {
-            checked: eligible.length,
-            missing: 0,
-            repushed: 0,
-            failed: 0,
-            skipped: `frappe-list-${frappeRes.status}`,
+    // 3. List every Frappe Customer, no pull_filter: the question is
+    //    whether Frappe has the row at all, not whether the pull sees it.
+    const frappeEmails = new Set<string>()
+    const frappeNames = new Set<string>()
+    for (let start = 0; ; start += limit) {
+        const fieldsJson = encodeURIComponent(JSON.stringify(["name", "email_id"]))
+        const frappeUrl = `${cfg.erpnext_url}/api/resource/Customer?fields=${fieldsJson}&limit_page_length=${limit}&limit_start=${start}`
+        const frappeRes = await fetch(frappeUrl, {
+            method: "GET",
+            headers: {
+                Authorization: `token ${creds.api_key}:${creds.api_secret}`,
+            },
+            signal: AbortSignal.timeout(cfg.request_timeout_ms ?? 30000),
+        })
+        if (!frappeRes.ok) {
+            return { checked: allMedusa.length, missing: 0, repushed: 0, failed: 0, skipped: `frappe-list-${frappeRes.status}` }
         }
+        const frappeJson = await frappeRes.json().catch(() => ({}))
+        const rows: any[] = Array.isArray(frappeJson?.data) ? frappeJson.data : []
+        for (const r of rows) {
+            if (r?.name) frappeNames.add(String(r.name))
+            const email = String(r?.email_id ?? "").toLowerCase()
+            if (email) frappeEmails.add(email)
+        }
+        if (rows.length < limit) break
     }
-    const frappeJson = await frappeRes.json().catch(() => ({}))
-    const frappeEmails = new Set<string>(
-        (frappeJson?.data ?? [])
-            .map((r: any) => String(r?.email_id ?? "").toLowerCase())
-            .filter((e: string) => Boolean(e)),
-    )
 
-    // 4. Diff.
-    const missing = eligible.filter(
-        (c: any) => !frappeEmails.has(String(c.email).toLowerCase()),
-    )
+    // 4. Diff. A customer whose link still names a Frappe Customer is
+    //    present even when Frappe holds no email for it.
+    const links: any[] = []
+    for (let skip = 0; ; skip += limit) {
+        const page: any[] = await erpnext.listErpnextLinks(
+            { doctype: "Customer", medusa_entity: "customer", state: "active" },
+            { take: limit, skip },
+        )
+        links.push(...page)
+        if (page.length < limit) break
+    }
+    const { eligible, missing } = customersMissingOnFrappe({
+        customers: allMedusa,
+        frappeEmails,
+        frappeNames,
+        links: links.map((l: any) => ({ medusa_id: String(l.medusa_id), erpnext_name: String(l.erpnext_name) })),
+    })
     if (missing.length === 0) {
         return {
             checked: eligible.length,
@@ -333,6 +337,7 @@ async function recoverMissingCustomersOnFrappe(
     const customerDescriptor = getMedusaEntity("customer")
     let repushed = 0
     let failed = 0
+    let skipped = 0
     for (const c of missing) {
         try {
             const hydrated = customerDescriptor
@@ -347,6 +352,9 @@ async function recoverMissingCustomersOnFrappe(
             })
             if (r?.ok && r.status === "success") {
                 repushed += 1
+            } else if (r?.ok && r.status === "skipped") {
+                // The mapping's trigger or the selection field said no: not a failure.
+                skipped += 1
             } else {
                 failed += 1
                 console.warn(
@@ -368,6 +376,7 @@ async function recoverMissingCustomersOnFrappe(
         missing: missing.length,
         repushed,
         failed,
+        notPushed: skipped,
     }
 }
 

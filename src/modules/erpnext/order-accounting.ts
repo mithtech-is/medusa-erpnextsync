@@ -227,6 +227,15 @@ export function bookBeforeCancel(args: {
     return captured.some((p) => !args.bookedPaymentIds.includes(String(p.id)))
 }
 
+/**
+ * A booking that failed because a line has no ERPNext Item cannot succeed
+ * on any retry: the product never reaches ERPNext. Cancelling such an order
+ * has nothing to unwind and must not stay failed.
+ */
+export function cannotEverBeBooked(error: unknown): boolean {
+    return /^no ERPNext Item for: /.test(String(error ?? ""))
+}
+
 /** True when a push mapping listening on `events` handles `eventName`. A refund is handled where cancellation is. */
 export function mappingHandlesEvent(events: unknown, eventName: string): boolean {
     if (!Array.isArray(events)) return false

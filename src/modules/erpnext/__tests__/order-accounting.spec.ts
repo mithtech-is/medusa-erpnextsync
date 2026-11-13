@@ -4,6 +4,7 @@ import type { FrappeClient, FrappeResult } from "../frappe-client"
 import {
     CANCEL_ORDER,
     bookBeforeCancel,
+    cannotEverBeBooked,
     DEFAULT_PAYMENT_MODES,
     cancelStep,
     createPaymentEntry,
@@ -375,5 +376,17 @@ describe("a paid order cancelled before ERPNext had all of it", () => {
         const cod = [{ id: "pay_2", amount: 500, provider_id: "pp_cod" }]
         expect(bookBeforeCancel({ ...all, payments: cod, hasSalesOrder: false, hasInvoice: false, bookedPaymentIds: [] })).toBe(true)
         expect(bookBeforeCancel({ ...all, payments: cod, hasInvoice: false, bookedPaymentIds: [] })).toBe(false)
+    })
+})
+
+describe("an order that can never be booked", () => {
+    it("is recognised by the line with no ERPNext Item, which no retry can fix", () => {
+        expect(cannotEverBeBooked("no ERPNext Item for: dg-86867653")).toBe(true)
+    })
+
+    it("is not any other failure, which a retry may still clear", () => {
+        expect(cannotEverBeBooked("Sales Order SAL-ORD-1 not submitted: HTTP 503")).toBe(false)
+        expect(cannotEverBeBooked("no Mode of Payment for payment provider pp_x; map it")).toBe(false)
+        expect(cannotEverBeBooked(undefined)).toBe(false)
     })
 })
