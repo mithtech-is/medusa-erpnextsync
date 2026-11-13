@@ -3,6 +3,23 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
+## 0.7.2 — unreleased
+
+Sync audit fixes: customers, cancellations and prices.
+
+- **A customer lost in ERPNext is pushed again.** The hourly recovery pass only looked at customers with a KYC
+  approval mark, which stores without KYC never have, so it checked none. It now checks every customer with an
+  email, reads both sides in pages, and counts a customer whose link still names an ERPNext Customer as present.
+  A customer the mapping chooses not to push counts as not-pushed, not failed.
+- **Cancelling or refunding an order that cannot be booked ends as skipped.** A paid order is booked before it
+  is unwound, so a line with no ERPNext Item failed the same way on every retry and ended poisoned. That
+  failure now ends the cancel with the reason.
+- **A selling price quoted per another unit is not the variant's price.** An Item Price in Box replaced the
+  per-Nos base price, and its delete removed it. Prices in a unit other than the Item's stock unit are
+  skipped; of two valid prices in the stock unit, the latest `valid_from` stands.
+- **Reseeding the shipped mappings works on a new install.** A missing default is added switched off, so it
+  passes the rehearse-then-enable gate instead of failing it; one that is already running keeps running.
+
 ## 0.7.1 — unreleased
 
 One writer and one category per Item Group.
