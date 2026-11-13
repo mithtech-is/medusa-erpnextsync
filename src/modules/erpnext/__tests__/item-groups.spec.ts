@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
     GROUP_CREATED_KEY,
     GROUP_IMAGE_KEY,
+    DUPLICATE_OF_KEY,
     GROUP_KEY,
     IMAGE_KEY,
     IS_GROUP_KEY,
@@ -137,6 +138,21 @@ describe("what the sync leaves alone", () => {
         })
         expect(planOf(r, "A").patch!.is_active).toBe(true)
         expect(planOf(r, "B").patch?.is_active).toBeUndefined()
+    })
+
+    it("keeps the navigation marks and the hand-set visibility that Splendx writes on a category", () => {
+        const groups = [group(ROOT, null), group("Engine"), group("To sort")]
+        const marks = { nav_featured: true, nav_order: 2, nav_top: true, erpnext_keep_visible: true, erpnext_keep_hidden: true }
+        const r = planCategoryTree({
+            groups,
+            categories: [
+                mirrored("e", "Engine", { metadata: marks }),
+                mirrored("t", "To sort", { is_internal: true, metadata: { erpnext_keep_hidden: true } }),
+            ],
+            visible: new Set(["Engine", "To sort"]),
+        })
+        expect(planOf(r, "Engine").patch?.metadata ?? marks).toMatchObject(marks)
+        expect(planOf(r, "To sort").patch?.is_internal).toBeUndefined()
     })
 
     it("does not touch categories that came from no group, or adopt one filled by rule", () => {
@@ -304,5 +320,98 @@ describe("a category changed in Medusa", () => {
         const parent = mirrored("p", "Generator")
         expect(planCategoryPush({ event: updated, category: c, parentCategory: parent, rootGroup: ROOT, remoteParent: ROOT })).toEqual({ action: "reparent", group: "Filter", parentGroup: "Generator" })
         expect(planCategoryPush({ event: updated, category: c, parentCategory: parent, rootGroup: ROOT, remoteParent: "Generator" }).action).toBe("skip")
+    })
+})
+
+describe("two categories for one group", () => {
+    const groups = [group(ROOT, null), group("Batteries")]
+    const a = mirrored("pcat_a", "Batteries", { handle: "batteries" })
+    const b = mirrored("pcat_b", "Batteries", { handle: "batteries-2" })
+
+    it("keeps one and hides the other, whatever order the database lists them in", () => {
+        for (const categories of [[a, b], [b, a]]) {
+            const r = planCategoryTree({ groups, categories, visible: new Set(["Batteries"]) })
+            expect(planOf(r, "Batteries")).toMatchObject({ id: "pcat_a", action: "keep" })
+            expect(r.hide).toEqual([
+                expect.objectContaining({ id: "pcat_b", metadata: expect.objectContaining({ [SYNC_HIDDEN_KEY]: true, [DUPLICATE_OF_KEY]: "pcat_a" }) }),
+            ])
+            expect(r.notes.join(" ")).toContain("duplicates")
+        }
+    })
+
+    it("prefers the shown category over a hidden one, even with the later id", () => {
+        const r = planCategoryTree({
+            groups,
+            categories: [{ ...a, is_active: false }, b],
+            visible: new Set(["Batteries"]),
+        })
+        expect(planOf(r, "Batteries").id).toBe("pcat_b")
+        expect(r.hide).toEqual([])
+    })
+
+    it("does not hide the duplicate again once it is hidden", () => {
+        const r = planCategoryTree({ groups, categories: [a, { ...b, is_active: false }], visible: new Set(["Batteries"]) })
+        expect(r.hide).toEqual([])
+    })
+
+    it("never revives the duplicate it hid", () => {
+        const hidden = { ...b, is_active: false, metadata: { ...b.metadata, [SYNC_HIDDEN_KEY]: true, [DUPLICATE_OF_KEY]: "pcat_a" } }
+        const r = planCategoryTree({ groups, categories: [a, hidden], visible: new Set(["Batteries"]) })
+        expect(r.planned.filter((p) => p.id === "pcat_b")).toEqual([])
+    })
+})
+
+describe("a handle for a category whose parent is made in the same pass", () => {
+    it("is scoped by the parent's slug, never its raw group name", () => {
+        expect(uniqueHandle("Batteries", new Set(["batteries"]), "Generator Spares")).toBe("generator-spares-batteries")
+        const groups = [group(ROOT, null), group("Generator Spares", ROOT, { is_group: 1 }), group("Batteries", "Generator Spares")]
+        const r = planCategoryTree({ groups, categories: [cat("old", "Other", { handle: "batteries" })], visible: new Set(["Generator Spares", "Batteries"]) })
+        expect(planOf(r, "Batteries").create!.handle).toBe("generator-spares-batteries")
+    })
+})
+
+describe("drift the report tells about", () => {
+    it("names a shown category that is no Item Group, and ignores the store's own rule-filled ones", () => {
+        const r = planCategoryTree({
+            groups: [group(ROOT, null), group("Engine")],
+            categories: [mirrored("e", "Engine"), cat("legacy", "Engines", { handle: "gen-engine" }), cat("kw", "Cables", { metadata: { match_keywords: ["cable"] } })],
+            visible: new Set(["Engine"]),
+        })
+        expect(r.notes).toEqual(["1 shown category is not an Item Group: gen-engine"])
+    })
+
+    it("says so when a group with products has a category hidden by hand, and leaves it hidden", () => {
+        const r = planCategoryTree({
+            groups: [group(ROOT, null), group("Generator")],
+            categories: [mirrored("g", "Generators", { is_internal: true, metadata: { [GROUP_KEY]: "Generator", [GROUP_CREATED_KEY]: "created-Generator" } })],
+            visible: new Set(["Generator"]),
+        })
+        expect(r.notes.join(" ")).toContain("Generator: has products to sell but its category")
+        expect(planOf(r, "Generator").patch?.is_internal).toBeUndefined()
+    })
+
+    it("stays quiet about a category the sync hid itself", () => {
+        const r = planCategoryTree({
+            groups: [group(ROOT, null), group("Generator")],
+            categories: [mirrored("g", "Generator", { is_internal: true, metadata: { [GROUP_KEY]: "Generator", [GROUP_CREATED_KEY]: "created-Generator", [SYNC_INTERNAL_KEY]: true } })],
+            visible: new Set(["Generator"]),
+        })
+        expect(r.notes).toEqual([])
+        expect(planOf(r, "Generator").patch?.is_internal).toBe(false)
+    })
+
+    it("counts products whose Item is gone apart from a group missing from the tree", () => {
+        const plan = planProductFiling({
+            categoryOfGroup: new Map([["Engine", "engine"]]),
+            mirroredIds: new Set(["engine"]),
+            groupKey: "category",
+            products: [
+                { id: "a", item_code: "A", metadata: { category: "Oil & Lubricants" }, categories: [] },
+                { id: "b", item_code: "B", metadata: {}, categories: [] },
+            ],
+            itemGroups: new Map([["B", "Nope"]]),
+        })
+        expect(plan.gone).toBe(1)
+        expect([...plan.unmapped]).toEqual([["Nope", 1]])
     })
 })

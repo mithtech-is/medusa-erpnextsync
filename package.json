@@ -25,7 +25,8 @@
     "prepare": "medusa plugin:build || true",
     "test": "vitest run",
     "test:watch": "vitest",
-    "rehearsal": "vitest run -c vitest.rehearsal.config.ts"
+    "rehearsal": "vitest run -c vitest.rehearsal.config.ts",
+    "test:integration": "vitest run -c vitest.integration.config.ts"
   },
   "exports": {
     "./package.json": "./package.json",
