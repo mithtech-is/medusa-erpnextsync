@@ -21,7 +21,7 @@ import { formatInvoiceNumber, receivesErpInvoices, storeNumbers } from "./invoic
 import { formatInZone } from "./mapping-engine"
 import { invoiceKey, storageFor } from "./invoice-storage"
 import * as breakerRules from "./breaker"
-import { mayEnable, signatureOf } from "./signature"
+import { enabledOnSeed, mayEnable, signatureOf } from "./signature"
 import {
     buildAutofill,
     type AutofillResult,
@@ -2696,7 +2696,7 @@ class ErpnextModuleService extends MedusaService({
                     id: existingRow?.id,
                     name: existingRow?.name ?? m.name,
                     description: m.description,
-                    enabled: m.enabled,
+                    enabled: enabledOnSeed(existingRow, m.enabled),
                     medusa_entity: m.medusa_entity,
                     doctype: m.doctype,
                     direction: m.direction,

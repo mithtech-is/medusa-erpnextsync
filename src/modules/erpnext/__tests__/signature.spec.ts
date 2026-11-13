@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { isUntouchedDefault, mayEnable, signatureOf } from "../signature"
+import { enabledOnSeed, isUntouchedDefault, mayEnable, signatureOf } from "../signature"
 
 const mapping = (over: Record<string, any> = {}) => ({
     medusa_entity: "customer",
@@ -190,5 +190,23 @@ describe("fixed-value fields in the signature", () => {
             ],
         }
         expect(signatureOf(constant as any)).not.toBe(signatureOf(mapped as any))
+    })
+})
+
+describe("reseeding a shipped default", () => {
+    it("adds a missing default switched off, since nothing here has rehearsed it", () => {
+        expect(enabledOnSeed(null, true)).toBe(false)
+    })
+
+    it("leaves a default that is switched off, switched off", () => {
+        expect(enabledOnSeed({ enabled: false }, true)).toBe(false)
+    })
+
+    it("keeps a running default running", () => {
+        expect(enabledOnSeed({ enabled: true }, true)).toBe(true)
+    })
+
+    it("still switches off a running default the shipped copy has turned off", () => {
+        expect(enabledOnSeed({ enabled: true }, false)).toBe(false)
     })
 })
