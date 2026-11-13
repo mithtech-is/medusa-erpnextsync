@@ -140,6 +140,21 @@ describe("what the sync leaves alone", () => {
         expect(planOf(r, "B").patch?.is_active).toBeUndefined()
     })
 
+    it("keeps the navigation marks and the hand-set visibility that Splendx writes on a category", () => {
+        const groups = [group(ROOT, null), group("Engine"), group("To sort")]
+        const marks = { nav_featured: true, nav_order: 2, nav_top: true, erpnext_keep_visible: true, erpnext_keep_hidden: true }
+        const r = planCategoryTree({
+            groups,
+            categories: [
+                mirrored("e", "Engine", { metadata: marks }),
+                mirrored("t", "To sort", { is_internal: true, metadata: { erpnext_keep_hidden: true } }),
+            ],
+            visible: new Set(["Engine", "To sort"]),
+        })
+        expect(planOf(r, "Engine").patch?.metadata ?? marks).toMatchObject(marks)
+        expect(planOf(r, "To sort").patch?.is_internal).toBeUndefined()
+    })
+
     it("does not touch categories that came from no group, or adopt one filled by rule", () => {
         const groups = [group(ROOT, null), group("Tools")]
         const r = planCategoryTree({
