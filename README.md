@@ -365,3 +365,18 @@ plugin build drops it silently. `route-folders.spec.ts` guards this.
 
 Phase 1 (catalogue, ERPNext → Medusa over core Webhooks) is built and
 verified locally against a Frappe 16 bench. See `CHANGELOG.md`.
+
+## Feature flags (optional)
+
+This plugin can read GrowthBook flags through `@mithtech-medusa/growthbook`. That plugin is an optional peer: if it is not installed, every flag is off and nothing else changes. Do not add a second GrowthBook client.
+
+Resolve the container service as optional and treat "missing" as off:
+
+```ts
+const growthbook = container.resolve("growthbook", { allowUnregistered: true }) as
+  | { isOn(key: string, ctx?: { customerId?: string | null }): Promise<boolean> }
+  | undefined
+const on = growthbook ? await growthbook.isOn("<app>.<flag-name>", { customerId }) : false
+```
+
+Flag keys are `<app>.<name>` (ADR-011) and every flag defaults off. Pass a Medusa customer ID as `customerId`: the service hashes it, and it never reaches GrowthBook. Clients read flags from the host's `GET /store/flags`, not from this plugin.
