@@ -3,7 +3,7 @@
 All notable changes to `@mithtech-medusa/plugin-erpnext`. Versions follow semver; `medusaRange` in
 `factory.extension.yaml` is the tested range, not a guess.
 
-## 0.7.2 — unreleased
+## 0.7.2 — 2026-11-13
 
 Sync audit fixes: customers, cancellations and prices.
 
@@ -20,7 +20,7 @@ Sync audit fixes: customers, cancellations and prices.
 - **Reseeding the shipped mappings works on a new install.** A missing default is added switched off, so it
   passes the rehearse-then-enable gate instead of failing it; one that is already running keeps running.
 
-## 0.7.1 — unreleased
+## 0.7.1 — 2026-11-13 (released with 0.7.2)
 
 One writer and one category per Item Group.
 
