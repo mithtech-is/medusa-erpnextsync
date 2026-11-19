@@ -1,5 +1,7 @@
 # Product images ERPNext → Medusa
 
+Parked 2026-11-19: no new features on the direct plugin; review against the Holisto-IEP v2 mapping engine (wave 2).
+
 **Deferred from:** Phase 3 (entity breadth)
 **Belongs to:** a later phase, alongside the versioned default mappings
 **Side:** both systems. This file is the ERPNext half; the plugin repo's

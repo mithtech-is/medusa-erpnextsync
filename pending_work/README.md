@@ -56,6 +56,9 @@ The working order is:
 | `2026-09-14-item-product-field-map.md` | the Item ↔ product field map |
 | `2026-09-14-store-payments-and-gateway-settlement.md` | Phase 2 — orders, invoices, payments over REST |
 | `2026-09-26-phase-2-push-over-rest.md` | Phase 2 — what the paused push has to restore, the seams ready for it, the questions |
+| Hub adapter for Holisto-IEP v2 (wave 2) | One generic `@mithtech-medusa` hub plugin, modelled on the `erpnext-forward` subscriber, replaces this plugin's transport. No topic file; see `Holisto-IEP/docs/programs/holisto-iep-v2/` |
+
+Parked 2026-11-19: no new features on the direct plugin; review against the Holisto-IEP v2 mapping engine (wave 2). Parked topics: `2026-09-04-pricing-rules-and-mrp.md`, `2026-09-04-variant-attributes.md`, `2026-09-04-inbound-price-path.md`, `2026-09-04-product-images.md`, `2026-09-05-order-payment-status.md`, `2026-09-06-guided-presets-target-readonly-fields.md`, `2026-09-07-field-equivalence-dictionary.md`, `2026-09-07-mapping-studio-parity.md`, `2026-09-14-item-product-field-map.md`. Frozen 2026-11-19: bug fixes and releases already in flight only. Retires after hub parity (Holisto-IEP v2 wave 2).
 
 ## Done
 

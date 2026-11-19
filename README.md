@@ -366,6 +366,8 @@ plugin build drops it silently. `route-folders.spec.ts` guards this.
 Phase 1 (catalogue, ERPNext → Medusa over core Webhooks) is built and
 verified locally against a Frappe 16 bench. See `CHANGELOG.md`.
 
+Frozen 2026-11-19: bug fixes and releases already in flight only. Retires after hub parity (Holisto-IEP v2 wave 2). The 0.7.2 release still goes ahead.
+
 ## Feature flags (optional)
 
 This plugin can read GrowthBook flags through `@mithtech-medusa/growthbook`. That plugin is an optional peer: if it is not installed, every flag is off and nothing else changes. Do not add a second GrowthBook client.

@@ -1,5 +1,7 @@
 # Variant options, barcode, brand — deferred 2026-09-04
 
+Parked 2026-11-19: no new features on the direct plugin; review against the Holisto-IEP v2 mapping engine (wave 2).
+
 **Requirement.** Variants sync ERPNext → Medusa with SKU, name, attributes,
 options, barcode, UOM, weight; images ERPNext → Medusa.
 

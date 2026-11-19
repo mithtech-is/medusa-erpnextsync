@@ -1,5 +1,7 @@
 # Item ↔ Product: what to map
 
+Parked 2026-11-19: no new features on the direct plugin; review against the Holisto-IEP v2 mapping engine (wave 2).
+
 Raised 14 September 2026. **For review — nothing below is built yet** beyond
 the "Mapped now" column.
 
